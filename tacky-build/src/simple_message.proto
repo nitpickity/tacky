@@ -1,0 +1,12 @@
+syntax = "proto2";
+
+package example;
+
+message MySimpleMessage {
+    optional int32 anumber = 1;
+    optional string astring = 2;
+    repeated string manystrings = 3;
+    repeated bytes manybytes = 4;
+    optional bytes abytes = 5;
+    map<int32,string> amap = 6;
+}

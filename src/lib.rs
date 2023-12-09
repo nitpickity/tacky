@@ -1,3 +1,5 @@
+pub mod scalars;
+pub mod tack;
 pub fn add(left: usize, right: usize) -> usize {
     left + right
 }
