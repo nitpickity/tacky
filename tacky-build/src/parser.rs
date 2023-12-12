@@ -214,6 +214,7 @@ mod t {
         m.abytes(&b"hello"[..])
             .anumber(42)
             .manystrings((&map).values())
+            .manystrings(&["this","works"])
             .astring(&*moo);
     }
 }
