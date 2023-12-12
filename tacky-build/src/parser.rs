@@ -171,6 +171,9 @@ fn write_simple_message(w: &mut impl Write, m: &Message) {
     //write struct
     message_def_writer(w, &name).unwrap();
     writeln!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
+    writeln!(w, r#"fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
+        Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}    
+    }}"#).unwrap();
     for f in &m.fields {
         let name = &f.name;
         let number = f.number;
@@ -206,7 +209,7 @@ mod t {
     fn testme() {
         let mut buf = Vec::new();
         let map = HashMap::from([(1, "one".to_string()), (2, "two".to_string())]);
-        let mut m = MySimpleMessageWriter { buffer: &mut buf };
+        let mut m = MySimpleMessageWriter::new(&mut buf, None);
         let moo = Cow::Borrowed("foo");
         m.abytes(&b"hello"[..])
             .anumber(42)

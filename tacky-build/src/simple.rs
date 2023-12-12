@@ -9,7 +9,7 @@ pub fn message_def_writer(w: &mut impl Write, name: &str) -> std::fmt::Result {
     writeln!(
         w,
         r#"pub struct {name}Writer<'buf> {{
-    buffer: &'buf mut Vec<u8>,
+    tack: ::tacky::tack::Tack<'buf>,
         }}"#
     )
 }
@@ -29,8 +29,8 @@ pub fn simple_field_writer(
     writeln!(
         w,
         r#"pub fn {field_name}(&mut self, {field_name}: {rust_type}) -> &mut Self {{
-        ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-        {write_fn}({field_name}, &mut self.buffer);
+        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+        {write_fn}({field_name}, &mut self.tack.buffer);
         self
     }}"#
     )
@@ -58,8 +58,8 @@ pub fn simple_field_writer_label(
                     w,
                     r#"pub fn {field_name}<'opt>(&mut self, {field_name}: impl Into<Option<&'opt {rust_type}>>) -> &mut Self {{
                         if let Some(value) = {field_name}.into() {{
-                            ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-                            {write_fn}(value, &mut self.buffer);
+                            ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                            {write_fn}(value, &mut self.tack.buffer);
                         }}
                     self
                 }}"#
@@ -70,8 +70,8 @@ pub fn simple_field_writer_label(
                     w,
                     r#"pub fn {field_name}(&mut self, {field_name}: impl Into<Option<{rust_type}>>) -> &mut Self {{
                     if let Some(value) = {field_name}.into() {{
-                        ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-                        {write_fn}(value, &mut self.buffer);
+                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                        {write_fn}(value, &mut self.tack.buffer);
                     }}
                 self
             }}"#
@@ -87,8 +87,8 @@ pub fn simple_field_writer_label(
                     r#"pub fn {field_name}<T: AsRef<{rust_type}>>(&mut self, {field_name}: impl IntoIterator<Item = T>) -> &mut Self {{    
                     for value in {field_name} {{    
                         let value = value.as_ref();
-                        ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-                        {write_fn}(value, &mut self.buffer);
+                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                        {write_fn}(value, &mut self.tack.buffer);
                     }}
                 self
             }}"#
@@ -99,8 +99,8 @@ pub fn simple_field_writer_label(
                     w,
                     r#"pub fn {field_name}<'rep>(&mut self, {field_name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{    
                     for value in {field_name} {{
-                        ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-                        {write_fn}(value, &mut self.buffer);
+                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                        {write_fn}(value, &mut self.tack.buffer);
                     }}
                 self
             }}"#
@@ -111,8 +111,8 @@ pub fn simple_field_writer_label(
             writeln!(
                 w,
                 r#"pub fn {field_name}(&mut self, {field_name}: {rust_type}) -> &mut Self {{
-                ::tacky::scalars::write_varint({tag}, &mut self.buffer);
-                {write_fn}({field_name}, &mut self.buffer);
+                ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                {write_fn}({field_name}, &mut self.tack.buffer);
                 self
             }}"#
             )

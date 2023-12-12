@@ -3,8 +3,8 @@ use bytes::BufMut;
 use crate::scalars;
 
 pub struct Tack<'b> {
-    buffer: &'b mut Vec<u8>,
-    tag: Option<u32>,
+    pub buffer: &'b mut Vec<u8>,
+    pub tag: Option<u32>,
     start: u32,
 }
 
