@@ -117,7 +117,7 @@ impl Scalar {
 #[derive(Debug)]
 pub enum PbType {
     Scalar(Scalar),
-    Enum(String),    //name
+    Enum(String),    // by name, type is technically just an i32
     Message(String), //name
     Map(Box<PbType>, Box<PbType>),
 }
@@ -131,16 +131,13 @@ impl From<FieldType> for PbType {
             FieldType::Sint32 => PbType::Scalar(Scalar::Sint32),
             FieldType::Sint64 => PbType::Scalar(Scalar::Sint64),
             FieldType::Bool => PbType::Scalar(Scalar::Bool),
-            FieldType::Enum(_) => todo!(),
             FieldType::Fixed64 => PbType::Scalar(Scalar::Fixed64),
             FieldType::Sfixed64 => PbType::Scalar(Scalar::Sfixed64),
             FieldType::Double => PbType::Scalar(Scalar::Double),
-            FieldType::StringCow => PbType::Scalar(Scalar::String),
-            FieldType::BytesCow => PbType::Scalar(Scalar::Bytes),
+            FieldType::StringCow => PbType::Scalar(Scalar::String), //redundant from using pb-rs to parse..
+            FieldType::BytesCow => PbType::Scalar(Scalar::Bytes), //redundant from using pb-rs to parse..
             FieldType::String_ => PbType::Scalar(Scalar::String),
             FieldType::Bytes_ => PbType::Scalar(Scalar::Bytes),
-            FieldType::Message(_) => todo!(),
-            FieldType::MessageOrEnum(_) => todo!(),
             FieldType::Fixed32 => PbType::Scalar(Scalar::Fixed32),
             FieldType::Sfixed32 => PbType::Scalar(Scalar::Sfixed32),
             FieldType::Float => PbType::Scalar(Scalar::Float),
@@ -149,6 +146,9 @@ impl From<FieldType> for PbType {
                 let v = *v;
                 PbType::Map(Box::new((k).into()), Box::new(v.into()))
             }
+            FieldType::MessageOrEnum(_) => todo!(),
+            FieldType::Message(_) => todo!(),
+            FieldType::Enum(_) => todo!(), //technically int32 according to spec
         }
     }
 }
@@ -171,9 +171,13 @@ fn write_simple_message(w: &mut impl Write, m: &Message) {
     //write struct
     message_def_writer(w, &name).unwrap();
     writeln!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
-    writeln!(w, r#"fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
+    writeln!(
+        w,
+        r#"fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
         Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}    
-    }}"#).unwrap();
+    }}"#
+    )
+    .unwrap();
     for f in &m.fields {
         let name = &f.name;
         let number = f.number;
@@ -214,7 +218,7 @@ mod t {
         m.abytes(&b"hello"[..])
             .anumber(42)
             .manystrings((&map).values())
-            .manystrings(&["this","works"])
+            .manystrings(&["this", "works"])
             .astring(&*moo);
     }
 }

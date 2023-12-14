@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fmt::Write};
+use std::{collections::{HashSet, HashMap}, fmt::Write};
 
 use pb_rs::types::Frequency;
 
@@ -120,26 +120,50 @@ pub fn simple_field_writer_label(
     }
 }
 
-// generate writing methods for a map whose key-values are simple scalar
+/// generate writing methods for a map whose key-values are simple scalar
+/// map is exactly a "repeated" of
+/// message MapEntry {
+///     optional key_type key = 1;
+///     optional val type val = 2;
+/// }
 pub fn simple_map_writer(
     w: &mut impl Write,
     field_name: &str,
     pb_type: &PbType,
     field_number: u32,
 ) -> std::fmt::Result {
-    let tag = pb_type.tag(field_number);
-    let (key_type, val_type) = match pb_type {
-        PbType::Map(k, v) => match (k.as_ref(), v.as_ref()) {
-            (PbType::Scalar(ref k), PbType::Scalar(v)) => (k.rust_type(), v.rust_type()),
-            _ => panic!(),
-        },
-        _ => panic!(),
+    let PbType::Map(k, v) = pb_type else { panic!() };
+    let (PbType::Scalar(k), PbType::Scalar(v)) = (k.as_ref(), v.as_ref()) else {
+        panic!()
     };
+
+    let tag = pb_type.tag(field_number);
+    let key_tag = (1 << 3) | k.wire_type();
+    let key_write_fn = format!("::tacky::scalars::write_{}", k.as_str());
+    let key_len_fn = format!("::tacky::scalars::len_of_{}", k.as_str());
+    let val_tag = (2 << 3) | v.wire_type();
+    let val_write_fn = format!("::tacky::scalars::write_{}", v.as_str());
+    let val_len_fn = format!("::tacky::scalars::len_of_{}", v.as_str());
+    let (key_type, val_type) = (k.rust_type_no_ref(), v.rust_type_no_ref());
 
     writeln!(
         w,
-        r#"pub fn {field_name}(&mut self, (key,value): ({key_type},{val_type})) -> &mut Self {{
-            todo!()
+        r#"pub fn {field_name}<'rep>(&mut self, entries: impl IntoIterator<Item =({key_type},{val_type}>)) -> &mut Self {{
+            for (key, value) in entries {{
+                //calc message length
+                let len = 2 + {key_len_fn}(key) + {val_len_fn}(value);
+                ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+                //write message len
+                ::tacky::scalars::write_varint(len as u64, &mut self.tack.buffer);
+                //write key
+                ::tacky::scalars::write_varint({key_tag}, &mut self.tack.buffer);
+                {key_write_fn}(key, &mut self.tack.buffer);
+
+                //write value
+                ::tacky::scalars::write_varint({val_tag}, &mut self.tack.buffer);
+                {val_write_fn}(value, &mut self.tack.buffer);
+            }}
+
     }}"#
     )
 }
@@ -173,6 +197,7 @@ fn simple_enum_writer(
 ) -> std::fmt::Result {
     todo!()
 }
+
 
 #[test]
 fn it_works() {
