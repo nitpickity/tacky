@@ -1,8 +1,12 @@
-use std::{collections::{HashSet, HashMap}, fmt::Write};
+use core::num;
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write,
+};
 
 use pb_rs::types::Frequency;
 
-use crate::parser::{self, PbType, Scalar};
+use crate::parser::{self, Field, Label, PbType, Scalar};
 
 pub fn message_def_writer(w: &mut impl Write, name: &str) -> std::fmt::Result {
     //write struct
@@ -37,55 +41,54 @@ pub fn simple_field_writer(
 }
 
 // generate writing methods for simple scalar fields
-pub fn simple_field_writer_label(
-    w: &mut impl Write,
-    field_name: &str,
-    label: Frequency,
-    pb_type: &PbType,
-    field_number: u32,
-) -> std::fmt::Result {
-    let tag = pb_type.tag(field_number);
-    let PbType::Scalar(pb_type) = pb_type else {
+pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::Result {
+    let Field {
+        name,
+        number,
+        ty,
+        label,
+    } = field;
+    let tag = ty.tag(number as u32);
+    let PbType::Scalar(pb_type) = ty else {
         panic!()
     };
     let rust_type = pb_type.rust_type();
-    let write_fn = format!("::tacky::scalars::write_{}", pb_type.as_str());
+    let write_fn = format!("::tacky::scalars::write_{pb_type}");
+    let common_body = format!(
+        r#"if let Some(value) = {name}.into() {{
+    ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
+    ::tacky::scalars::write_{pb_type}(value, &mut self.tack.buffer);
+     }}
+    self"#
+    );
     match label {
-        Frequency::Optional => match pb_type {
+        Label::Optional => match pb_type {
             Scalar::String | Scalar::Bytes => {
                 let rust_type = pb_type.rust_type_no_ref();
                 writeln!(
                     w,
-                    r#"pub fn {field_name}<'opt>(&mut self, {field_name}: impl Into<Option<&'opt {rust_type}>>) -> &mut Self {{
-                        if let Some(value) = {field_name}.into() {{
-                            ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                            {write_fn}(value, &mut self.tack.buffer);
-                        }}
-                    self
-                }}"#
+                    r#"pub fn {name}<'opt>(&mut self, {name}: impl Into<Option<&'opt {rust_type}>>) -> &mut Self {{
+                        {common_body}
+                    }}"#
                 )
             }
             _ => {
                 writeln!(
                     w,
-                    r#"pub fn {field_name}(&mut self, {field_name}: impl Into<Option<{rust_type}>>) -> &mut Self {{
-                    if let Some(value) = {field_name}.into() {{
-                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                        {write_fn}(value, &mut self.tack.buffer);
-                    }}
-                self
-            }}"#
+                    r#"pub fn {name}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> &mut Self {{
+              {common_body}
+                                }}"#
                 )
             }
         },
 
-        Frequency::Repeated => match pb_type {
+        Label::Repeated => match pb_type {
             Scalar::String | Scalar::Bytes => {
                 let rust_type = pb_type.rust_type_no_ref();
                 writeln!(
                     w,
-                    r#"pub fn {field_name}<T: AsRef<{rust_type}>>(&mut self, {field_name}: impl IntoIterator<Item = T>) -> &mut Self {{    
-                    for value in {field_name} {{    
+                    r#"pub fn {name}<T: AsRef<{rust_type}>>(&mut self, {name}: impl IntoIterator<Item = T>) -> &mut Self {{    
+                    for value in {name} {{    
                         let value = value.as_ref();
                         ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
                         {write_fn}(value, &mut self.tack.buffer);
@@ -97,8 +100,8 @@ pub fn simple_field_writer_label(
             _ => {
                 writeln!(
                     w,
-                    r#"pub fn {field_name}<'rep>(&mut self, {field_name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{    
-                    for value in {field_name} {{
+                    r#"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{    
+                    for value in {name} {{
                         ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
                         {write_fn}(value, &mut self.tack.buffer);
                     }}
@@ -107,14 +110,28 @@ pub fn simple_field_writer_label(
                 )
             }
         },
-        Frequency::Required => {
+        Label::Required => {
             writeln!(
                 w,
-                r#"pub fn {field_name}(&mut self, {field_name}: {rust_type}) -> &mut Self {{
+                r#"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{
                 ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                {write_fn}({field_name}, &mut self.tack.buffer);
+                {write_fn}({name}, &mut self.tack.buffer);
                 self
             }}"#
+            )
+        }
+        Label::Packed => {
+            // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little space bit skip iterating twice.
+            let tag = (number << 3) | 2; // wire type 2, length delimited
+            writeln!(
+                w,
+                r#"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{
+                let tack = ::tacky::tack::Tack::new(self.tack.buffer, Some({tag}));
+                for value in {name} {{
+                    {write_fn}(*value, tack.buffer);
+                }}
+            self
+        }}"#
             )
         }
     }
@@ -126,44 +143,45 @@ pub fn simple_field_writer_label(
 ///     optional key_type key = 1;
 ///     optional val type val = 2;
 /// }
-pub fn simple_map_writer(
-    w: &mut impl Write,
-    field_name: &str,
-    pb_type: &PbType,
-    field_number: u32,
-) -> std::fmt::Result {
-    let PbType::Map(k, v) = pb_type else { panic!() };
+pub fn simple_map_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
+    let Field {
+        name,
+        number,
+        ty,
+        label: _,
+    } = field;
+    let PbType::Map(k, v) = &ty else { panic!() };
     let (PbType::Scalar(k), PbType::Scalar(v)) = (k.as_ref(), v.as_ref()) else {
         panic!()
     };
 
-    let tag = pb_type.tag(field_number);
+    let tag = ty.tag(number as u32);
     let key_tag = (1 << 3) | k.wire_type();
-    let key_write_fn = format!("::tacky::scalars::write_{}", k.as_str());
-    let key_len_fn = format!("::tacky::scalars::len_of_{}", k.as_str());
+    let key_write_fn = format!("::tacky::scalars::write_{k}");
+    let key_len_fn = format!("::tacky::scalars::len_of_{k}");
     let val_tag = (2 << 3) | v.wire_type();
-    let val_write_fn = format!("::tacky::scalars::write_{}", v.as_str());
-    let val_len_fn = format!("::tacky::scalars::len_of_{}", v.as_str());
+    let val_write_fn = format!("::tacky::scalars::write_{v}");
+    let val_len_fn = format!("::tacky::scalars::len_of_{v}");
     let (key_type, val_type) = (k.rust_type_no_ref(), v.rust_type_no_ref());
 
     writeln!(
         w,
-        r#"pub fn {field_name}<'rep>(&mut self, entries: impl IntoIterator<Item =({key_type},{val_type}>)) -> &mut Self {{
+        r#"pub fn {name}<'rep>(&mut self, entries: impl IntoIterator<Item =(&'rep {key_type},&'rep {val_type})>) -> &mut Self {{
             for (key, value) in entries {{
                 //calc message length
-                let len = 2 + {key_len_fn}(key) + {val_len_fn}(value);
+                let len = 2 + {key_len_fn}(*key) + {val_len_fn}(value);
                 ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
                 //write message len
                 ::tacky::scalars::write_varint(len as u64, &mut self.tack.buffer);
                 //write key
                 ::tacky::scalars::write_varint({key_tag}, &mut self.tack.buffer);
-                {key_write_fn}(key, &mut self.tack.buffer);
+                {key_write_fn}(*key, &mut self.tack.buffer);
 
                 //write value
                 ::tacky::scalars::write_varint({val_tag}, &mut self.tack.buffer);
                 {val_write_fn}(value, &mut self.tack.buffer);
             }}
-
+            self
     }}"#
     )
 }
@@ -197,7 +215,6 @@ fn simple_enum_writer(
 ) -> std::fmt::Result {
     todo!()
 }
-
 
 #[test]
 fn it_works() {

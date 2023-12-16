@@ -5,9 +5,7 @@ use std::{fmt::Write, io::Write as ioWrite};
 
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
-use crate::simple::{
-    message_def_writer, simple_field_writer, simple_field_writer_label, simple_map_writer,
-};
+use crate::simple::{message_def_writer, simple_field_writer_label, simple_map_writer};
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
@@ -82,21 +80,9 @@ impl Scalar {
     }
     pub const fn rust_type_no_ref(&self) -> &str {
         match self {
-            Scalar::Int32 => "i32",
-            Scalar::Sint32 => "i32",
-            Scalar::Int64 => "i64",
-            Scalar::Sint64 => "i64",
-            Scalar::Uint32 => "u32",
-            Scalar::Uint64 => "u64",
-            Scalar::Bool => "bool",
-            Scalar::Fixed32 => "u32",
-            Scalar::Sfixed32 => "i32",
-            Scalar::Float => "f32",
-            Scalar::Fixed64 => "u64",
-            Scalar::Sfixed64 => "i64",
-            Scalar::Double => "f64",
             Scalar::String => "str",
             Scalar::Bytes => "[u8]",
+            _ => self.rust_type(),
         }
     }
     pub const fn wire_type(&self) -> u32 {
@@ -112,6 +98,11 @@ impl Scalar {
             Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => 1,
             Scalar::String | Scalar::Bytes => 2,
         }
+    }
+}
+impl std::fmt::Display for Scalar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 #[derive(Debug)]
@@ -165,7 +156,51 @@ impl PbType {
     }
 }
 
-fn write_simple_message(w: &mut impl Write, m: &Message) {
+impl std::fmt::Display for PbType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PbType::Scalar(s) => f.write_str(s.as_str()),
+            PbType::Enum(_) => todo!(),
+            PbType::Message(_) => todo!(),
+            PbType::Map(_, _) => todo!(),
+        }
+    }
+}
+
+pub enum Label {
+    Required,
+    Optional,
+    Repeated,
+    Packed,
+}
+
+pub struct Field {
+    pub name: String,
+    pub number: i32,
+    pub ty: PbType,
+    pub label: Label,
+}
+
+impl From<pb_rs::types::Field> for Field {
+    fn from(value: pb_rs::types::Field) -> Self {
+        let label = if let Some(true) = value.packed {
+            Label::Packed
+        } else {
+            match value.frequency {
+                pb_rs::types::Frequency::Optional => Label::Optional,
+                pb_rs::types::Frequency::Repeated => Label::Repeated,
+                pb_rs::types::Frequency::Required => Label::Required,
+            }
+        };
+        Field {
+            name: value.name,
+            number: value.number,
+            ty: value.typ.into(),
+            label,
+        }
+    }
+}
+fn write_simple_message(w: &mut impl Write, m: Message) {
     let name = &m.name;
     println!("{name}");
     //write struct
@@ -178,17 +213,14 @@ fn write_simple_message(w: &mut impl Write, m: &Message) {
     }}"#
     )
     .unwrap();
-    for f in &m.fields {
-        let name = &f.name;
-        let number = f.number;
-        let label = f.frequency.clone();
-        let ty: PbType = (f.typ.clone()).into();
-        match ty {
+    for f in m.fields {
+        let field: Field = f.into();
+        match field.ty {
             PbType::Map(_, _) => {
-                simple_map_writer(w, &name, &ty, number as u32).unwrap();
+                simple_map_writer(w, field).unwrap();
             }
             PbType::Scalar(_) => {
-                simple_field_writer_label(w, &name, label, &ty, number as u32).unwrap();
+                simple_field_writer_label(w, field).unwrap();
             }
             _ => todo!(),
         }
@@ -197,12 +229,13 @@ fn write_simple_message(w: &mut impl Write, m: &Message) {
 }
 #[test]
 fn test_read() {
+
     let mut files = read_proto_file("src/simple_message.proto", ".");
     let test_file = files.pop().unwrap();
-    let simple = &test_file.messages[0];
+    let simple = test_file.messages[0].clone();
     let mut file = std::fs::File::create("simple_output.rs").unwrap();
     let mut buf = String::new();
-    write_simple_message(&mut buf, &simple);
+    write_simple_message(&mut buf, simple);
     file.write_all(buf.as_bytes()).unwrap();
 }
 
