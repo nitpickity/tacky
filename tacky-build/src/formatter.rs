@@ -1,4 +1,3 @@
-use std::fmt::Write;
 
 pub struct Fmter<'f> {
     pub leading_spaces: String, //ugly, better ways to do it..

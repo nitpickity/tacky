@@ -226,13 +226,20 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
 pub fn write_proto(file: &str, output: &str) {
     let mut files = read_proto_file(file, ".");
     let test_file = files.pop().unwrap();
-    let simple = test_file.messages[0].clone();
-    let mut file = std::fs::File::create(output).unwrap();
     let mut buf = String::new();
     let mut fmter = Fmter::new(&mut buf);
-    write_simple_message(&mut fmter, simple);
+    let mod_name = test_file.package;
+    indented!(fmter,"pub mod {mod_name} {{").unwrap();
+    fmter.indent();
+    for m in test_file.messages {
+        write_simple_message(&mut fmter, m);
+    }
+    fmter.unindent();
+    indented!(fmter,"}}").unwrap();
+    let mut file = std::fs::File::create(output).unwrap();
     file.write_all(buf.as_bytes()).unwrap();
 }
+
 #[test]
 fn test_read() {
     let mut files = read_proto_file("src/simple_message.proto", ".");

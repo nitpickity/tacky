@@ -12,7 +12,7 @@ mod tests {
     use prost::Message;
 
     use crate::prost_proto::MySimpleMessage;
-    use crate::tacky_proto::MySimpleMessageWriter;
+    use crate::tacky_proto::example::MySimpleMessageWriter;
 
     #[test]
     fn it_works() {
