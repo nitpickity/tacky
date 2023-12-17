@@ -55,14 +55,13 @@ mod tests {
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
         //prost can decode what tacky encodes
         assert_eq!(unpacked, m);
-        
     }
 
     #[test]
     fn basic_bench() {
-        // run with cargo test --release --package testing --lib -- tests::basic_bench --exact --nocapture 
+        // run with cargo test --release --package testing --lib -- tests::basic_bench --exact --nocapture
         // to show this beats prost by a lot for packed varints :)
-        
+
         let data = (0..1_000_000).collect::<Vec<i32>>();
         {
             let prost_message = MySimpleMessage {
@@ -83,8 +82,6 @@ mod tests {
             let t1 = t0.elapsed().as_micros();
             drop(w);
             println!("tacky took: {t1}, len: {}", buf.len())
-
         }
-
     }
 }
