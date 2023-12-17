@@ -74,7 +74,7 @@ pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::
                     r#"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{    
                     for value in {name} {{
                         ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                        {write_fn}(value, &mut self.tack.buffer);
+                        {write_fn}(*value, &mut self.tack.buffer);
                     }}
                 self
             }}"#

@@ -29,6 +29,7 @@ mod tests {
         let m = MySimpleMessage {
             anumber: anumber.clone(),
             manynumbers: manynumbers.clone(),
+            manynumbers_unpacked: manynumbers.clone(),
             astring: astring.clone(),
             manystrings: manystrings.clone(),
             manybytes: manybytes.clone(),
@@ -43,6 +44,7 @@ mod tests {
             writer
                 .anumber(anumber)
                 .manynumbers(&manynumbers)
+                .manynumbers_unpacked(&manynumbers)
                 .astring(astring.as_deref())
                 .manystrings(&manystrings)
                 .manybytes(&manybytes)
@@ -54,5 +56,35 @@ mod tests {
         //prost can decode what tacky encodes
         assert_eq!(unpacked, m);
         
+    }
+
+    #[test]
+    fn basic_bench() {
+        // run with cargo test --release --package testing --lib -- tests::basic_bench --exact --nocapture 
+        // to show this beats prost by a lot for packed varints :)
+        
+        let data = (0..1_000_000).collect::<Vec<i32>>();
+        {
+            let prost_message = MySimpleMessage {
+                manynumbers: data.clone(),
+                ..Default::default()
+            };
+            let t0 = std::time::Instant::now();
+            let encoded = prost_message.encode_to_vec();
+            let t1 = t0.elapsed().as_micros();
+            println!("prost took: {t1}, len: {}", encoded.len())
+        }
+
+        {
+            let mut buf = Vec::with_capacity(4_000_000);
+            let mut w = MySimpleMessageWriter::new(&mut buf, None);
+            let t0 = std::time::Instant::now();
+            w.manynumbers(&data);
+            let t1 = t0.elapsed().as_micros();
+            drop(w);
+            println!("tacky took: {t1}, len: {}", buf.len())
+
+        }
+
     }
 }
