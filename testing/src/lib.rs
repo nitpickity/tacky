@@ -24,6 +24,8 @@ mod tests {
         let manybytes = Vec::new();
         let abytes = Vec::new();
         let amap = HashMap::new();
+
+        // needs to clone everything
         let m = MySimpleMessage {
             anumber: anumber.clone(),
             manynumbers: manynumbers.clone(),
@@ -36,6 +38,7 @@ mod tests {
 
         let mut buf = Vec::new();
         {
+            //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
             writer
                 .anumber(anumber)
@@ -48,7 +51,8 @@ mod tests {
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
+        //prost can decode what tacky encodes
         assert_eq!(unpacked, m);
-        // println!("{unpacked:#?}");
+        
     }
 }
