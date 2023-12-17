@@ -208,7 +208,7 @@ fn write_simple_message(w: &mut impl Write, m: Message) {
     writeln!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     writeln!(
         w,
-        r#"fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
+        r#"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
         Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}    
     }}"#
     )
@@ -227,9 +227,18 @@ fn write_simple_message(w: &mut impl Write, m: Message) {
     }
     writeln!(w, "}}").unwrap();
 }
+
+pub fn write_proto(file: &str, output: &str) {
+    let mut files = read_proto_file(file, ".");
+    let test_file = files.pop().unwrap();
+    let simple = test_file.messages[0].clone();
+    let mut file = std::fs::File::create(output).unwrap();
+    let mut buf = String::new();
+    write_simple_message(&mut buf, simple);
+    file.write_all(buf.as_bytes()).unwrap();
+}
 #[test]
 fn test_read() {
-
     let mut files = read_proto_file("src/simple_message.proto", ".");
     let test_file = files.pop().unwrap();
     let simple = test_file.messages[0].clone();

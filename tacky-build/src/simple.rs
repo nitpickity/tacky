@@ -1,10 +1,4 @@
-use core::num;
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Write,
-};
-
-use pb_rs::types::Frequency;
+use std::fmt::Write;
 
 use crate::parser::{self, Field, Label, PbType, Scalar};
 
@@ -17,29 +11,6 @@ pub fn message_def_writer(w: &mut impl Write, name: &str) -> std::fmt::Result {
         }}"#
     )
 }
-// generate writing methods for simple scalar fields
-pub fn simple_field_writer(
-    w: &mut impl Write,
-    field_name: &str,
-    pb_type: &PbType,
-    field_number: u32,
-) -> std::fmt::Result {
-    let tag = pb_type.tag(field_number);
-    let PbType::Scalar(pb_type) = pb_type else {
-        panic!()
-    };
-    let rust_type = pb_type.rust_type();
-    let write_fn = format!("::tacky::scalars::write_{}", pb_type.as_str());
-    writeln!(
-        w,
-        r#"pub fn {field_name}(&mut self, {field_name}: {rust_type}) -> &mut Self {{
-        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-        {write_fn}({field_name}, &mut self.tack.buffer);
-        self
-    }}"#
-    )
-}
-
 // generate writing methods for simple scalar fields
 pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::Result {
     let Field {
@@ -130,6 +101,7 @@ pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::
                 for value in {name} {{
                     {write_fn}(*value, tack.buffer);
                 }}
+                drop(tack);
             self
         }}"#
             )
@@ -197,7 +169,13 @@ fn simple_message_writer(
         PbType::Message(m) => m,
         _ => panic!(),
     };
-
+    // due to the inremental nature of this lib, its impossible to actually hold an iterator/collection of message writers,
+    // so there isnt any syntactic helper for repeated (nested) message type, the user of the lib just has to hoist the write loop outside
+    // for i in 0..10 {
+    //   m.write_nested(|w| {
+    //     w.write_field(i);
+    //})
+    //}
     writeln!(
         w,
         r#"fn write_{field_name}(&mut self, mut {field_name}: impl FnMut({ty})) {{
@@ -207,18 +185,14 @@ fn simple_message_writer(
 }
 
 //genrate ate writing method for enum-type fields
-fn simple_enum_writer(
-    w: &mut impl Write,
-    field_name: &str,
-    pb_type: &str,
-    field_number: u32,
-) -> std::fmt::Result {
+// enums are just i32s, so we take anything thats Into<i32>.
+fn simple_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
     todo!()
 }
 
 #[test]
 fn it_works() {
     let mut buff = String::new();
-    simple_field_writer(&mut buff, "field_name", &PbType::Scalar(Scalar::Sint32), 4).unwrap();
+    // simple_field_writer(&mut buff, "field_name", &PbType::Scalar(Scalar::Sint32), 4).unwrap();
     println! {"{buff}"}
 }
