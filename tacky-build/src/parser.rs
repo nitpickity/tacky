@@ -1,15 +1,15 @@
 //! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps an (a la prost)
 //! and dont i dont to write my own (yet).
 
-use std::{fmt::Write, io::Write as ioWrite};
+use std::io::Write;
 
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
-use crate::{simple::{message_def_writer, simple_field_writer_label, simple_map_writer}, formatter::Fmter};
+use crate::{simple::{message_def_writer, simple_field_writer, simple_map_writer}, formatter::Fmter};
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
-    let cfg = cfg.dont_use_cow(true).build();
+    let cfg = cfg.build();
     let mut out = Vec::new();
     for cfg in cfg {
         let file = pb_rs::types::FileDescriptor::read_proto(&cfg.in_file, &cfg.import_search_path)
@@ -214,7 +214,7 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
                 simple_map_writer(w, field).unwrap();
             }
             PbType::Scalar(_) => {
-                simple_field_writer_label(w, field).unwrap();
+                simple_field_writer(w, field).unwrap();
             }
             _ => todo!(),
         }
@@ -238,33 +238,4 @@ pub fn write_proto(file: &str, output: &str) {
     indented!(fmter,"}}").unwrap();
     let mut file = std::fs::File::create(output).unwrap();
     file.write_all(buf.as_bytes()).unwrap();
-}
-
-#[test]
-fn test_read() {
-    let mut files = read_proto_file("src/simple_message.proto", ".");
-    let test_file = files.pop().unwrap();
-    let simple = test_file.messages[0].clone();
-    let mut file = std::fs::File::create("simple_output.rs").unwrap();
-    let mut buf = String::new();
-    let mut fmter = Fmter::new(&mut buf);
-    write_simple_message(&mut fmter, simple);
-    file.write_all(buf.as_bytes()).unwrap();
-}
-
-mod t {
-    use std::{borrow::Cow, collections::HashMap};
-    include!("../simple_output.rs");
-    #[test]
-    fn testme() {
-        let mut buf = Vec::new();
-        let map = HashMap::from([(1, "one".to_string()), (2, "two".to_string())]);
-        let mut m = MySimpleMessageWriter::new(&mut buf, None);
-        let moo = Cow::Borrowed("foo");
-        m.abytes(&b"hello"[..])
-            .anumber(42)
-            .manystrings((&map).values())
-            .manystrings(&["this", "works"])
-            .astring(&*moo);
-    }
 }

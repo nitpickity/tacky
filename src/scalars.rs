@@ -11,6 +11,7 @@ pub fn write_varint(mut value: u64, buf: &mut impl BufMut) {
         }
     }
 }
+
 #[inline]
 pub const fn encoded_len_varint(value: u64) -> usize {
     // Based on [VarintSize64][1].

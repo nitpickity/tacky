@@ -18,7 +18,7 @@ pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     indented!(w)
 }
 // generate writing methods for simple scalar fields
-pub fn simple_field_writer_label(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
+pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
         number,
@@ -171,11 +171,4 @@ r#"fn write_{field_name}(&mut self, mut {field_name}: impl FnMut({ty})) {{
 // enums are just i32s, so we take anything thats Into<i32>.
 fn simple_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
     todo!()
-}
-
-#[test]
-fn it_works() {
-    let mut buff = String::new();
-    // simple_field_writer(&mut buff, "field_name", &PbType::Scalar(Scalar::Sint32), 4).unwrap();
-    println! {"{buff}"}
 }
