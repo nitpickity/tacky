@@ -38,17 +38,17 @@ mod tests {
         {
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
             writer
-            .anumber(anumber)
-            .manynumbers(&manynumbers)
-            .astring(astring.as_deref())
-            .manystrings(&manystrings)
-            .manybytes(&manybytes).abytes(Some(&*abytes))
-            .amap(amap.iter().map(|(a,b)| (a,b.as_str()) ));
-
+                .anumber(anumber)
+                .manynumbers(&manynumbers)
+                .astring(astring.as_deref())
+                .manystrings(&manystrings)
+                .manybytes(&manybytes)
+                .abytes(Some(&*abytes))
+                .amap(amap.iter().map(|(a, b)| (a, b.as_str())));
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
-        assert_eq!(unpacked,m);
+        assert_eq!(unpacked, m);
         // println!("{unpacked:#?}");
     }
 }
