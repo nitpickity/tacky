@@ -68,10 +68,11 @@ mod tests {
                 manynumbers: data.clone(),
                 ..Default::default()
             };
+            let mut buf = Vec::with_capacity(4_000_000);
             let t0 = std::time::Instant::now();
-            let encoded = prost_message.encode_to_vec();
+            let _encoded = prost_message.encode(&mut buf);
             let t1 = t0.elapsed().as_micros();
-            println!("prost took: {t1}, len: {}", encoded.len())
+            println!("prost took: {t1}, len: {}", buf.len())
         }
 
         {

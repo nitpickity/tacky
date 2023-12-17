@@ -1,5 +1,4 @@
-use pb_rs::types::{FileDescriptor, Message};
-
+#[macro_use]
 mod formatter;
 mod parser;
 mod simple;

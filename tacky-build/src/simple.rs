@@ -1,18 +1,24 @@
 use std::fmt::Write;
 
-use crate::parser::{self, Field, Label, PbType, Scalar};
+use crate::{parser::{Field, Label, PbType, Scalar}, formatter::Fmter};
 
-pub fn message_def_writer(w: &mut impl Write, name: &str) -> std::fmt::Result {
+pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     //write struct
-    writeln!(
-        w,
-        r#"pub struct {name}Writer<'buf> {{
-    tack: ::tacky::tack::Tack<'buf>,
-        }}"#
-    )
+    indented!(w, r"pub struct {name}Writer<'buf> {{")?;
+    indented!(w, r"   tack: ::tacky::tack::Tack<'buf>")?;
+    indented!(w, r"}}")?;
+    indented!(w)?;
+    indented!(w, r"impl<'buf> {name}Writer<'buf> {{")?;
+    w.indent();
+    indented!(w, r"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{")?;
+    indented!(w, r"    Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}")?;
+    indented!(w, r"}}")?;
+    w.unindent();
+    indented!(w, r"}}")?;
+    indented!(w)
 }
 // generate writing methods for simple scalar fields
-pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::Result {
+pub fn simple_field_writer_label(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
         number,
@@ -25,86 +31,70 @@ pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::
     };
     let rust_type = pb_type.rust_type();
     let write_fn = format!("::tacky::scalars::write_{pb_type}");
-    let common_body = format!(
-        r#"if let Some(value) = {name}.into() {{
-    ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-    ::tacky::scalars::write_{pb_type}(value, &mut self.tack.buffer);
-     }}
-    self"#
-    );
+    
     match label {
         Label::Optional => match pb_type {
             Scalar::String | Scalar::Bytes => {
                 let rust_type = pb_type.rust_type_no_ref();
-                writeln!(
-                    w,
-                    r#"pub fn {name}<'opt>(&mut self, {name}: impl Into<Option<&'opt {rust_type}>>) -> &mut Self {{
-                        {common_body}
-                    }}"#
-                )
+                indented!(w, r"pub fn {name}<'opt>(&mut self, {name}: impl Into<Option<&'opt {rust_type}>>) -> &mut Self {{")?;
+                indented!(w, r"    if let Some(value) = {name}.into() {{")?;
+                indented!(w, r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
+                indented!(w, r"        {write_fn}(value, &mut self.tack.buffer);")?;
+                indented!(w, r"    }}")?;
+                indented!(w, r"    self")?;
+                indented!(w, r"}}")
             }
             _ => {
-                writeln!(
-                    w,
-                    r#"pub fn {name}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> &mut Self {{
-              {common_body}
-                                }}"#
-                )
+                indented!(w, r"pub fn {name}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> &mut Self {{")?;
+                indented!(w, r"    if let Some(value) = {name}.into() {{")?;
+                indented!(w, r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
+                indented!(w, r"        {write_fn}(value, &mut self.tack.buffer);")?;
+                indented!(w, r"    }}")?;
+                indented!(w, r"    self")?;
+                indented!(w, r"}}")
             }
         },
 
         Label::Repeated => match pb_type {
             Scalar::String | Scalar::Bytes => {
                 let rust_type = pb_type.rust_type_no_ref();
-                writeln!(
-                    w,
-                    r#"pub fn {name}<T: AsRef<{rust_type}>>(&mut self, {name}: impl IntoIterator<Item = T>) -> &mut Self {{    
-                    for value in {name} {{    
-                        let value = value.as_ref();
-                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                        {write_fn}(value, &mut self.tack.buffer);
-                    }}
-                self
-            }}"#
-                )
+                indented!(w, r"pub fn {name}<T: AsRef<{rust_type}>>(&mut self, {name}: impl IntoIterator<Item = T>) -> &mut Self {{")?;
+                indented!(w, r"    for value in {name} {{")?;
+                indented!(w, r"        let value = value.as_ref();")?;                       
+                indented!(w, r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?; 
+                indented!(w, r"        {write_fn}(value, &mut self.tack.buffer);")?; 
+                indented!(w, r"    }}")?; 
+                indented!(w, r"    self")?; 
+                indented!(w, r"}}")
             }
             _ => {
-                writeln!(
-                    w,
-                    r#"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{    
-                    for value in {name} {{
-                        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                        {write_fn}(*value, &mut self.tack.buffer);
-                    }}
-                self
-            }}"#
-                )
+                indented!(w, r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{")?;
+                indented!(w, r"    for value in {name} {{")?;
+                indented!(w, r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
+                indented!(w, r"        {write_fn}(*value, &mut self.tack.buffer);")?;
+                indented!(w, r"    }}")?; 
+                indented!(w, r"    self")?; 
+                indented!(w, r"}}")
             }
         },
         Label::Required => {
-            writeln!(
-                w,
-                r#"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{
-                ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                {write_fn}({name}, &mut self.tack.buffer);
-                self
-            }}"#
-            )
+            indented!(w, r"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{")?;
+            indented!(w, r"    ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
+            indented!(w, r"    {write_fn}({name}, &mut self.tack.buffer);")?;
+            indented!(w, r"    self")?; 
+            indented!(w, r"}}")
         }
         Label::Packed => {
             // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little space bit skip iterating twice.
             let tag = (number << 3) | 2; // wire type 2, length delimited
-            writeln!(
-                w,
-                r#"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{
-                let tack = ::tacky::tack::Tack::new(self.tack.buffer, Some({tag}));
-                for value in {name} {{
-                    {write_fn}(*value, tack.buffer);
-                }}
-                drop(tack);
-            self
-        }}"#
-            )
+            indented!(w, r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{")?;
+            indented!(w, r"    let tack = ::tacky::tack::Tack::new(self.tack.buffer, Some({tag}));")?;
+            indented!(w, r"    for value in {name} {{")?;
+            indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
+            indented!(w, r"    }}")?;
+            indented!(w, r"    drop(tack);")?;
+            indented!(w, r"    self")?;
+            indented!(w, r"}}")
         }
     }
 }
@@ -115,7 +105,7 @@ pub fn simple_field_writer_label(w: &mut impl Write, field: Field) -> std::fmt::
 ///     optional key_type key = 1;
 ///     optional val type val = 2;
 /// }
-pub fn simple_map_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
+pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
         number,
@@ -135,28 +125,21 @@ pub fn simple_map_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
     let val_write_fn = format!("::tacky::scalars::write_{v}");
     let val_len_fn = format!("::tacky::scalars::len_of_{v}");
     let (key_type, val_type) = (k.rust_type_no_ref(), v.rust_type_no_ref());
-
-    writeln!(
-        w,
-        r#"pub fn {name}<'rep>(&mut self, entries: impl IntoIterator<Item =(&'rep {key_type},&'rep {val_type})>) -> &mut Self {{
-            for (key, value) in entries {{
-                //calc message length
-                let len = 2 + {key_len_fn}(*key) + {val_len_fn}(value);
-                ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);
-                //write message len
-                ::tacky::scalars::write_varint(len as u64, &mut self.tack.buffer);
-                //write key
-                ::tacky::scalars::write_varint({key_tag}, &mut self.tack.buffer);
-                {key_write_fn}(*key, &mut self.tack.buffer);
-
-                //write value
-                ::tacky::scalars::write_varint({val_tag}, &mut self.tack.buffer);
-                {val_write_fn}(value, &mut self.tack.buffer);
-            }}
-            self
-    }}"#
-    )
+    indented!(w,r"pub fn {name}<'rep>(&mut self, entries: impl IntoIterator<Item =(&'rep {key_type},&'rep {val_type})>) -> &mut Self {{")?;
+    indented!(w,r"    for (key, value) in entries {{")?;
+    indented!(w,r"        let len = 2 + {key_len_fn}(*key) + {val_len_fn}(value);")?;
+    indented!(w,r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
+    indented!(w,r"        ::tacky::scalars::write_varint(len as u64, &mut self.tack.buffer);")?;
+    indented!(w,r"        ::tacky::scalars::write_varint({key_tag}, &mut self.tack.buffer);")?;
+    indented!(w,r"        {key_write_fn}(*key, &mut self.tack.buffer);")?;
+    indented!(w,r"        ::tacky::scalars::write_varint({val_tag}, &mut self.tack.buffer);")?;
+    indented!(w,r"        {val_write_fn}(value, &mut self.tack.buffer);")?;
+    indented!(w,r"    }}")?;
+    indented!(w,r"    self")?;
+    indented!(w,r"}}")
+    
 }
+
 
 // generate writing method for message-type fields
 fn simple_message_writer(
@@ -178,9 +161,9 @@ fn simple_message_writer(
     //}
     writeln!(
         w,
-        r#"fn write_{field_name}(&mut self, mut {field_name}: impl FnMut({ty})) {{
-            
-    }}"#
+r#"fn write_{field_name}(&mut self, mut {field_name}: impl FnMut({ty})) {{
+    todo!()            
+}}"#
     )
 }
 

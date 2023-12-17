@@ -5,7 +5,7 @@ use std::{fmt::Write, io::Write as ioWrite};
 
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
-use crate::simple::{message_def_writer, simple_field_writer_label, simple_map_writer};
+use crate::{simple::{message_def_writer, simple_field_writer_label, simple_map_writer}, formatter::Fmter};
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
@@ -200,19 +200,13 @@ impl From<pb_rs::types::Field> for Field {
         }
     }
 }
-fn write_simple_message(w: &mut impl Write, m: Message) {
+
+fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
     let name = &m.name;
-    println!("{name}");
     //write struct
     message_def_writer(w, &name).unwrap();
-    writeln!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
-    writeln!(
-        w,
-        r#"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{
-        Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}    
-    }}"#
-    )
-    .unwrap();
+    indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
+    w.indent();
     for f in m.fields {
         let field: Field = f.into();
         match field.ty {
@@ -225,7 +219,8 @@ fn write_simple_message(w: &mut impl Write, m: Message) {
             _ => todo!(),
         }
     }
-    writeln!(w, "}}").unwrap();
+    w.unindent();
+    indented!(w, "}}").unwrap();
 }
 
 pub fn write_proto(file: &str, output: &str) {
@@ -234,7 +229,8 @@ pub fn write_proto(file: &str, output: &str) {
     let simple = test_file.messages[0].clone();
     let mut file = std::fs::File::create(output).unwrap();
     let mut buf = String::new();
-    write_simple_message(&mut buf, simple);
+    let mut fmter = Fmter::new(&mut buf);
+    write_simple_message(&mut fmter, simple);
     file.write_all(buf.as_bytes()).unwrap();
 }
 #[test]
@@ -244,7 +240,8 @@ fn test_read() {
     let simple = test_file.messages[0].clone();
     let mut file = std::fs::File::create("simple_output.rs").unwrap();
     let mut buf = String::new();
-    write_simple_message(&mut buf, simple);
+    let mut fmter = Fmter::new(&mut buf);
+    write_simple_message(&mut fmter, simple);
     file.write_all(buf.as_bytes()).unwrap();
 }
 
