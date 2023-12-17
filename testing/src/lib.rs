@@ -41,13 +41,14 @@ mod tests {
             .anumber(anumber)
             .manynumbers(&manynumbers)
             .astring(astring.as_deref())
-            .manystrings(manystrings)
-            .manybytes(manybytes).abytes(Some(&*abytes))
+            .manystrings(&manystrings)
+            .manybytes(&manybytes).abytes(Some(&*abytes))
             .amap(amap.iter().map(|(a,b)| (a,b.as_str()) ));
 
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
-        println!("{unpacked:#?}");
+        assert_eq!(unpacked,m);
+        // println!("{unpacked:#?}");
     }
 }
