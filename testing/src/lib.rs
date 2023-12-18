@@ -11,7 +11,7 @@ mod tests {
 
     use prost::Message;
 
-    use crate::prost_proto::MySimpleMessage;
+    use crate::prost_proto::{MySimpleMessage, NestedMsg};
     use crate::tacky_proto::example::MySimpleMessageWriter;
 
     #[test]
@@ -35,6 +35,10 @@ mod tests {
             manybytes: manybytes.clone(),
             abytes: Some(abytes.clone()),
             amap: amap.clone(),
+            nested: Some(NestedMsg {
+                num: 42,
+                astring: Some("hello nested".into()),
+            }),
         };
 
         let mut buf = Vec::new();
@@ -48,8 +52,10 @@ mod tests {
                 .astring(astring.as_deref())
                 .manystrings(&manystrings)
                 .manybytes(&manybytes)
-                .abytes(Some(&*abytes))
-                .amap(amap.iter().map(|(a, b)| (a, b.as_str())));
+                .abytes(&*abytes)
+                .nested(|mut n| {
+                    n.astring("hello nested").num(42);
+                });
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();

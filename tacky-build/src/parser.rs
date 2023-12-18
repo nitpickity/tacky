@@ -5,7 +5,7 @@ use std::io::Write;
 
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
-use crate::{simple::{message_def_writer, simple_field_writer, simple_map_writer}, formatter::Fmter};
+use crate::{simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer}, formatter::Fmter};
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
@@ -137,7 +137,8 @@ impl From<FieldType> for PbType {
                 let v = *v;
                 PbType::Map(Box::new((k).into()), Box::new(v.into()))
             }
-            FieldType::MessageOrEnum(_) => todo!(),
+            //TODO: resolve correctly to enums/messages. 
+            FieldType::MessageOrEnum(s) =>PbType::Message(s),
             FieldType::Message(_) => todo!(),
             FieldType::Enum(_) => todo!(), //technically int32 according to spec
         }
@@ -215,6 +216,9 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
             }
             PbType::Scalar(_) => {
                 simple_field_writer(w, field).unwrap();
+            }
+            PbType::Message(_) => {
+                simple_message_writer(w, field).unwrap();
             }
             _ => todo!(),
         }

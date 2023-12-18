@@ -12,4 +12,11 @@ message MySimpleMessage {
     repeated bytes manybytes = 4;
     optional bytes abytes = 5;
     map<int32,string> amap = 6;
+    optional NestedMsg nested = 9;
 }
+
+message NestedMsg {
+    required int32 num = 1;
+    optional string astring = 2;
+}
+

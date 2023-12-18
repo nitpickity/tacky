@@ -148,13 +148,13 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
 
 
 // generate writing method for message-type fields
-fn simple_message_writer(
-    w: &mut impl Write,
-    field_name: &str,
-    pb_type: &PbType,
-    field_number: u32,
+pub fn simple_message_writer(
+    w: &mut Fmter,
+    field: Field,
 ) -> std::fmt::Result {
-    let ty = match pb_type {
+    let Field { name, number, ty, label } = field;
+    let tag = ty.tag(number as u32);
+    let ty = match ty {
         PbType::Message(m) => m,
         _ => panic!(),
     };
@@ -165,12 +165,12 @@ fn simple_message_writer(
     //     w.write_field(i);
     //})
     //}
-    writeln!(
-        w,
-r#"fn write_{field_name}(&mut self, mut {field_name}: impl FnMut({ty})) {{
-    todo!()            
-}}"#
-    )
+    indented!(w,r"pub fn {name}(&mut self, mut {name}: impl FnMut({ty}Writer)) -> &mut Self {{ ")?;
+    indented!(w,r"    let writer = {ty}Writer::new(&mut self.tack.buffer,Some({tag}));")?;
+    indented!(w,r"    {name}(writer);")?;
+    indented!(w,r"    self")?;
+    indented!(w,r"}}")
+             
 }
 
 //genrate ate writing method for enum-type fields
