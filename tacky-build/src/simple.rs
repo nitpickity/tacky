@@ -86,13 +86,19 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
         }
         Label::Packed => {
             // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little space bit skip iterating twice.
+            // need to have a check if the iterator is empty first, otherwise we will write the tag\len wrongly.
             let tag = (number << 3) | 2; // wire type 2, length delimited
             indented!(w, r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{")?;
-            indented!(w, r"    let tack = ::tacky::tack::Tack::new(self.tack.buffer, Some({tag}));")?;
-            indented!(w, r"    for value in {name} {{")?;
+            indented!(w, r"    let mut it = {name}.into_iter();")?;
+            indented!(w, r"    let first = it.next();")?; 
+            indented!(w, r"    if let Some(value) = first {{")?;
+            indented!(w, r"        let tack = ::tacky::tack::Tack::new(self.tack.buffer, Some({tag}));")?;
             indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
+            indented!(w, r"        for value in it {{")?;
+            indented!(w, r"            {write_fn}(*value, tack.buffer);")?;
+            indented!(w, r"        }}")?;
+            indented!(w, r"        drop(tack);")?;
             indented!(w, r"    }}")?;
-            indented!(w, r"    drop(tack);")?;
             indented!(w, r"    self")?;
             indented!(w, r"}}")
         }
