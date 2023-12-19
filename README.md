@@ -132,3 +132,15 @@ fn useage() {
 ```
 ## Current limitations
 Currently, imports/includes/nested defs are not handled. that is, all messages must be flat within a file. TODO.
+Deserializing isnt really in scope, unless i find a nice way to do it that fits what this library wants to do
+Would be nice to add a Derive for messages to serialize via Tacky, in case all their fields match. something like
+```rust
+#[derive(ToProto)]
+#[tacky(proto_path = "../data.proto")]
+struct Data {
+    ips: BTreeSet<IpAddr>,
+    paths: BTreeSet<Arc<str>>,
+    timings: Vec<Duration>
+}
+
+```
