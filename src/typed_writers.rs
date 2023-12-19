@@ -1,6 +1,6 @@
 use crate::{scalars::*, tack::Tack};
 use bytes::BufMut;
-use std::{fmt::Display, marker::PhantomData, net::Ipv4Addr};
+use std::{fmt::Display, marker::PhantomData};
 
 pub trait ProtobufScalar {
     type RustType<'a>;
@@ -99,33 +99,6 @@ impl<'b> ScalarWriter<'b, PbString> {
         write!(t.buffer, "{}", d).unwrap();
     }
 }
-impl<'b> std::io::Write for ScalarWriter<'b, PbString> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buf.put_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'b> std::fmt::Write for ScalarWriter<'b, PbString> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.buf.put_slice(s.as_bytes());
-        Ok(())
-    }
-}
-
-impl<'b> std::io::Write for ScalarWriter<'b, PbBytes> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buf.write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
 
 pub struct MapEntryWriter<'b, K, V> {
     buf: &'b mut Vec<u8>,
@@ -150,10 +123,4 @@ impl<'b, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b, K, V> {
         K::write(1, key, self.buf);
         V::write(2, value, self.buf);
     }
-}
-fn wat() {
-    use std::fmt::Write;
-    let mut buf = Vec::new();
-    let mut p = ScalarWriter::<'_, PbString>::new(&mut buf, 42);
-    write!(p, "{}", "127.0.0.1".parse::<Ipv4Addr>().unwrap());
 }
