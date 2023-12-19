@@ -37,7 +37,7 @@ macro_rules! implscalar {
         pub struct $t;
         impl ProtobufScalar for $t {
             type RustType<'a> = $rt;
-            const WIRE_TYPE: usize = $wt;
+            const WIRE_TYPE: usize = $wt as usize;
             fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut) {
                 $f(value, buf)
             }
@@ -48,21 +48,38 @@ macro_rules! implscalar {
     };
 }
 
-implscalar!(Int32, i32, 0, write_int32, len_of_int32);
-implscalar!(Sint32, i32, 0, write_sint32, len_of_sint32);
-implscalar!(Int64, i64, 0, write_int64, len_of_int64);
-implscalar!(Sint64, i64, 0, write_sint64, len_of_sint64);
-implscalar!(Uint32, u32, 0, write_uint32, len_of_uint32);
-implscalar!(Uint64, u64, 0, write_uint64, len_of_uint64);
-implscalar!(Bool, bool, 0, write_bool, len_of_value);
-implscalar!(Fixed32, u32, 5, write_fixed32, len_of_value);
-implscalar!(Sfixed32, i32, 5, write_sfixed32, len_of_value);
-implscalar!(Float, f32, 5, write_float, len_of_value);
-implscalar!(Fixed64, u64, 1, write_fixed64, len_of_value);
-implscalar!(Sfixed64, i64, 1, write_sfixed64, len_of_value);
-implscalar!(Double, f64, 1, write_double, len_of_value);
-implscalar!(PbString, &'a str, 2, write_string, len_of_string);
-implscalar!(PbBytes, &'a [u8], 2, write_bytes, len_of_bytes);
+implscalar!(Int32, i32, WireType::VARINT, write_int32, len_of_int32);
+implscalar!(Sint32, i32, WireType::VARINT, write_sint32, len_of_sint32);
+implscalar!(Int64, i64, WireType::VARINT, write_int64, len_of_int64);
+implscalar!(Sint64, i64, WireType::VARINT, write_sint64, len_of_sint64);
+implscalar!(Uint32, u32, WireType::VARINT, write_uint32, len_of_uint32);
+implscalar!(Uint64, u64, WireType::VARINT, write_uint64, len_of_uint64);
+implscalar!(Bool, bool, WireType::VARINT, write_bool, len_of_value);
+implscalar!(Fixed32, u32, WireType::I32, write_fixed32, len_of_value);
+implscalar!(Sfixed32, i32, WireType::I32, write_sfixed32, len_of_value);
+implscalar!(Float, f32, WireType::I32, write_float, len_of_value);
+implscalar!(Fixed64, u64, WireType::I64, write_fixed64, len_of_value);
+implscalar!(Sfixed64, i64, WireType::I64, write_sfixed64, len_of_value);
+implscalar!(Double, f64, WireType::I64, write_double, len_of_value);
+implscalar!(
+    PbString,
+    &'a str,
+    WireType::LEN,
+    write_string,
+    len_of_string
+);
+implscalar!(PbBytes, &'a [u8], WireType::LEN, write_bytes, len_of_bytes);
+
+// https://protobuf.dev/programming-guides/encoding/#structure
+#[repr(usize)]
+enum WireType {
+    VARINT = 0, //	int32, int64, uint32, uint64, sint32, sint64, bool, enum
+    I64 = 1,    //	fixed64, sfixed64, double
+    LEN = 2,    //	string, bytes, embedded messages, packed repeated fields
+    // SGROUP = 3, //	group start (deprecated)
+    // EGROUP = 4, //	group end (deprecated)
+    I32 = 5, //	fixed32, sfixed32, float
+}
 
 pub struct ScalarWriter<'b, P> {
     buf: &'b mut Vec<u8>,
