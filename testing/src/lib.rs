@@ -15,7 +15,7 @@ mod tests {
 
     use prost::Message;
 
-    use crate::prost_proto::{MySimpleMessage, NestedMsg, StatData};
+    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, StatData};
     use crate::tacky_proto::example::MySimpleMessageWriter;
     use crate::tacky_proto::useme::StatDataWriter;
 
@@ -43,6 +43,14 @@ mod tests {
             nested: Some(NestedMsg {
                 num: 42,
                 astring: Some("hello nested".into()),
+                deeper: vec![
+                    NestedMore {
+                        levels: vec!["some".into(), "strings".into()],
+                    },
+                    NestedMore {
+                        levels: vec!["rep".into(), "str".into()],
+                    },
+                ],
             }),
         };
 
@@ -59,7 +67,14 @@ mod tests {
                 .manybytes(&manybytes)
                 .abytes(&*abytes)
                 .nested(|mut n| {
-                    n.astring("hello nested").num(42);
+                    n.astring("hello nested");
+                    n.num(42);
+                    n.deeper(|mut d| {
+                        d.levels(["some", "strings"]);
+                    });
+                    n.deeper(|mut d| {
+                        d.levels(["rep", "str"]);
+                    });
                 });
         }
 

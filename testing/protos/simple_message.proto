@@ -18,5 +18,9 @@ message MySimpleMessage {
 message NestedMsg {
     required int32 num = 1;
     optional string astring = 2;
+    repeated NestedMore deeper = 3;
 }
 
+message NestedMore {
+    repeated string levels = 1;
+}
