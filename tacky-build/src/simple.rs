@@ -1,7 +1,10 @@
 use std::fmt::Write;
 
-use crate::{parser::{Field, Label, PbType, Scalar}, formatter::Fmter};
-
+use crate::{
+    formatter::Fmter,
+    parser::{Field, Label, PbType, Scalar},
+};
+#[rustfmt::skip]
 pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     //write struct
     indented!(w, r"pub struct {name}Writer<'buf> {{")?;
@@ -18,6 +21,7 @@ pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     indented!(w)
 }
 // generate writing methods for simple scalar fields
+#[rustfmt::skip]
 pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
@@ -31,7 +35,6 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
     };
     let rust_type = pb_type.rust_type();
     let write_fn = format!("::tacky::scalars::write_{pb_type}");
-    
     match label {
         Label::Optional => match pb_type {
             Scalar::String | Scalar::Bytes => {
@@ -68,10 +71,10 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
                 indented!(w, r"}}")
             }
             _ => {
-                indented!(w, r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{")?;
+                indented!(w, r"pub fn {name}(&mut self, {name}: impl IntoIterator<Item = {rust_type}>) -> &mut Self {{")?;
                 indented!(w, r"    for value in {name} {{")?;
                 indented!(w, r"        ::tacky::scalars::write_varint({tag}, &mut self.tack.buffer);")?;
-                indented!(w, r"        {write_fn}(*value, &mut self.tack.buffer);")?;
+                indented!(w, r"        {write_fn}(value, &mut self.tack.buffer);")?;
                 indented!(w, r"    }}")?; 
                 indented!(w, r"    self")?; 
                 indented!(w, r"}}")
@@ -111,6 +114,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
 ///     optional key_type key = 1;
 ///     optional val type val = 2;
 /// }
+#[rustfmt::skip]
 pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
@@ -146,8 +150,8 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     
 }
 
-
 // generate writing method for message-type fields
+#[rustfmt::skip]
 pub fn simple_message_writer(
     w: &mut Fmter,
     field: Field,
@@ -175,6 +179,7 @@ pub fn simple_message_writer(
 
 //genrate ate writing method for enum-type fields
 // enums are just i32s, so we take anything thats Into<i32>.
+#[rustfmt::skip]
 fn simple_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
     todo!()
 }

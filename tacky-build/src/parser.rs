@@ -5,7 +5,11 @@ use std::io::Write;
 
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
-use crate::{simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer}, formatter::Fmter};
+use crate::{
+    formatter::Fmter,
+    simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer},
+    simple_typed::get_scalar_writer,
+};
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
@@ -59,6 +63,32 @@ impl Scalar {
         }
     }
 
+    pub const fn tacky_type(&self) -> &str {
+        match self {
+            Scalar::Int32 => "Int32",
+            Scalar::Sint32 => "Sint32",
+            Scalar::Int64 => "Int64",
+            Scalar::Sint64 => "Sint64",
+            Scalar::Uint32 => "Uint32",
+            Scalar::Uint64 => "Uint64",
+            Scalar::Bool => "Bool",
+            Scalar::Fixed32 => "Fixed32",
+            Scalar::Sfixed32 => "Sfixed32",
+            Scalar::Float => "Float",
+            Scalar::Fixed64 => "Fixed64",
+            Scalar::Sfixed64 => "Sfixed64",
+            Scalar::Double => "Double",
+            Scalar::String => "PbString",
+            Scalar::Bytes => "PbBytes",
+        }
+    }
+    pub const fn rust_type_no_ref(&self) -> &str {
+        match self {
+            Scalar::String => "str",
+            Scalar::Bytes => "[u8]",
+            _ => self.rust_type(),
+        }
+    }
     pub const fn rust_type(&self) -> &str {
         match self {
             Scalar::Int32 => "i32",
@@ -76,13 +106,6 @@ impl Scalar {
             Scalar::Double => "f64",
             Scalar::String => "&str",
             Scalar::Bytes => "&[u8]",
-        }
-    }
-    pub const fn rust_type_no_ref(&self) -> &str {
-        match self {
-            Scalar::String => "str",
-            Scalar::Bytes => "[u8]",
-            _ => self.rust_type(),
         }
     }
     pub const fn wire_type(&self) -> u32 {
@@ -137,8 +160,8 @@ impl From<FieldType> for PbType {
                 let v = *v;
                 PbType::Map(Box::new((k).into()), Box::new(v.into()))
             }
-            //TODO: resolve correctly to enums/messages. 
-            FieldType::MessageOrEnum(s) =>PbType::Message(s),
+            //TODO: resolve correctly to enums/messages.
+            FieldType::MessageOrEnum(s) => PbType::Message(s),
             FieldType::Message(_) => todo!(),
             FieldType::Enum(_) => todo!(), //technically int32 according to spec
         }
@@ -215,6 +238,7 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
                 simple_map_writer(w, field).unwrap();
             }
             PbType::Scalar(_) => {
+                get_scalar_writer(w, &field).unwrap();
                 simple_field_writer(w, field).unwrap();
             }
             PbType::Message(_) => {
@@ -233,13 +257,13 @@ pub fn write_proto(file: &str, output: &str) {
     let mut buf = String::new();
     let mut fmter = Fmter::new(&mut buf);
     let mod_name = test_file.package;
-    indented!(fmter,"pub mod {mod_name} {{").unwrap();
+    indented!(fmter, "pub mod {mod_name} {{").unwrap();
     fmter.indent();
     for m in test_file.messages {
         write_simple_message(&mut fmter, m);
     }
     fmter.unindent();
-    indented!(fmter,"}}").unwrap();
+    indented!(fmter, "}}").unwrap();
     let mut file = std::fs::File::create(output).unwrap();
     file.write_all(buf.as_bytes()).unwrap();
 }

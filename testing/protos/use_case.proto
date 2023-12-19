@@ -1,0 +1,10 @@
+syntax = "proto2";
+
+package useme;
+
+message StatData {
+    repeated string ips = 1;
+    repeated string paths = 2;
+    repeated double durations = 3;
+}
+

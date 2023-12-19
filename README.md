@@ -1,66 +1,134 @@
 # A slightly sticky protobuf writer
-Tacky is dead-simple, unopinionated protobuf serialiser. no trait magic or proc macros, just simple idiomatic codegen. Given a protobuf definition, this crate will generate a simple rust type with a builder-like API to write your message. 
+Tacky is dead-simple, unopinionated protobuf serialiser. no trait magic or proc macros, just simple codegen. Given a protobuf definition, this crate will generate a simple rust type with a builder-like API to write your message. every function in the builder api just tacks on the relevant field/message to a buffer, abstracting over the protobuf types, field numbers, and wire types. 
 
-# Example
-for a simple message:
+# Motivating Example
+Let's say you have a web server. internally, you are collecting some data:
+
+```rust
+struct Data {
+    ips: BTreeSet<IpAddr>,
+    paths: BTreeSet<Arc<str>>, //the paths are known in advance, so they are Arc<str> to avoid allocating new ones.
+    timings: Vec<Duration>
+}
+```
+This is type safe (Ip, Duration), encodes some invariants for the data (like uniquness via using a Set vs a Vec), and has some performance tweaks via Arc<str>.
+This data needs to go to an aggragation service that speaks protobuf.
+the closest protobuf schema would be 
 ```protobuf
-message Foo {
-    int32 sum = 5;
-    repeated string cities = 1;
-    optional bytes blob = 2;
-    map<string, int32> residents_per_city = 3;
+message Data {
+    repeated string ips = 1;
+    repeated string paths = 2;
+    repeated f64 timings = 3;
 }
 ```
-the code is something like
+Using Prost!, the generated rust struct would look like:
 
 ```rust
-pub struct FooWriter<'buf> {
-    buffer: &'buf mut Vec<u8>
+struct ProstData {
+    ips: Vec<String>
+    paths: Vec<String>,
+    created_resources: Vec<f64>
 }
+```
+this lacks all the semantics of our domain-specific struct, so would only be used for serialization. 
 
-impl<'b> FooWriter<'b> {
-    fn sum(&mut self, sum: i32) -> &mut Self {..}
-    fn cities<T: AsRef<str>>(&mut self, cities: impl IntoIterator<Item = T>) -> &mut Self {..}
-    fn blob<'opt>(&mut self, blob : impl Into<Option<&'opt [u8]>>) -> &mut Self {..}
-    fn residents_per_city<'rep>(&mut self, impl IntoIterator<Item = (&'rep str, &'rep i32)>) -> &mut Self {..}
-}   
-
-fn useit(..) {
-    let mut foo = ...;
-    foo.sum(41)
-       .cities(&["london", "paris", "stockholm"])
-       .blob(None);
+```rust
+fn serialise_prost(data: &Data) -> Vec<u8> {
+    //iterate over everything, go via ToString to allocate new strings for everthing, and push them to a newly allocated vec.
+    let prost_data = ProstData {
+        ips: data.ips.iter().map(|ip| ip.to_string()).collect<Vec<_>>(),
+        paths: data.paths.iter().map(|p| p.to_string()).collect<Vec<_>>(),
+        timings: data.timings.iter().map(|dur| dur.as_secs_f64()).collect<Vec<_>>(),
+    };
+    // all those allocs and data wrangling  and we still didnt encode our data, lets do that:
+    let v = prost_data.encode_to_vec();
 }
 ```
 
-## what is this good for?
-Most other rust protobuf implementations take the approach of translating the protobuf message schema into a type that maps exactly to it. this is fine if the types and models map 1-1 to their serialised schema, but when they do not, trouble ensues:
-
+Tacky instead creates a writer with specific functions and generates partly a higher level api with iterators and options,
+and partly a lower level api that returns a typed writer for that specific field.
 ```rust
-pub struct MyDataModel{
-    unique: BTreeSet<Uuid>,
+pub struct StatDataWriter<'buf> {
+    tack: ::tacky::tack::Tack<'buf>,
 }
-```
-```protobuf
-message PbData {
-    repeated string unique = 1;
-}
-``` 
-even though the working data set already exists, to serialise it with prost or quick-protobuf i would need to build a `Vec<String>` copying and allocating everything. Or....
+impl<'buf> StatDataWriter<'buf> {
+    pub fn new(buf: &'buf mut Vec<u8>, tag: impl Into<Option<u32>>) -> Self {..}
+    pub fn ips<T: AsRef<str>>(&mut self, ips: impl IntoIterator<Item = T>) -> &mut Self {..}
+    pub fn paths<T: AsRef<str>>(&mut self, paths: impl IntoIterator<Item = T>) -> &mut Self {..}
+    pub fn durations(&mut self, durations: impl IntoIterator<Item = f64>) -> &mut Self {..}
+    //lower level api
+    pub fn ips_writer(&mut self) -> ScalarWriter<'_,PbString> {..}
+    pub fn paths_writer(&mut self) -> ScalarWriter<'_,PbString> {..}
+    pub fn durations_writer(&mut self) -> ScalarWriter<'_,Double> {..}
 
-```rust
-fn writeit(a: MyDataModel) {
-    let mut pb : PbDataWriter = ...;
-    let mut uuid_buf = [0u8;36];
-    for u in &a.unique {
-        let uuid_str = u.to_hyphenated().encode_lower(&mut uuid_buf);
-        pb.unique(uuid_str);
+}
+
+fn serialise_tacky(data: &Data) {
+    let mut buf = Vec::new();
+    let mut writer = StatDataWriter::new(&mut buf, None);
+    // using the higher level API:
+    writer.paths(&data.paths) //from BTreeSet<Arc<str>> iter
+    .durations(data.durations.iter().map(|dur| dur.as_secs_f64())) 
+    .ips(data.ips.iter().map(|ip| ip.to_string())) //allocates new strings for Ips, but doesnt allocate a vec to hold them.
+    // OR, using the lower level API, which allows for external iteration, and a nicety:
+    // the writer for Strings can accept anything impling Display to write the field
+    let mut ips = writer.ips_writer();
+    for ip in data.ips {
+        // ips.write_field(ip.to_string()) // not very interesting
+        ips.write_display(ip) // format ips directly into the buffer.
     }
 }
 ```
-in other words when you have a lot of data that doesnt fit nicely into the structs generated by other protobuf libs, this might do the trick.
+In other words when you have a lot of data that doesnt fit nicely into the structs generated by other protobuf libs, or you want control over how things are written for performance/semantics reasons, this library might do the trick. This works nicely with messages containing basic protobuf types and maps. 
 
 ## what about nested messages?
-the problem with the above approach is that nested messages are length-delimited. that is, they require the length up-front, whereas using an incremental writer like Tacky, that might not be known when starting to write it. 
-
+the problem with the above approach is that nested messages are length-delimited. that is, they require the length up-front, whereas using an incremental writer like Tacky, that might not be known up front. 
 what we do here is a slight abuse of the LEB128 (varint) encoding. we allocate a fixed width length field up front, and set it to a temp length. once the message writer drops, it goes back to that place in the buffer and writes the correct length. this trick is also used by some wasm packers as wasm integers are varint encoded, and code sections need to be length delimited.
+the generated API for example:
+```protobuf
+message TopLevel {
+    optional Nested nest = 1;
+}
+
+message Nested {
+    int32 num = 1;
+    repeated string s = 2;
+}
+```
+would generate writers for both messages:
+```rust
+pub struct TopLevelWriter<'buf> {
+    tack: ::tacky::tack::Tack<'buf>,
+}
+impl<'buf> StatDataWriter<'buf> {
+    pub fn new(buf: &'buf mut Vec<u8>, tag: impl Into<Option<u32>>) -> Self {..}
+    pub fn nest(&mut self, write: impl Fn(NestedWriter)) -> &mut Self{..}
+
+pub struct NestedWriter<'buf> {
+    tack: ::tacky::tack::Tack<'buf>,
+}
+impl<'buf> NestedWriter<'buf> {
+    pub fn new(buf: &'buf mut Vec<u8>, tag: impl Into<Option<u32>>) -> Self {..}
+    pub fn num(&mut self, num: i32) -> &mut Self{..}
+    pub fn s<T: AsRef<str>>(&mut self, s: impl IntoIterator<Item = T>) -> &mut Self {..}
+}
+}
+```
+Since its impossible to hold an iterator to field writers, and everything being optional means you can just not write the field, essentially means only the lower level API is available to message-type fields.
+```rust
+fn useage() {
+    let mut buf = Vec::new();
+    let mut writer = TopLevelWriter::new(&mut buf, None);
+    writer.nest(|mut nested_writer| {
+        nested_writer.num(42).s(["a","few","strs"])
+    })
+    // or for repeats, just write it multiple times.
+    for i in 0..10 {
+        writer.nest(|mut n| {
+            n.num(i)
+        })
+    }
+}
+```
+## Current limitations
+Currently, imports/includes/nested defs are not handled. that is, all messages must be flat within a file. TODO.

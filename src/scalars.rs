@@ -29,11 +29,11 @@ pub const fn encode_zigzag64(n: i64) -> u64 {
 }
 #[inline]
 pub fn write_double(value: f64, buf: &mut impl BufMut) {
-    buf.put_f64(value);
+    buf.put_f64_le(value);
 }
 #[inline]
 pub fn write_float(value: f32, buf: &mut impl BufMut) {
-    buf.put_f32(value);
+    buf.put_f32_le(value);
 }
 #[inline]
 pub fn write_int32(value: i32, buf: &mut impl BufMut) {

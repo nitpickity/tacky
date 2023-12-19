@@ -1,11 +1,13 @@
-
 pub struct Fmter<'f> {
     pub leading_spaces: String, //ugly, better ways to do it..
     pub w: &'f mut dyn std::fmt::Write,
 }
 impl<'w> Fmter<'w> {
     pub fn new(w: &'w mut impl std::fmt::Write) -> Self {
-        Self { leading_spaces: String::new(), w }
+        Self {
+            leading_spaces: String::new(),
+            w,
+        }
     }
     pub fn indent(&mut self) {
         const INDENT: &'static str = "    ";
