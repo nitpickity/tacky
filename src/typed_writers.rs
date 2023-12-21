@@ -1,9 +1,9 @@
 use crate::{scalars::*, tack::Tack};
 use bytes::BufMut;
-use std::{fmt::Display, marker::PhantomData};
+use std::{fmt::Display, marker::PhantomData, collections::{HashMap, BTreeMap}};
 
 pub trait ProtobufScalar {
-    type RustType<'a>;
+    type RustType<'a>: Copy;
     const WIRE_TYPE: usize;
     // how to write the value itself.
     // can also be used to write the value without tag.
@@ -115,12 +115,12 @@ impl<'b, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b, K, V> {
         }
     }
 
-    pub fn write_entry<'a>(&mut self, key: K::RustType<'a>, value: V::RustType<'a>) {
+    pub fn write_entry<'a>(&mut self, key: &K::RustType<'a>, value: &V::RustType<'a>) {
         let tag = (self.field_nr << 3) | 2;
         write_varint(tag as u64, self.buf);
-        let len = K::len(1, &key) + V::len(2, &value);
+        let len = K::len(1, key) + V::len(2, value);
         write_varint(len as u64, self.buf);
-        K::write(1, key, self.buf);
-        V::write(2, value, self.buf);
+        K::write(1, *key, self.buf);
+        V::write(2, *value, self.buf);
     }
 }

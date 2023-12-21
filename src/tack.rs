@@ -2,6 +2,7 @@ use bytes::BufMut;
 
 use crate::scalars;
 
+#[must_use]
 pub struct Tack<'b> {
     pub buffer: &'b mut Vec<u8>,
     pub tag: Option<u32>,

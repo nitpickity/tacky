@@ -133,6 +133,7 @@ pub enum PbType {
     Scalar(Scalar),
     Enum(String),    // by name, type is technically just an i32
     Message(String), //name
+    SimpleMap(Scalar,Scalar),
     Map(Box<PbType>, Box<PbType>),
 }
 impl From<FieldType> for PbType {
@@ -156,9 +157,12 @@ impl From<FieldType> for PbType {
             FieldType::Sfixed32 => PbType::Scalar(Scalar::Sfixed32),
             FieldType::Float => PbType::Scalar(Scalar::Float),
             FieldType::Map(k, v) => {
-                let k = *k;
-                let v = *v;
-                PbType::Map(Box::new((k).into()), Box::new(v.into()))
+                let kt: PbType = (*k).into();
+                let vt: PbType = (*v).into();
+                match (kt,vt) {
+                    (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k,v),
+                    (k,v) => PbType::Map(Box::new(k), Box::new((v).into()))
+                }
             }
             //TODO: resolve correctly to enums/messages.
             FieldType::MessageOrEnum(s) => PbType::Message(s),
@@ -172,7 +176,7 @@ impl PbType {
         match self {
             PbType::Scalar(s) => s.wire_type(),
             PbType::Enum(_) => 0, //varint
-            PbType::Message(_) | PbType::Map(_, _) => 2,
+            PbType::Message(_) | PbType::Map(_, _)| PbType::SimpleMap(_, _) => 2,
         }
     }
     pub const fn tag(&self, field_nr: u32) -> u32 {
@@ -187,6 +191,7 @@ impl std::fmt::Display for PbType {
             PbType::Enum(_) => todo!(),
             PbType::Message(_) => todo!(),
             PbType::Map(_, _) => todo!(),
+            PbType::SimpleMap(k, v) => write!(f, "map<{},{}>",k.as_str(), v.as_str())
         }
     }
 }
@@ -234,7 +239,7 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
     for f in m.fields {
         let field: Field = f.into();
         match field.ty {
-            PbType::Map(_, _) => {
+            PbType::SimpleMap(_, _) => {
                 simple_map_writer(w, field).unwrap();
             }
             PbType::Scalar(_) => {
@@ -259,6 +264,7 @@ pub fn write_proto(file: &str, output: &str) {
     let mod_name = test_file.package;
     indented!(fmter, "pub mod {mod_name} {{").unwrap();
     fmter.indent();
+    indented!(fmter, "use ::tacky::*;").unwrap();
     for m in test_file.messages {
         write_simple_message(&mut fmter, m);
     }
