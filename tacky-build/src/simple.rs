@@ -21,6 +21,7 @@ pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     indented!(w)
 }
 // generate writing methods for simple scalar fields
+#[rustfmt::skip]
 pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     let Field {
         name,
@@ -34,11 +35,8 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
     let rust_type = pb_type.rust_type_no_ref();
     let tacky_type = pb_type.tacky_type();
     let write_fn = format!("::tacky::scalars::write_{pb_type}");
-    let mk_write_expr = |arg| {
-        format!(
-            "{tacky_type}::write({number}, {arg}, &mut self.tack.buffer);"
-        )
-    };
+    let mk_write_expr =
+        |arg| format!("{tacky_type}::write({number}, {arg}, &mut self.tack.buffer);");
     match label {
         Label::Optional => {
             let (lf, rust_type) = match pb_type {
@@ -56,11 +54,9 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
 
         Label::Repeated => {
             let (item, generics, value) = match pb_type {
-                Scalar::String | Scalar::Bytes => (
-                    "T",
-                    format!("<T: AsRef<{rust_type}>>"),
-                    "value.as_ref()",
-                ),
+                Scalar::String | Scalar::Bytes => {
+                    ("T", format!("<T: AsRef<{rust_type}>>"), "value.as_ref()")
+                }
                 _ => (rust_type, "".into(), "value"),
             };
             let write_expr = mk_write_expr(value);
@@ -73,7 +69,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
         }
         Label::Required => {
             let write_expr = mk_write_expr(&name);
-            indented!(w, r"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{")?;
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{")?;
             indented!(w, r"        {write_expr}")?;
             indented!(w, r"    self")?;
             indented!(w, r"}}")
@@ -86,7 +82,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
             indented!(w, r"    let mut it = {name}.into_iter();")?;
             indented!(w, r"    let first = it.next();")?;
             indented!(w, r"    if let Some(value) = first {{")?;
-            indented!(w, r"        let tack = Tack::new(self.tack.buffer, Some({tag}));")?;
+            indented!(w,r"        let tack = Tack::new(self.tack.buffer, Some({tag}));")?;
             indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
             indented!(w, r"        for value in it {{")?;
             indented!(w, r"            {write_fn}(*value, tack.buffer);")?;

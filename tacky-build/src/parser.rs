@@ -133,7 +133,7 @@ pub enum PbType {
     Scalar(Scalar),
     Enum(String),    // by name, type is technically just an i32
     Message(String), //name
-    SimpleMap(Scalar,Scalar),
+    SimpleMap(Scalar, Scalar),
     Map(Box<PbType>, Box<PbType>),
 }
 impl From<FieldType> for PbType {
@@ -159,9 +159,9 @@ impl From<FieldType> for PbType {
             FieldType::Map(k, v) => {
                 let kt: PbType = (*k).into();
                 let vt: PbType = (*v).into();
-                match (kt,vt) {
-                    (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k,v),
-                    (k,v) => PbType::Map(Box::new(k), Box::new((v).into()))
+                match (kt, vt) {
+                    (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k, v),
+                    (k, v) => PbType::Map(Box::new(k), Box::new((v).into())),
                 }
             }
             //TODO: resolve correctly to enums/messages.
@@ -176,7 +176,7 @@ impl PbType {
         match self {
             PbType::Scalar(s) => s.wire_type(),
             PbType::Enum(_) => 0, //varint
-            PbType::Message(_) | PbType::Map(_, _)| PbType::SimpleMap(_, _) => 2,
+            PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => 2,
         }
     }
     pub const fn tag(&self, field_nr: u32) -> u32 {
@@ -191,7 +191,7 @@ impl std::fmt::Display for PbType {
             PbType::Enum(_) => todo!(),
             PbType::Message(_) => todo!(),
             PbType::Map(_, _) => todo!(),
-            PbType::SimpleMap(k, v) => write!(f, "map<{},{}>",k.as_str(), v.as_str())
+            PbType::SimpleMap(k, v) => write!(f, "map<{},{}>", k.as_str(), v.as_str()),
         }
     }
 }

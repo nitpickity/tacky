@@ -1,6 +1,9 @@
 use crate::{scalars::*, tack::Tack};
 use bytes::BufMut;
-use std::{fmt::Display, marker::PhantomData, collections::{HashMap, BTreeMap}};
+use std::{
+    fmt::Display,
+    marker::PhantomData,
+};
 
 pub trait ProtobufScalar {
     type RustType<'a>: Copy;
