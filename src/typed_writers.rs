@@ -1,3 +1,4 @@
+//! Base module providing tools for working with protobuf scalars and maps where fields are scalars.
 use crate::{scalars::*, tack::Tack, Width};
 use bytes::BufMut;
 use std::{
@@ -5,30 +6,34 @@ use std::{
     marker::PhantomData,
 };
 
+
+/// actions on a scalar. 
+/// this is already exhaustively implemented as the types in this module contain all protobuf types.
+/// public only because its needed for the codegen crate.
 pub trait ProtobufScalar {
     type RustType<'a>: Copy;
     const WIRE_TYPE: usize;
-    // how to write the value itself.
-    // can also be used to write the value without tag.
+    /// how to write the value itself.
+    /// can also be used to write the value without tag.
     fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut);
-    // length of the value being written, exluding tag.
 
+    /// length of the value being written, exluding tag.
     fn value_len<'a>(value: Self::RustType<'a>) -> usize;
 
     //provided:
 
-    // writes the full thing, tag + value
+    /// writes the full field, tag + value
     fn write<'a>(field_nr: i32, value: Self::RustType<'a>, buf: &mut impl BufMut) {
         Self::write_tag(field_nr, buf);
         Self::write_value(value, buf);
     }
-    // len on the wire, tag + value;
+    /// len on the wire, tag + value;
     fn len<'a>(field_nr: i32, value: Self::RustType<'a>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as i32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
     }
 
-    // writes just tag (field nr and wiretype combo)
+    /// writes just tag (field nr and wiretype combo)
     fn write_tag(field_nr: i32, buf: &mut impl BufMut) {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as i32);
         write_varint(tag as u64, buf)
@@ -95,8 +100,8 @@ impl<'b, P: ProtobufScalar> ScalarWriter<'b, P> {
 }
 
 impl<'b> ScalarWriter<'b, PbString> {
-    //writes values to string via their Display impl.
-    // the max length of the string here is 127 bytes, which should cover most cases
+    /// Writes values to string via their Display impl.
+    /// the max length of the string here is 127 bytes, which should cover most cases
     pub fn write_display(&mut self, d: impl Display) {
         use std::io::Write;
         let tag = self.field_nr << 3 | (PbString::WIRE_TYPE as i32);
@@ -105,7 +110,7 @@ impl<'b> ScalarWriter<'b, PbString> {
     }
 }
 
-//writer for simple maps where the key/values are scalars
+/// Writer for simple maps where the key/values are scalars
 pub struct MapEntryWriter<'b, K, V> {
     buf: &'b mut Vec<u8>,
     field_nr: i32,

@@ -1,4 +1,4 @@
-//! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps an (a la prost)
+//! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
 //! and dont i dont to write my own (yet).
 
 use std::io::Write;
