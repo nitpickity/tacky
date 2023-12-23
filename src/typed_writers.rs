@@ -1,4 +1,4 @@
-use crate::{scalars::*, tack::Tack};
+use crate::{scalars::*, tack::Tack, Width};
 use bytes::BufMut;
 use std::{
     fmt::Display,
@@ -13,7 +13,7 @@ pub trait ProtobufScalar {
     fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut);
     // length of the value being written, exluding tag.
 
-    fn value_len<'a>(value: &Self::RustType<'a>) -> usize;
+    fn value_len<'a>(value: Self::RustType<'a>) -> usize;
 
     //provided:
 
@@ -23,7 +23,7 @@ pub trait ProtobufScalar {
         Self::write_value(value, buf);
     }
     // len on the wire, tag + value;
-    fn len<'a>(field_nr: i32, value: &Self::RustType<'a>) -> usize {
+    fn len<'a>(field_nr: i32, value: Self::RustType<'a>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as i32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
     }
@@ -44,8 +44,8 @@ macro_rules! implscalar {
             fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut) {
                 $f(value, buf)
             }
-            fn value_len<'a>(value: &Self::RustType<'a>) -> usize {
-                $fl(*value)
+            fn value_len<'a>(value: Self::RustType<'a>) -> usize {
+                $fl(value)
             }
         }
     };
@@ -95,14 +95,17 @@ impl<'b, P: ProtobufScalar> ScalarWriter<'b, P> {
 }
 
 impl<'b> ScalarWriter<'b, PbString> {
+    //writes values to string via their Display impl.
+    // the max length of the string here is 127 bytes, which should cover most cases
     pub fn write_display(&mut self, d: impl Display) {
         use std::io::Write;
         let tag = self.field_nr << 3 | (PbString::WIRE_TYPE as i32);
-        let t = Tack::new(self.buf, Some(tag as u32));
+        let t: Tack::<Width<1>> = Tack::new(self.buf, Some(tag as u32));
         write!(t.buffer, "{}", d).unwrap();
     }
 }
 
+//writer for simple maps where the key/values are scalars
 pub struct MapEntryWriter<'b, K, V> {
     buf: &'b mut Vec<u8>,
     field_nr: i32,
@@ -118,12 +121,12 @@ impl<'b, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b, K, V> {
         }
     }
 
-    pub fn write_entry<'a>(&mut self, key: &K::RustType<'a>, value: &V::RustType<'a>) {
+    pub fn write_entry<'a>(&mut self, key: K::RustType<'a>, value: V::RustType<'a>) {
         let tag = (self.field_nr << 3) | 2;
         write_varint(tag as u64, self.buf);
         let len = K::len(1, key) + V::len(2, value);
         write_varint(len as u64, self.buf);
-        K::write(1, *key, self.buf);
-        V::write(2, *value, self.buf);
+        K::write(1, key, self.buf);
+        V::write(2, value, self.buf);
     }
 }

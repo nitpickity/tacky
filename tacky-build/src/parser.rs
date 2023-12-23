@@ -8,7 +8,7 @@ use pb_rs::types::{FieldType, FileDescriptor, Message};
 use crate::{
     formatter::Fmter,
     simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer},
-    simple_typed::get_scalar_writer,
+    simple_typed::{get_scalar_writer, get_map_writer},
 };
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
@@ -166,6 +166,7 @@ impl From<FieldType> for PbType {
             }
             //TODO: resolve correctly to enums/messages.
             FieldType::MessageOrEnum(s) => PbType::Message(s),
+            // pb-rs 
             FieldType::Message(_) => todo!(),
             FieldType::Enum(_) => todo!(), //technically int32 according to spec
         }
@@ -240,6 +241,7 @@ fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
         let field: Field = f.into();
         match field.ty {
             PbType::SimpleMap(_, _) => {
+                get_map_writer(w, &field).unwrap();
                 simple_map_writer(w, field).unwrap();
             }
             PbType::Scalar(_) => {

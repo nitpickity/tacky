@@ -8,13 +8,13 @@ use crate::{
 pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     //write struct
     indented!(w, r"pub struct {name}Writer<'buf> {{")?;
-    indented!(w, r"   tack: ::tacky::tack::Tack<'buf>")?;
+    indented!(w, r"   tack: Tack<'buf>")?;
     indented!(w, r"}}")?;
     indented!(w)?;
     indented!(w, r"impl<'buf> {name}Writer<'buf> {{")?;
     w.indent();
     indented!(w, r"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{")?;
-    indented!(w, r"    Self {{tack: ::tacky::tack::Tack::new(buf, tag)}}")?;
+    indented!(w, r"    Self {{tack: Tack::new(buf, tag)}}")?;
     indented!(w, r"}}")?;
     w.unindent();
     indented!(w, r"}}")?;
@@ -30,7 +30,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
         label,
     } = field;
     let PbType::Scalar(pb_type) = ty else {
-        panic!()
+        panic!("expected scalar type")
     };
     let rust_type = pb_type.rust_type_no_ref();
     let tacky_type = pb_type.tacky_type();
@@ -82,7 +82,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
             indented!(w, r"    let mut it = {name}.into_iter();")?;
             indented!(w, r"    let first = it.next();")?;
             indented!(w, r"    if let Some(value) = first {{")?;
-            indented!(w,r"        let tack = Tack::new(self.tack.buffer, Some({tag}));")?;
+            indented!(w,r"        let tack: Tack<Width<2>> = Tack::new(self.tack.buffer, Some({tag}));")?;
             indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
             indented!(w, r"        for value in it {{")?;
             indented!(w, r"            {write_fn}(*value, tack.buffer);")?;
@@ -128,12 +128,12 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
         _ => {
             generics[0] = "'r, ".into();
             types[0] = format!("&'r {kt}");
-            value_adjust[0] = "let key = key;".into()
+            value_adjust[0] = "let key = *key;".into()
         }
     };
 
     // massage value type into shape
-    match k {
+    match v {
         Scalar::String | Scalar::Bytes=> {
             generics[2] = format!("V: AsRef<{vt}>, ");
             types[1] = format!("V");
@@ -142,7 +142,7 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
         _ => {
             generics[0] = "'r, ".into();
             types[1] = format!("&'r {vt}");
-            value_adjust[1] = "let value = value;".into()
+            value_adjust[1] = "let value = *value;".into()
         }
     };
     let generics = generics.concat();
@@ -153,7 +153,7 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     indented!(w,r"    for (key, value) in entries {{")?;
     indented!(w,r"        {}",value_adjust[0])?;
     indented!(w,r"        {}",value_adjust[1])?;
-    indented!(w,r"        entry_writer.write_entry(&key, &value);")?;
+    indented!(w,r"        entry_writer.write_entry(key, value);")?;
     indented!(w,r"    }}")?;
     indented!(w,r"    self")?;
     indented!(w,r"}}")
@@ -183,8 +183,7 @@ pub fn simple_message_writer(
     indented!(w,r"    let writer = {ty}Writer::new(&mut self.tack.buffer,Some({tag}));")?;
     indented!(w,r"    {name}(writer);")?;
     indented!(w,r"    self")?;
-    indented!(w,r"}}")
-             
+    indented!(w,r"}}")         
 }
 
 //genrate ate writing method for enum-type fields

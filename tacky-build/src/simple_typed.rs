@@ -2,13 +2,9 @@ use std::fmt::Write;
 
 use crate::{
     formatter::Fmter,
-    parser::{Field, PbType, Scalar},
+    parser::{Field, PbType},
 };
 
-const TACKY: &'static str = "::tacky::typed_writers";
-fn get_writer(t: &Scalar) -> String {
-    format!("{TACKY}::ScalarWriter<'_,{TACKY}::{}>", t.tacky_type())
-}
 // generate writing methods for simple scalar fields
 #[rustfmt::skip]
 pub fn get_scalar_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
@@ -21,7 +17,7 @@ pub fn get_scalar_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
     let PbType::Scalar(pb_type) = ty else {
         panic!()
     };
-    let full_type = get_writer(&pb_type);
+    let full_type = format!("ScalarWriter<'_,{}>", pb_type.tacky_type());
     indented!(w, r"pub fn {name}_writer(&mut self) -> {full_type} {{")?;
     indented!(w, r"    <{full_type}>::new(&mut self.tack.buffer, {number})")?;
     indented!(w, r"}}")
@@ -34,15 +30,19 @@ pub fn get_scalar_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
 ///     optional key_type key = 1;
 ///     optional val type val = 2;
 /// }
-
-pub fn get_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
+pub fn get_map_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
     let Field {
         name,
         number,
         ty,
         label: _,
     } = field;
-    todo!()
+    let PbType::SimpleMap(k, v) = ty else { panic!() };
+
+    let full_type = format!("MapEntryWriter<'_, {}, {}>",k.tacky_type(), v.tacky_type());
+    indented!(w, r"pub fn {name}_writer(&mut self) -> {full_type} {{")?;
+    indented!(w, r"    <{full_type}>::new(&mut self.tack.buffer, {number})")?;
+    indented!(w, r"}}")
 }
 
 // generate writing method for message-type fields
