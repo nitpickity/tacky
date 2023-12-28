@@ -21,7 +21,7 @@ pub struct Width<const N: usize>;
 /// functions to write the length in a varint compatible but fixed size manner.
 /// implemented exhaustivelly for Width type, from 1 to 5 bytes. 
 /// in practice due to the signed 32 bit int arithmetic in many libs, protobuf messages cant be bigger than 2gb.
-trait WidthImpl {
+pub trait WidthImpl {
     fn write(value: u64, buf: &mut impl BufMut);
     fn width() -> usize;
 }

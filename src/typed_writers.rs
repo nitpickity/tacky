@@ -1,13 +1,9 @@
 //! Base module providing tools for working with protobuf scalars and maps where fields are scalars.
 use crate::{scalars::*, tack::Tack, Width};
 use bytes::BufMut;
-use std::{
-    fmt::Display,
-    marker::PhantomData,
-};
+use std::{fmt::Display, marker::PhantomData};
 
-
-/// actions on a scalar. 
+/// actions on a scalar.
 /// this is already exhaustively implemented as the types in this module contain all protobuf types.
 /// public only because its needed for the codegen crate.
 pub trait ProtobufScalar {
@@ -105,7 +101,7 @@ impl<'b> ScalarWriter<'b, PbString> {
     pub fn write_display(&mut self, d: impl Display) {
         use std::io::Write;
         let tag = self.field_nr << 3 | (PbString::WIRE_TYPE as i32);
-        let t: Tack::<Width<1>> = Tack::new(self.buf, Some(tag as u32));
+        let t: Tack<Width<1>> = Tack::new(self.buf, Some(tag as u32));
         write!(t.buffer, "{}", d).unwrap();
     }
 }
@@ -133,5 +129,25 @@ impl<'b, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b, K, V> {
         write_varint(len as u64, self.buf);
         K::write(1, key, self.buf);
         V::write(2, value, self.buf);
+    }
+}
+
+#[cfg(feature = "prost-compat")]
+pub mod prost_compat {
+    use super::*;
+    pub struct MessageWriter<'b, M> {
+        buf: &'b mut Vec<u8>,
+        field_nr: i32,
+        _m: PhantomData<M>,
+    }
+    
+    impl<'b, M> MessageWriter<'b, M> {
+        pub fn write_prost<P: prost::Message>(&mut self, m: P) -> Result<(), prost::EncodeError> {
+            let tag = (self.field_nr << 3) | 2;
+            write_varint(tag as u64, self.buf);
+            let len = m.encoded_len();
+            write_varint(len as u64, self.buf);
+            m.encode(self.buf)
+        }
     }
 }
