@@ -90,20 +90,8 @@ pub fn write_bool(value: bool, buf: &mut impl BufMut) {
 }
 
 // lengths
-pub const fn len_of_fixed64(_: u64) -> usize {
-    8 // 64-bit fixed size
-}
-
-pub const fn len_of_fixed32(_: u32) -> usize {
-    4 // 32-bit fixed size
-}
-
-pub const fn len_of_float(_: f32) -> usize {
-    4 // 32-bit float size
-}
-
-pub const fn len_of_double(_: f64) -> usize {
-    8 // 64-bit float size
+pub const fn len_of_value<T: Copy>(_: T) -> usize {
+    std::mem::size_of::<T>()
 }
 
 pub const fn len_of_string(value: &str) -> usize {
@@ -112,10 +100,6 @@ pub const fn len_of_string(value: &str) -> usize {
 
 pub const fn len_of_bytes(value: &[u8]) -> usize {
     encoded_len_varint(value.len() as u64) + value.len()
-}
-
-pub const fn len_of_bool(_: bool) -> usize {
-    1 // Bool is encoded in 1 byte
 }
 
 pub const fn len_of_int32(value: i32) -> usize {
@@ -140,12 +124,4 @@ pub const fn len_of_sint32(value: i32) -> usize {
 
 pub const fn len_of_sint64(value: i64) -> usize {
     encoded_len_varint(((value << 1) ^ (value >> 63)) as u64)
-}
-
-pub const fn len_of_sfixed32(_: i32) -> usize {
-    4 // 32-bit signed fixed size
-}
-
-pub const fn len_of_sfixed64(_: i64) -> usize {
-    8 // 64-bit signed fixed size
 }
