@@ -1,5 +1,5 @@
 pub struct Fmter<'f> {
-    pub leading_spaces: String, //ugly, better ways to do it..
+    pub leading_spaces: String, // ugly, better ways to do it..
     pub w: &'f mut dyn std::fmt::Write,
 }
 impl<'w> Fmter<'w> {

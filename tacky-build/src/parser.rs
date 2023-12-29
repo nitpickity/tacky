@@ -8,7 +8,7 @@ use pb_rs::types::{FieldType, FileDescriptor, Message};
 use crate::{
     formatter::Fmter,
     simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer},
-    simple_typed::{get_scalar_writer, get_map_writer},
+    simple_typed::{get_scalar_writer, get_map_writer}, witness::{simple_field_witness, message_schema_writer, field_witness_type, simple_map_witness, simple_message_witness},
 };
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
@@ -231,28 +231,92 @@ impl From<pb_rs::types::Field> for Field {
     }
 }
 
+fn write_simple_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
+    for f in fields {
+        match f.ty {
+            PbType::SimpleMap(_, _) => {
+                simple_map_writer(w, &f).unwrap();
+            }
+            PbType::Scalar(_) => {
+                simple_field_witness(w, f).unwrap();
+                simple_field_writer(w, &f).unwrap();
+            }
+            PbType::Message(_) => {
+                simple_message_writer(w, &f).unwrap();
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
+    for f in fields {
+        match f.ty {
+            PbType::SimpleMap(_, _) => {
+                get_map_writer(w, &f).unwrap();
+            }
+            PbType::Scalar(_) => {
+                get_scalar_writer(w, &f).unwrap();
+            }
+            PbType::Message(_) => {
+                // the closure based API for nested messages is already generated
+                ()
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
+    for f in fields {
+        match &f.ty {
+            PbType::SimpleMap(_, _) => {
+                simple_map_witness(w, &f).unwrap();
+            }
+            PbType::Scalar(_) => {
+                simple_field_witness(w, &f).unwrap();
+            }
+            PbType::Message(_) => {
+                // the closure based API for nested messages is already generated
+                simple_message_witness(w, &f).unwrap()
+            }
+            _ => todo!(),
+        }
+    }
+}
+
 fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
     let name = &m.name;
     //write struct
     message_def_writer(w, &name).unwrap();
     indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     w.indent();
-    for f in m.fields {
-        let field: Field = f.into();
-        match field.ty {
-            PbType::SimpleMap(_, _) => {
-                get_map_writer(w, &field).unwrap();
-                simple_map_writer(w, field).unwrap();
-            }
-            PbType::Scalar(_) => {
-                get_scalar_writer(w, &field).unwrap();
-                simple_field_writer(w, field).unwrap();
-            }
-            PbType::Message(_) => {
-                simple_message_writer(w, field).unwrap();
-            }
-            _ => todo!(),
-        }
+    let fields = m.fields.into_iter().map(|f| f.into()).collect::<Vec<_>>();
+    // write_simple_api(w, &fields);
+    // write_writer_api(w, &fields);
+    write_witness_api(w, &fields);
+    w.unindent();
+    indented!(w, "}}").unwrap();
+
+    indented!(w, r"pub struct {name}Schema {{").unwrap();
+    w.indent();
+    for f in fields {
+        field_witness_type(w, &f);
+    }
+    //write schema
+    w.unindent();
+    indented!(w, "}}").unwrap();
+
+}
+
+fn write_simple_message_schema(w: &mut Fmter<'_>, m: Message) {
+    let name = &m.name;
+    //write struct
+    indented!(w, r"pub struct {name}Schema {{").unwrap();
+    w.indent();
+    let fields = m.fields.into_iter().map(|f| f.into()).collect::<Vec<_>>();
+    for f in fields {
+        field_witness_type(w, &f);
     }
     w.unindent();
     indented!(w, "}}").unwrap();

@@ -157,7 +157,7 @@ pub mod prost_compat {
         field_nr: i32,
         _m: PhantomData<M>,
     }
-    
+
     impl<'b, M> MessageWriter<'b, M> {
         pub fn write_prost<P: prost::Message>(&mut self, m: P) -> Result<(), prost::EncodeError> {
             let tag = (self.field_nr << 3) | 2;
@@ -166,5 +166,34 @@ pub mod prost_compat {
             write_varint(len as u64, self.buf);
             m.encode(self.buf)
         }
+    }
+}
+
+
+
+
+macro_rules! impl_wrapped {
+    ($t:ident<$p:ident>) => {
+        pub struct $t<const N: usize, $p>(PhantomData<$p>);
+        impl<const N: usize, $p> $t<N,$p> {
+            pub fn new() -> $t<N,$p> {
+                $t(PhantomData)
+            }
+        }
+    };
+}
+
+
+impl_wrapped!(Optional<P>);
+impl_wrapped!(Repeated<P>);
+impl_wrapped!(Required<P>);
+impl_wrapped!(Packed<P>);
+pub struct PbMessage;
+pub struct PbEnum;
+
+pub struct PbMap<const N: usize,K,V>(PhantomData<(K,V)>);
+impl<const N: usize, K,V> PbMap<N, K,V> {
+    pub fn new() -> PbMap<N,K,V> {
+        PbMap(PhantomData)
     }
 }

@@ -16,7 +16,7 @@ mod tests {
     use prost::Message;
 
     use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, StatData};
-    use crate::tacky_proto::example::MySimpleMessageWriter;
+    use crate::tacky_proto::example::{MySimpleMessageSchema, MySimpleMessageWriter};
     use crate::tacky_proto::useme::StatDataWriter;
 
     #[test]
@@ -58,15 +58,16 @@ mod tests {
         {
             //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
-            writer
-                .anumber(anumber)
-                .manynumbers(&manynumbers)
-                .manynumbers_unpacked(manynumbers.iter().copied())
-                .astring(astring.as_deref())
-                .manystrings(&manystrings)
-                .manybytes(&manybytes)
-                .abytes(&*abytes)
-                .nested(|mut n| {
+            let s = MySimpleMessageSchema {
+                anumber: writer.anumber(anumber),
+                manynumbers: writer.manynumbers(&manynumbers),
+                manynumbers_unpacked: writer.manynumbers_unpacked(manynumbers.iter().copied()),
+                astring: writer.astring(astring.as_deref()),
+                manystrings: writer.manystrings(&manystrings),
+                manybytes: writer.manybytes(&manybytes),
+                abytes: writer.abytes(&*abytes),
+                amap: writer.amap(&amap),
+                nested: writer.nested(|mut n| {
                     n.astring("hello nested");
                     n.num(42);
                     n.deeper(|mut d| {
@@ -75,7 +76,9 @@ mod tests {
                     n.deeper(|mut d| {
                         d.levels(["rep", "str"]);
                     });
-                });
+                })
+            };
+
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
@@ -91,24 +94,24 @@ mod tests {
     #[inline(never)]
     fn test_example_tacky(data: &Stats) -> Vec<u8> {
         let mut buf = Vec::new();
-        //can borrow and iterate over everything
-        let mut writer = StatDataWriter::new(&mut buf, None);
-        let t0 = std::time::Instant::now();
-        writer
-            .durations(data.timings.iter().map(|d| d.as_secs_f64())) // works from iterator
-            .paths(&data.paths); // works from into-iterator
+        // //can borrow and iterate over everything
+        // let mut writer = StatDataWriter::new(&mut buf, None);
+        // let t0 = std::time::Instant::now();
+        // writer
+        //     .durations(data.timings.iter().map(|d| d.as_secs_f64())) // works from iterator
+        //     .paths(&data.paths); // works from into-iterator
 
-        // for ip we can drop to the lower/higher level writer interface, which for protobuf string types implements a write_display fn.
-        //
-        // writer.ips(data.ips.iter().map(|s| s.to_string()));
-        let mut ip_writer = writer.ips_writer();
-        for ip in &data.ips {
-            ip_writer.write_display(ip)
-        }
-        //and we're done, no copying or collecting data.
-        let t1 = t0.elapsed().as_micros();
-        println!("{t1}");
-        drop(writer);
+        // // for ip we can drop to the lower/higher level writer interface, which for protobuf string types implements a write_display fn.
+        // //
+        // // writer.ips(data.ips.iter().map(|s| s.to_string()));
+        // let mut ip_writer = writer.ips_writer();
+        // for ip in &data.ips {
+        //     ip_writer.write_display(ip)
+        // }
+        // //and we're done, no copying or collecting data.
+        // let t1 = t0.elapsed().as_micros();
+        // println!("{t1}");
+        // drop(writer);
         buf
     }
     #[inline(never)]
