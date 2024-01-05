@@ -7,8 +7,11 @@ use pb_rs::types::{FieldType, FileDescriptor, Message};
 
 use crate::{
     formatter::Fmter,
-    simple::{message_def_writer, simple_field_writer, simple_map_writer, simple_message_writer},
-    simple_typed::{get_scalar_writer, get_map_writer}, witness::{simple_field_witness, message_schema_writer, field_witness_type, simple_map_witness, simple_message_witness},
+    simple_typed::{get_map_writer, get_message_writer, get_scalar_writer},
+    witness::{
+        field_witness_type, message_def_writer, simple_field_witness, simple_map_witness,
+        simple_message_witness,
+    },
 };
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
@@ -134,7 +137,7 @@ pub enum PbType {
     Enum(String),    // by name, type is technically just an i32
     Message(String), //name
     SimpleMap(Scalar, Scalar),
-    Map(Box<PbType>, Box<PbType>),
+    Map(Scalar, Box<PbType>),
 }
 impl From<FieldType> for PbType {
     fn from(value: FieldType) -> Self {
@@ -161,12 +164,13 @@ impl From<FieldType> for PbType {
                 let vt: PbType = (*v).into();
                 match (kt, vt) {
                     (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k, v),
-                    (k, v) => PbType::Map(Box::new(k), Box::new((v).into())),
+                    (PbType::Scalar(k), v) => PbType::Map(k, Box::new((v).into())),
+                    _ => panic!("invalid map structure"),
                 }
             }
             //TODO: resolve correctly to enums/messages.
             FieldType::MessageOrEnum(s) => PbType::Message(s),
-            // pb-rs 
+            // pb-rs
             FieldType::Message(_) => todo!(),
             FieldType::Enum(_) => todo!(), //technically int32 according to spec
         }
@@ -231,24 +235,6 @@ impl From<pb_rs::types::Field> for Field {
     }
 }
 
-fn write_simple_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
-    for f in fields {
-        match f.ty {
-            PbType::SimpleMap(_, _) => {
-                simple_map_writer(w, &f).unwrap();
-            }
-            PbType::Scalar(_) => {
-                simple_field_witness(w, f).unwrap();
-                simple_field_writer(w, &f).unwrap();
-            }
-            PbType::Message(_) => {
-                simple_message_writer(w, &f).unwrap();
-            }
-            _ => todo!(),
-        }
-    }
-}
-
 fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
     for f in fields {
         match f.ty {
@@ -260,7 +246,7 @@ fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a 
             }
             PbType::Message(_) => {
                 // the closure based API for nested messages is already generated
-                ()
+                get_message_writer(w, &f).unwrap()
             }
             _ => todo!(),
         }
@@ -287,36 +273,51 @@ fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a
 
 fn write_simple_message(w: &mut Fmter<'_>, m: Message) {
     let name = &m.name;
+    let fields = m.fields.into_iter().map(|f| f.into()).collect::<Vec<_>>();
+
     //write struct
+    indented!(w, r"pub struct {name};").unwrap();
+    indented!(w).unwrap();
     message_def_writer(w, &name).unwrap();
+    write_trait_impl(w, name);
     indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     w.indent();
-    let fields = m.fields.into_iter().map(|f| f.into()).collect::<Vec<_>>();
-    // write_simple_api(w, &fields);
-    // write_writer_api(w, &fields);
+    write_writer_api(w, &fields);
     write_witness_api(w, &fields);
     w.unindent();
     indented!(w, "}}").unwrap();
-
-    indented!(w, r"pub struct {name}Schema {{").unwrap();
-    w.indent();
-    for f in fields {
-        field_witness_type(w, &f);
-    }
-    //write schema
-    w.unindent();
-    indented!(w, "}}").unwrap();
-
+    write_simple_message_schema(w, name, &fields);
 }
 
-fn write_simple_message_schema(w: &mut Fmter<'_>, m: Message) {
-    let name = &m.name;
+pub trait MessageWriterImpl {
+    type Writer<'a>;
+    type Schema;
+    fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a>;
+}
+
+fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
+    indented!(w, r#"impl MessageSchema for {name} {{"#).unwrap();
+    w.indent();
+    indented!(w, "type Writer<'a> = {name}Writer<'a>; ").unwrap();
+    indented!(
+        w,
+        "fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a> {{"
+    )
+    .unwrap();
+    w.indent();
+    indented!(w, " <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))").unwrap();
+    w.unindent();
+    indented!(w, "}}").unwrap();
+    w.unindent();
+    indented!(w, "}}").unwrap();
+}
+
+fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) {
     //write struct
     indented!(w, r"pub struct {name}Schema {{").unwrap();
     w.indent();
-    let fields = m.fields.into_iter().map(|f| f.into()).collect::<Vec<_>>();
     for f in fields {
-        field_witness_type(w, &f);
+        field_witness_type(w, &f).unwrap()
     }
     w.unindent();
     indented!(w, "}}").unwrap();

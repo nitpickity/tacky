@@ -20,9 +20,20 @@ mod tests {
     use crate::tacky_proto::useme::StatDataWriter;
 
     #[test]
+    fn zero_len_msg() {
+        let mut m = MySimpleMessage::default();
+        m.nested = None;
+        m.anumber = 0;
+        println!("{}", m.encoded_len());
+        let v = m.encode_to_vec();
+        println!("{v:?}");
+        let d = MySimpleMessage::decode(&*v).unwrap();
+        println!("{d:?}")
+    }
+    #[test]
     fn it_works() {
         // data
-        let anumber = Some(42);
+        let anumber = 42;
         let manynumbers = vec![1, 2, 3];
         let astring = Some("Hello".into());
         let manystrings = vec!["many".into(), "strings".into()];
@@ -41,7 +52,7 @@ mod tests {
             abytes: Some(abytes.clone()),
             amap: amap.clone(),
             nested: Some(NestedMsg {
-                num: 42,
+                num: Some(42),
                 astring: Some("hello nested".into()),
                 deeper: vec![
                     NestedMore {
@@ -76,9 +87,8 @@ mod tests {
                     n.deeper(|mut d| {
                         d.levels(["rep", "str"]);
                     });
-                })
+                }),
             };
-
         }
 
         let unpacked = MySimpleMessage::decode(&*buf).unwrap();
