@@ -4,6 +4,7 @@ use crate::{
     formatter::Fmter,
     parser::{Field, Label, PbType, Scalar},
 };
+
 #[rustfmt::skip]
 pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     //write struct
@@ -20,9 +21,32 @@ pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
     indented!(w, r"}}")?;
     indented!(w)
 }
+
+#[rustfmt::skip]
+pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
+    let Field {
+        name,
+        number,
+        ty,
+        label,
+    } = field;
+    let mut wrap_label = |l: &str| match label {
+        Label::Required => indented!(w, "pub {name}: Field<{number}, Required<{l}>>,"),
+        Label::Optional => indented!(w, "pub {name}: Field<{number}, Optional<{l}>>,"),
+        Label::Repeated => indented!(w, "pub {name}: Field<{number}, Repeated<{l}>>,"),
+        Label::Packed => indented!(w, "pub {name}: Field<{number}, Packed<{l}>>,"),
+    };
+    match ty {
+        PbType::Scalar(p) => wrap_label(p.tacky_type()),
+        PbType::SimpleMap(k, v) => indented!(w,"pub {name}: Field<{number}, PbMap<{}, {}>>,",k.tacky_type(), v.tacky_type()),
+        PbType::Message(_) => wrap_label("PbMessage"),
+        PbType::Enum(_) => wrap_label("PbEnum"),
+        PbType::Map(_, _) => todo!(),
+    }
+}
 // generate writing methods for simple scalar fields
 #[rustfmt::skip]
-pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
+pub fn simple_field_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
     let Field {
         name,
         number,
@@ -35,24 +59,27 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
     let rust_type = pb_type.rust_type_no_ref();
     let tacky_type = pb_type.tacky_type();
     let write_fn = format!("::tacky::scalars::write_{pb_type}");
+   
     let mk_write_expr =
         |arg| format!("{tacky_type}::write({number}, {arg}, &mut self.tack.buffer);");
     match label {
         Label::Optional => {
+            let witness_type = format!("Field<{number},Optional<{tacky_type}>>");
             let (lf, rust_type) = match pb_type {
                 Scalar::String | Scalar::Bytes => ("<'opt>", format!("&'opt {rust_type}")),
                 _ => ("", rust_type.into()),
             };
             let write_expr = mk_write_expr("value");
-            indented!(w,"pub fn {name}{lf}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> &mut Self {{")?;
+            indented!(w,"pub fn {name}{lf}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> {witness_type} {{")?;
             indented!(w, r"    if let Some(value) = {name}.into() {{")?;
             indented!(w, r"        {write_expr}")?;
             indented!(w, r"    }}")?;
-            indented!(w, r"    self")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
 
         Label::Repeated => {
+            let witness_type = format!("Field<{number},Repeated<{tacky_type}>>");
             let (item, generics, value) = match pb_type {
                 Scalar::String | Scalar::Bytes => {
                     ("T", format!("<T: AsRef<{rust_type}>>"), "value.as_ref()")
@@ -60,25 +87,27 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
                 _ => (rust_type, "".into(), "value"),
             };
             let write_expr = mk_write_expr(value);
-            indented!(w,r"pub fn {name}{generics}(&mut self, {name}: impl IntoIterator<Item = {item}>) -> &mut Self {{")?;
+            indented!(w,r"pub fn {name}{generics}(&mut self, {name}: impl IntoIterator<Item = {item}>) -> {witness_type} {{")?;
             indented!(w, r"    for value in {name} {{")?;
             indented!(w, r"        {write_expr}")?;
             indented!(w, r"    }}")?;
-            indented!(w, r"    self")?;
+            indented!(w, r"     <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
         Label::Required => {
+            let witness_type = format!("Field<{number},Required<{tacky_type}>>");
             let write_expr = mk_write_expr(&name);
-            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> &mut Self {{")?;
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> {witness_type} {{")?;
             indented!(w, r"        {write_expr}")?;
-            indented!(w, r"    self")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
         Label::Packed => {
             // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little space bit skip iterating twice.
             // need to have a check if the iterator is empty first, otherwise we will write the tag\len wrongly.
+            let witness_type = format!("Field<{number}, Packed<{tacky_type}>>");
             let tag = (number << 3) | 2; // wire type 2, length delimited
-            indented!(w,r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> &mut Self {{")?;
+            indented!(w,r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> {witness_type} {{")?;
             indented!(w, r"    let mut it = {name}.into_iter();")?;
             indented!(w, r"    let first = it.next();")?;
             indented!(w, r"    if let Some(value) = first {{")?;
@@ -89,7 +118,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
             indented!(w, r"        }}")?;
             indented!(w, r"        drop(tack);")?;
             indented!(w, r"    }}")?;
-            indented!(w, r"    self")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
     }
@@ -102,7 +131,7 @@ pub fn simple_field_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result 
 ///     optional val type val = 2;
 /// }
 #[rustfmt::skip]
-pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
+pub fn simple_map_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
     let Field {
         name,
         number,
@@ -147,30 +176,37 @@ pub fn simple_map_writer(w: &mut Fmter<'_>, field: Field) -> std::fmt::Result {
     };
     let generics = generics.concat();
     let types = format!("{}, {}", types[0], types[1]);
+    let witness_type = format!("Field<{number}, PbMap<{pkt},{pvt}>>");
     //Most maps (std hashmap/btreemap/hashbrown, etc) give out (&key,&val) items as iterators
-    indented!(w,r"pub fn {name}<{generics}>(&mut self, entries: impl IntoIterator<Item =({types})>) -> &mut Self {{")?;
-    indented!(w,r"    let mut entry_writer = <::tacky::MapEntryWriter<'_,{pkt},{pvt}>>::new(self.tack.buffer, {number});")?;
+    indented!(w,r"pub fn {name}<{generics}>(&mut self, entries: impl IntoIterator<Item =({types})>) -> {witness_type} {{")?;
+    indented!(w,r"    let mut entry_writer = <::tacky::MapEntryWriter<'_,{number},{pkt},{pvt}>>::new(self.tack.buffer);")?;
     indented!(w,r"    for (key, value) in entries {{")?;
     indented!(w,r"        {}",value_adjust[0])?;
     indented!(w,r"        {}",value_adjust[1])?;
     indented!(w,r"        entry_writer.write_entry(key, value);")?;
     indented!(w,r"    }}")?;
-    indented!(w,r"    self")?;
+    indented!(w,r"    <{witness_type}>::new()")?;
     indented!(w,r"}}")
     
 }
 
 // generate writing method for message-type fields
 #[rustfmt::skip]
-pub fn simple_message_writer(
+pub fn simple_message_witness(
     w: &mut Fmter,
-    field: Field,
+    field: &Field,
 ) -> std::fmt::Result {
     let Field { name, number, ty, label } = field;
-    let tag = ty.tag(number as u32);
+    let tag = ty.tag(*number as u32);
     let ty = match ty {
         PbType::Message(m) => m,
         _ => panic!(),
+    };
+    let wrap_label = |l: &str| match label {
+        Label::Required => format!("Field<{number},Required<{l}>>"),
+        Label::Optional => format!("Field<{number},Optional<{l}>>"),
+        Label::Repeated => format!("Field<{number},Repeated<{l}>>"),
+        Label::Packed => panic!("messages cant be packed")
     };
     // due to the inremental nature of this lib, its impossible to actually hold an iterator/collection of message writers,
     // so there isnt any syntactic helper for repeated (nested) message type, the user of the lib just has to hoist the write loop outside
@@ -179,14 +215,15 @@ pub fn simple_message_writer(
     //     w.write_field(i);
     //})
     //}
-    indented!(w,r"pub fn {name}(&mut self, mut {name}: impl FnMut({ty}Writer)) -> &mut Self {{ ")?;
+    let witness_type = wrap_label("PbMessage"); 
+    indented!(w,r"pub fn {name}(&mut self, mut {name}: impl FnMut({ty}Writer)) -> {witness_type} {{ ")?;
     indented!(w,r"    let writer = {ty}Writer::new(&mut self.tack.buffer,Some({tag}));")?;
     indented!(w,r"    {name}(writer);")?;
-    indented!(w,r"    self")?;
+    indented!(w,r"    <{witness_type}>::new()")?;
     indented!(w,r"}}")         
 }
 
-//genrate ate writing method for enum-type fields
+// genrate ate writing method for enum-type fields
 // enums are just i32s, so we take anything thats Into<i32>.
 #[rustfmt::skip]
 fn simple_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {

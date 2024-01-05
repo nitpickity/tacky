@@ -2,24 +2,24 @@
 //! upon creation, it writes down the tag of thie field and a (configurable)fixed width length field.
 //! Once this struct Drop's, it goes back and updates the length field with however much was written to the buffer in the mean time.
 //! Since the length field is fixed width (by default 4 bytes, which allows for messages of size 2**28 -1 bits long.) it can in theory overflow.
-//! currently a Tack will panic on drop if that happens. (but the full value will still be written to the buffer). 
+//! currently a Tack will panic on drop if that happens. (but the full value will still be written to the buffer).
 
-use std::marker::PhantomData;
-use bytes::BufMut;
 use crate::scalars::{self, encoded_len_varint};
+use bytes::BufMut;
+use std::marker::PhantomData;
 /// A Tack marks the start of a as-of-yet unknown length delimited quantity.
 #[must_use]
 pub struct Tack<'b, W: WidthImpl = Width<4>> {
     pub buffer: &'b mut Vec<u8>,
     pub tag: Option<u32>,
     start: u32,
-    _w: PhantomData<W>
+    _w: PhantomData<W>,
 }
 
 /// marker for how many bytes the length field should take/
 pub struct Width<const N: usize>;
 /// functions to write the length in a varint compatible but fixed size manner.
-/// implemented exhaustivelly for Width type, from 1 to 5 bytes. 
+/// implemented exhaustivelly for Width type, from 1 to 5 bytes.
 /// in practice due to the signed 32 bit int arithmetic in many libs, protobuf messages cant be bigger than 2gb.
 pub trait WidthImpl {
     fn write(value: u64, buf: &mut impl BufMut);
@@ -64,7 +64,7 @@ impl WidthImpl for Width<3> {
         buf.put_slice(&[
             ((value & 0x7F) | 0x80) as u8,
             (((value >> 7) & 0x7F) | 0x80) as u8,
-            (((value >> 14) & 0x7F)) as u8,
+            ((value >> 14) & 0x7F) as u8,
         ])
     }
 
@@ -76,10 +76,7 @@ impl WidthImpl for Width<3> {
 impl WidthImpl for Width<2> {
     fn write(value: u64, buf: &mut impl BufMut) {
         assert!(encoded_len_varint(value) < 2usize.pow(14) - 1);
-        buf.put_slice(&[
-            ((value & 0x7F) | 0x80) as u8,
-            (((value >> 7) & 0x7F)) as u8,
-        ])
+        buf.put_slice(&[((value & 0x7F) | 0x80) as u8, ((value >> 7) & 0x7F) as u8])
     }
 
     fn width() -> usize {
@@ -113,7 +110,7 @@ impl<'b, W: WidthImpl> Tack<'b, W> {
             start: buffer.len() as u32,
             buffer,
             tag,
-            _w: PhantomData
+            _w: PhantomData,
         }
     }
 

@@ -1,10 +1,10 @@
-syntax = "proto2";
+syntax = "proto3";
 
 package example;
 
 message MySimpleMessage {
 
-    optional int32 anumber = 1;
+    int32 anumber = 1;
     repeated int32 manynumbers = 7 [packed=true];
     repeated int32 manynumbers_unpacked = 8;
     optional string astring = 2;
@@ -16,7 +16,7 @@ message MySimpleMessage {
 }
 
 message NestedMsg {
-    required int32 num = 1;
+    optional int32 num = 1;
     optional string astring = 2;
     repeated NestedMore deeper = 3;
 }
