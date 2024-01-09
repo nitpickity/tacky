@@ -70,17 +70,17 @@ mod tests {
             //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
             let s = MySimpleMessageSchema {
-                anumber: writer.anumber(anumber),
+                anumber: writer.anumber(Some(anumber)),
                 manynumbers: writer.manynumbers(&manynumbers),
                 manynumbers_unpacked: writer.manynumbers_unpacked(manynumbers.iter().copied()),
                 astring: writer.astring(astring.as_deref()),
                 manystrings: writer.manystrings(&manystrings),
                 manybytes: writer.manybytes(&manybytes),
-                abytes: writer.abytes(&*abytes),
-                amap: writer.amap(&amap),
+                abytes: writer.abytes(Some(&*abytes)),
+                amap: writer.amap(amap.iter().map(|(k, v)| (*k, v))),
                 nested: writer.nested(|mut n| {
-                    n.astring("hello nested");
-                    n.num(42);
+                    n.astring(Some("hello nested"));
+                    n.num(Some(42));
                     n.deeper(|mut d| {
                         d.levels(["some", "strings"]);
                     });

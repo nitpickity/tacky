@@ -59,22 +59,23 @@ pub fn simple_field_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Resul
     let rust_type = pb_type.rust_type_no_ref();
     let tacky_type = pb_type.tacky_type();
     let write_fn = format!("::tacky::scalars::write_{pb_type}");
-   
     let mk_write_expr =
         |arg| format!("{tacky_type}::write({number}, {arg}, &mut self.tack.buffer);");
     match label {
         Label::Optional => {
             let witness_type = format!("Field<{number},Optional<{tacky_type}>>");
-            let (lf, rust_type) = match pb_type {
-                Scalar::String | Scalar::Bytes => ("<'opt>", format!("&'opt {rust_type}")),
-                _ => ("", rust_type.into()),
+            let (item, generics, value) = match pb_type {
+                Scalar::String | Scalar::Bytes => {
+                    ("T", format!("<T: AsRef<{rust_type}>>"), "value.as_ref()")
+                }
+                _ => (rust_type, "".into(), "value"),
             };
-            let write_expr = mk_write_expr("value");
-            indented!(w,"pub fn {name}{lf}(&mut self, {name}: impl Into<Option<{rust_type}>>) -> {witness_type} {{")?;
-            indented!(w, r"    if let Some(value) = {name}.into() {{")?;
+            let write_expr = mk_write_expr(value);
+            indented!(w,r"pub fn {name}{generics}(&mut self, {name}: Option<{item}>) -> {witness_type} {{")?;
+            indented!(w, r"    if let Some(value) = {name}{{")?;
             indented!(w, r"        {write_expr}")?;
             indented!(w, r"    }}")?;
-            indented!(w, r"    <{witness_type}>::new()")?;
+            indented!(w, r"     <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
 
@@ -155,9 +156,7 @@ pub fn simple_map_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
         }
         Scalar::Bytes => {panic!("Bytes not allowed as protobuf map key")},
         _ => {
-            generics[0] = "'r, ".into();
-            types[0] = format!("&'r {kt}");
-            value_adjust[0] = "let key = *key;".into()
+            types[0] = format!("{kt}");
         }
     };
 
@@ -169,9 +168,7 @@ pub fn simple_map_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
             value_adjust[1] = "let value = value.as_ref();".into()
         }
         _ => {
-            generics[0] = "'r, ".into();
-            types[1] = format!("&'r {vt}");
-            value_adjust[1] = "let value = *value;".into()
+            types[1] = format!("{vt}");
         }
     };
     let generics = generics.concat();
@@ -187,7 +184,6 @@ pub fn simple_map_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
     indented!(w,r"    }}")?;
     indented!(w,r"    <{witness_type}>::new()")?;
     indented!(w,r"}}")
-    
 }
 
 // generate writing method for message-type fields
@@ -215,12 +211,12 @@ pub fn simple_message_witness(
     //     w.write_field(i);
     //})
     //}
-    let witness_type = wrap_label("PbMessage"); 
+    let witness_type = wrap_label("PbMessage");
     indented!(w,r"pub fn {name}(&mut self, mut {name}: impl FnMut({ty}Writer)) -> {witness_type} {{ ")?;
     indented!(w,r"    let writer = {ty}Writer::new(&mut self.tack.buffer,Some({tag}));")?;
     indented!(w,r"    {name}(writer);")?;
     indented!(w,r"    <{witness_type}>::new()")?;
-    indented!(w,r"}}")         
+    indented!(w,r"}}")
 }
 
 // genrate ate writing method for enum-type fields

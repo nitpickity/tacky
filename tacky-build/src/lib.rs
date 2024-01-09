@@ -1,3 +1,4 @@
+#![allow(unused, dead_code)]
 #[macro_use]
 mod formatter;
 mod parser;

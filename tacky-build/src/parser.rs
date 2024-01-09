@@ -329,6 +329,7 @@ pub fn write_proto(file: &str, output: &str) {
     let mut buf = String::new();
     let mut fmter = Fmter::new(&mut buf);
     let mod_name = test_file.package;
+    indented!(fmter, "#[allow(unused, dead_code)]").unwrap();
     indented!(fmter, "pub mod {mod_name} {{").unwrap();
     fmter.indent();
     indented!(fmter, "use ::tacky::*;").unwrap();
