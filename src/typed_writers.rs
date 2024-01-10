@@ -1,5 +1,5 @@
 //! Base module providing tools for working with protobuf scalars and maps where fields are scalars.
-use crate::{scalars::*, tack::Tack, Width};
+use crate::{scalars::*, tack::Tack};
 use bytes::BufMut;
 use std::{fmt::Display, marker::PhantomData};
 
@@ -175,7 +175,7 @@ impl<'b, const N: usize> ScalarWriter<'b, N, PbString> {
     pub fn write_display(&mut self, d: impl Display) {
         use std::io::Write;
         let tag = ((N as i32) << 3) | (PbString::WIRE_TYPE as i32);
-        let t: Tack<Width<1>> = Tack::new(self.buf, Some(tag as u32));
+        let t = Tack::new_with_width(self.buf, Some(tag as u32), 1);
         write!(t.buffer, "{d}").unwrap();
     }
 }

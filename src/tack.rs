@@ -6,129 +6,102 @@
 
 use crate::scalars::{self, encoded_len_varint};
 use bytes::BufMut;
-use std::marker::PhantomData;
+use std::num::NonZeroU32;
 /// A Tack marks the start of a as-of-yet unknown length delimited quantity.
 #[must_use]
-pub struct Tack<'b, W: WidthImpl = Width<4>> {
+pub struct Tack<'b> {
     pub buffer: &'b mut Vec<u8>,
-    pub tag: Option<u32>,
+    pub tag: Option<NonZeroU32>,
     start: u32,
-    _w: PhantomData<W>,
+    width: u32,
 }
 
-/// marker for how many bytes the length field should take/
-pub struct Width<const N: usize>;
-/// functions to write the length in a varint compatible but fixed size manner.
-/// implemented exhaustivelly for Width type, from 1 to 5 bytes.
-/// in practice due to the signed 32 bit int arithmetic in many libs, protobuf messages cant be bigger than 2gb.
-pub trait WidthImpl {
-    fn write(value: u64, buf: &mut impl BufMut);
-    fn width() -> usize;
+fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
+    assert!(width <= 5 && width > 0);
+    assert!(value < 2u64.pow(7 * width as u32) - 1);
+    if width == 1 {
+        buf.put_u8(value as u8);
+        return;
+    }
+    for i in 0..(width - 1) {
+        buf.put_u8((((value >> (7 * i)) & 0x7F) | 0x80) as u8)
+    }
+    buf.put_u8(((value >> (7 * width)) & 0x7F) as u8)
 }
 
-impl WidthImpl for Width<5> {
-    fn write(value: u64, buf: &mut impl BufMut) {
-        assert!(encoded_len_varint(value) < 2usize.pow(35) - 1);
-        buf.put_slice(&[
-            ((value & 0x7F) | 0x80) as u8,
-            (((value >> 7) & 0x7F) | 0x80) as u8,
-            (((value >> 14) & 0x7F) | 0x80) as u8,
-            (((value >> 21) & 0x7F) | 0x80) as u8,
-            ((value >> 28) & 0x7F) as u8,
-        ])
-    }
-
-    fn width() -> usize {
-        5
-    }
-}
-impl WidthImpl for Width<4> {
-    fn write(value: u64, buf: &mut impl BufMut) {
-        assert!(encoded_len_varint(value) < 2usize.pow(28) - 1);
-        buf.put_slice(&[
-            ((value & 0x7F) | 0x80) as u8,
-            (((value >> 7) & 0x7F) | 0x80) as u8,
-            (((value >> 14) & 0x7F) | 0x80) as u8,
-            ((value >> 21) & 0x7F) as u8,
-        ])
-    }
-
-    fn width() -> usize {
-        4
-    }
-}
-
-impl WidthImpl for Width<3> {
-    fn write(value: u64, buf: &mut impl BufMut) {
-        assert!(encoded_len_varint(value) < 2usize.pow(21) - 1);
-        buf.put_slice(&[
-            ((value & 0x7F) | 0x80) as u8,
-            (((value >> 7) & 0x7F) | 0x80) as u8,
-            ((value >> 14) & 0x7F) as u8,
-        ])
-    }
-
-    fn width() -> usize {
-        3
-    }
-}
-
-impl WidthImpl for Width<2> {
-    fn write(value: u64, buf: &mut impl BufMut) {
-        assert!(encoded_len_varint(value) < 2usize.pow(14) - 1);
-        buf.put_slice(&[((value & 0x7F) | 0x80) as u8, ((value >> 7) & 0x7F) as u8])
-    }
-
-    fn width() -> usize {
-        2
-    }
-}
-
-impl WidthImpl for Width<1> {
-    fn write(value: u64, buf: &mut impl BufMut) {
-        assert!(encoded_len_varint(value) < 2usize.pow(7) - 1);
-        buf.put_u8(value as u8)
-    }
-
-    fn width() -> usize {
-        1
-    }
-}
-
-impl<'b, W: WidthImpl> Tack<'b, W> {
+impl<'b> Tack<'b> {
     /// creates a new tack, which marks the start of a length-delimited field of TBD length.
     /// takes a buffer, and an optional tag. for top level messages, this will be None, as they dont have a tag or length delimiter of their own.
     pub fn new(buffer: &'b mut Vec<u8>, tag: Option<u32>) -> Self {
+        let tag = tag.and_then(NonZeroU32::new);
         if let Some(tag) = tag {
             // writing in a nested context, need to write down the tag, and then len.
-            scalars::write_varint(tag as u64, buffer);
+            scalars::write_varint(tag.get() as u64, buffer);
             // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
-            W::write(42, buffer)
+            write_wide_varint(4, 42, buffer)
         }
         // now start represents the actual start of the data buffer, excluding the tag/length prefix
         Tack {
             start: buffer.len() as u32,
             buffer,
             tag,
-            _w: PhantomData,
+            width: 4,
+        }
+    }
+
+    pub fn new_with_width(buffer: &'b mut Vec<u8>, tag: Option<u32>, width: u32) -> Self {
+        let tag = tag.and_then(NonZeroU32::new);
+        if let Some(tag) = tag {
+            // writing in a nested context, need to write down the tag, and then len.
+            scalars::write_varint(tag.get() as u64, buffer);
+            // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
+            write_wide_varint(width as usize, 42, buffer)
+        }
+        // now start represents the actual start of the data buffer, excluding the tag/length prefix
+        Tack {
+            start: buffer.len() as u32,
+            buffer,
+            tag,
+            width,
         }
     }
 
     fn close(&mut self) {
         // not a nested field, just go back.
-        if self.tag.is_none() {
+        let Some(tag) = self.tag else {
             return;
-        }
+        };
         let start = self.start as usize;
+        let width = self.width as usize;
         let data_len = self.buffer.len() - start;
-        let mut len_prefix_loc = &mut self.buffer[start - W::width()..start];
         // write the correct length now
-        W::write(data_len as u64, &mut len_prefix_loc);
+        if data_len > 0 {
+            let mut len_prefix_loc = &mut self.buffer[start - width..start];
+            write_wide_varint(width, data_len as u64, &mut len_prefix_loc);
+        } else {
+            // no data written, remove the tack
+            let tag_len = encoded_len_varint(tag.get() as u64);
+            self.buffer.truncate(start - tag_len);
+        }
     }
 }
 
-impl<'b, W: WidthImpl> Drop for Tack<'b, W> {
+impl<'b> Drop for Tack<'b> {
     fn drop(&mut self) {
         self.close()
+    }
+}
+
+#[test]
+fn test_write() {
+    let mut buf = Vec::new();
+    {
+        for i in 2..=5 {
+            write_wide_varint(i, 15723, &mut buf);
+            println!("{buf:?}");
+            let dec = prost::encoding::decode_varint(&mut buf.as_slice());
+            println!("{dec:?}");
+            buf.clear()
+        }
     }
 }

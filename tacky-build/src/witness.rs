@@ -104,21 +104,15 @@ pub fn simple_field_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Resul
             indented!(w, r"}}")
         }
         Label::Packed => {
-            // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little space bit skip iterating twice.
-            // need to have a check if the iterator is empty first, otherwise we will write the tag\len wrongly.
+            // encoded using the same wide-varint approach as nested messages. this means that we "waste" a little (3 bytes at worst) space but skip iterating twice.
             let witness_type = format!("Field<{number}, Packed<{tacky_type}>>");
             let tag = (number << 3) | 2; // wire type 2, length delimited
-            indented!(w,r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> {witness_type} {{")?;
-            indented!(w, r"    let mut it = {name}.into_iter();")?;
-            indented!(w, r"    let first = it.next();")?;
-            indented!(w, r"    if let Some(value) = first {{")?;
-            indented!(w,r"        let tack: Tack<Width<2>> = Tack::new(self.tack.buffer, Some({tag}));")?;
+            indented!(w, r"pub fn {name}<'rep>(&mut self, {name}: impl IntoIterator<Item = &'rep {rust_type}>) -> {witness_type} {{")?;
+            indented!(w, r"    let tack = Tack::new_with_width(self.tack.buffer, Some({tag}), 2);")?;
+            indented!(w, r"    for value in {name} {{")?;
             indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
-            indented!(w, r"        for value in it {{")?;
-            indented!(w, r"            {write_fn}(*value, tack.buffer);")?;
-            indented!(w, r"        }}")?;
-            indented!(w, r"        drop(tack);")?;
             indented!(w, r"    }}")?;
+            indented!(w, r"    drop(tack);")?;
             indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
