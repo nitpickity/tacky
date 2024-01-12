@@ -108,7 +108,7 @@ Secondly is fields in messages that are themselves Message types. those are also
 
 In both of these cases, what we do here is a slight abuse of the LEB128 (varint) encoding. we allocate a fixed width place-holder length up front. once the message writer drops, it goes back to that place in the buffer and writes the correct length. (see the Tack module in this lib for detail). this makes the length field 2-3 bytes longer. 
 
-for packed fields transparent to to users, the generated API takes care of it. encoding packed varints this way is also vastly faster than the iterate-twice approach commontly used (almost twice as fast).
+for packed fields transparent to to users, the generated API takes care of it. encoding packed varints this way is also vastly faster than the iterate-twice approach commontly used (almost twice as fast, for obvious reasons).
 note that currently this limits the length of a single packed field to 16kb. if you need longer, use the lower-level writer API to configure this.
 
 for message-type fields,the generated API is closure based, to hide this detail from users.
@@ -165,12 +165,13 @@ fn useage() {
 }
 
 ```
-
 The above trick is also what allows us to write string fields from Display impls and not only &str :)
 ## Current limitations
-Currently, imports/includes/nested defs are not handled. that is, all messages must be flat within a file. TODO.
+OneOf type fields are not handled, TODO.
 
-Deserializing isnt really in scope, unless i find a nice way to do it that fits what this library wants to do.
+imports/includes/nested defs are not handled. that is, all messages must be flat within a file. TODO.
+
+Deserializing isnt really in scope, unless i find a nice way to do it that fits what this library wants to do. use prost maybe, as that what i test against right now.
 
 Would be nice to add a Derive for messages to serialize via Tacky, in case all their fields match. something like
 ```rust
