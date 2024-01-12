@@ -208,38 +208,3 @@ pub trait MessageSchema {
     type Writer<'a>;
     fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a>;
 }
-
-pub struct MessageWriter<'b, const N: usize, M> {
-    buf: &'b mut Vec<u8>,
-    _m: PhantomData<M>,
-}
-
-impl<'b, const N: usize, M: MessageSchema> MessageWriter<'b, N, M> {
-    pub fn new(buf: &'b mut Vec<u8>) -> Self {
-        Self {
-            buf,
-            _m: PhantomData,
-        }
-    }
-    #[cfg(feature = "prost-compat")]
-    pub fn write_prost<P: prost::Message>(&mut self, m: P) -> Result<(), prost::EncodeError> {
-        let tag = (N << 3) | 2;
-        write_varint(tag as u64, self.buf);
-        let len = m.encoded_len();
-        write_varint(len as u64, self.buf);
-        m.encode(self.buf)
-    }
-}
-
-impl<'b, const N: usize, M: MessageSchema> MessageWriter<'b, N, M> {
-    pub fn write_msg(&'b mut self, mut f: impl FnMut(M::Writer<'_>)) {
-        let tag = (N << 3) | 2;
-        let m = M::new_writer(self.buf, Some(tag as i32));
-        f(m)
-    }
-}
-impl<'a, 'b, const N: usize, M: MessageSchema> MessageWriter<'b, N, M> {
-    pub fn close<P>(self) -> Field<N, P> {
-        Field::new()
-    }
-}

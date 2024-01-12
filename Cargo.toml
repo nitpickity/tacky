@@ -11,8 +11,7 @@ members = ["tacky-build", "testing"]
 
 [dependencies]
 bytes = "1"
-prost = {version = "0.12", optional = true}
 
-[features]
-default = ["prost-compat"]
-prost-compat = ["prost"]
+
+[dev-features]
+prost = "0.12"
