@@ -81,7 +81,7 @@ impl<'b> Tack<'b> {
         } else {
             // no data written, remove the tack
             let tag_len = encoded_len_varint(tag.get() as u64);
-            self.buffer.truncate(start - tag_len);
+            self.buffer.truncate(start - (tag_len + width));
         }
     }
 }
