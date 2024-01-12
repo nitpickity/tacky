@@ -1,5 +1,5 @@
 # A slightly sticky protobuf writer
-Tacky is a simple, protobuf serialiser (not deserializer). it contains types to allow representing the protobuf definition at the rust type level, and functions to write values correctly. Given a protobuf definition, tacky-build will generate a simple rust type representing the protobuf schema, and a builder-like API to write your message. 
+Tacky is a simple, protobuf serialiser (not deserializer). it contains types to allow representing the protobuf definition at the rust type level, and functions to write values correctly. Given a protobuf definition, tacky-build will generate a rust type-level representation of the protobuf schema, and a builder-like API to write your message. 
 every function in the builder api just tacks on the relevant field/message to a buffer, abstracting over the protobuf types, field numbers, and wire types. 
 This is a lower level library that concerns itself with providing functions to work with writing data in a protobuf compatible fashion. 
 
@@ -51,7 +51,7 @@ Tacky instead lifts the protobuf def to the rust type level, and creates a write
 and partly a lower level api that returns a typed writer for that specific field.
 ```rust
 // the schema as a ZST
-struct StatsData {
+struct StatsDataSchema {
     ips: Field<1,Repeated<PbString>>,
     paths: Field<2,Repeated<PbString>>,
     durations: Field<3,Repeated<Double>>,
@@ -60,23 +60,17 @@ struct StatsData {
 pub struct StatDataWriter<'buf> {
     tack: ::tacky::tack::Tack<'buf>,
 }
-//writer for said schema
+//writer for said schema returning "witnesses" for the written fields
 impl<'buf> StatDataWriter<'buf> {
     pub fn new(buf: &'buf mut Vec<u8>, tag: impl Into<Option<u32>>) -> Self {..}
     pub fn ips<T: AsRef<str>>(&mut self, ips: impl IntoIterator<Item = T>) -> Field<1,Repeated<PbString>> {..}
     pub fn paths<T: AsRef<str>>(&mut self, paths: impl IntoIterator<Item = T>) -> Field<2,Repeated<PbString>> {..}
     pub fn durations(&mut self, durations: impl IntoIterator<Item = f64>) -> Field<3,Repeated<Double>> {..}
-    //lower level api
-    pub fn ips_writer(&mut self) -> ScalarWriter<'_,PbString> {..}
-    pub fn paths_writer(&mut self) -> ScalarWriter<'_,PbString> {..}
-    pub fn durations_writer(&mut self) -> ScalarWriter<'_,Double> {..}
-
 }
 
 fn serialise_tacky(data: &Data) {
     let mut buf = Vec::new();
     let mut writer = StatDataWriter::new(&mut buf, None);
-    // using the higher level API:
     writer.paths(&data.paths) //from BTreeSet<Arc<str>> iter
     writer.durations(data.durations.iter().map(|dur| dur.as_secs_f64())) 
     writer.ips(data.ips.iter().map(|ip| ip.to_string())) //allocates new strings for Ips, but doesnt allocate a vec to hold them.
@@ -89,16 +83,16 @@ fn serialise_tacky(data: &Data) {
     }
 }
 
-// sometimes when you update a protobuf file, you want to be sure you actually remember to write that new field. since tacky lifts the schema to the rust type level, you can use that ZST to make sure you have exhaustive coverage;
+// sometimes when you update a protobuf file, you want to be sure you actually remember to write that new field. since tacky lifts the schema to the rust type level, you can use that ZST type to make sure you have exhaustive coverage at compile time.
 fn serialise_exhaustive_tacky(data: &Data) {
     let mut buf = Vec::new();
     let mut writer = StatDataWriter::new(&mut buf, None);
 
-    let StatsData {
+    let _schema =  StatsDataSchema {
         paths: writer.paths(&data.paths),
         durations: writer.durations(data.durations.iter().map(|dur| dur.as_secs_f64())) 
         ips: writer.ips(data.ips.iter().map(|ip| ip.to_string()))
-    }
+    };
 }
 
 ```
