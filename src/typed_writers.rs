@@ -171,11 +171,15 @@ impl<'b, const N: usize, P: ProtobufScalar> ScalarWriter<'b, N, P> {
 
 impl<'b, const N: usize> ScalarWriter<'b, N, PbString> {
     /// Writes values to string via their Display impl.
-    /// the max length of the string here is 127 bytes, which should cover most cases
-    pub fn write_display(&mut self, d: impl Display) {
+    /// the max length of the string here is 127 bytes, which should cover most cases this is designed for.
+    /// NOTE: incl_empty controls wether the write will have proto3 or proto2 semantics.
+    /// if false, if the written length ends up being 0 ("", empty string), the tag/len wont be written either (proto3)
+    /// if true, the empty value will still be written, like proto2 or proto3 with explicit presence
+    pub fn write_display(&mut self, d: impl Display, incl_empty: bool) {
         use std::io::Write;
         let tag = ((N as i32) << 3) | (PbString::WIRE_TYPE as i32);
-        let t = Tack::new_with_width(self.buf, Some(tag as u32), 1);
+        let mut t = Tack::new_with_width(self.buf, Some(tag as u32), 1);
+        t.rewind = !incl_empty;
         write!(t.buffer, "{d}").unwrap();
     }
 }

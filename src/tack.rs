@@ -11,6 +11,9 @@ use std::num::NonZeroU32;
 #[must_use]
 pub struct Tack<'b> {
     pub buffer: &'b mut Vec<u8>,
+    // if the length of data written is 0, controls if the buffer is rewound to before the tag, or keeps the tag and len of 0.
+    // default true
+    pub rewind: bool,
     pub tag: Option<NonZeroU32>,
     start: u32,
     width: u32,
@@ -44,6 +47,7 @@ impl<'b> Tack<'b> {
         Tack {
             start: buffer.len() as u32,
             buffer,
+            rewind: true,
             tag,
             width: 4,
         }
@@ -61,6 +65,7 @@ impl<'b> Tack<'b> {
         Tack {
             start: buffer.len() as u32,
             buffer,
+            rewind: true,
             tag,
             width,
         }
@@ -78,7 +83,7 @@ impl<'b> Tack<'b> {
         if data_len > 0 {
             let mut len_prefix_loc = &mut self.buffer[start - width..start];
             write_wide_varint(width, data_len as u64, &mut len_prefix_loc);
-        } else {
+        } else if self.rewind {
             // no data written, remove the tack
             let tag_len = encoded_len_varint(tag.get() as u64);
             self.buffer.truncate(start - (tag_len + width));
@@ -92,16 +97,21 @@ impl<'b> Drop for Tack<'b> {
     }
 }
 
-#[test]
-fn test_write() {
-    let mut buf = Vec::new();
-    {
-        for i in 2..=5 {
-            write_wide_varint(i, 15723, &mut buf);
-            println!("{buf:?}");
-            let dec = prost::encoding::decode_varint(&mut buf.as_slice());
-            println!("{dec:?}");
-            buf.clear()
+#[cfg(test)]
+mod tests {
+    use crate::tack::write_wide_varint;
+
+    #[test]
+    fn test_write() {
+        let mut buf = Vec::new();
+        {
+            for i in 2..=5 {
+                write_wide_varint(i, 15723, &mut buf);
+                println!("{buf:?}");
+                let dec = prost::encoding::decode_varint(&mut buf.as_slice());
+                println!("{dec:?}");
+                buf.clear()
+            }
         }
     }
 }

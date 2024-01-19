@@ -13,5 +13,5 @@ members = ["tacky-build", "testing"]
 bytes = "1"
 
 
-[dev-features]
+[dev-dependencies]
 prost = "0.12"
