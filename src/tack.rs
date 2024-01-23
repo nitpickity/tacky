@@ -41,7 +41,7 @@ impl<'b> Tack<'b> {
             // writing in a nested context, need to write down the tag, and then len.
             scalars::write_varint(tag.get() as u64, buffer);
             // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
-            write_wide_varint(4, 42, buffer)
+            write_wide_varint(4, 0, buffer)
         }
         // now start represents the actual start of the data buffer, excluding the tag/length prefix
         Tack {
@@ -59,7 +59,7 @@ impl<'b> Tack<'b> {
             // writing in a nested context, need to write down the tag, and then len.
             scalars::write_varint(tag.get() as u64, buffer);
             // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
-            write_wide_varint(width as usize, 42, buffer)
+            write_wide_varint(width as usize, 0, buffer)
         }
         // now start represents the actual start of the data buffer, excluding the tag/length prefix
         Tack {
@@ -79,9 +79,9 @@ impl<'b> Tack<'b> {
         let start = self.start as usize;
         let width = self.width as usize;
         let data_len = self.buffer.len() - start;
+        let mut len_prefix_loc = &mut self.buffer[start - width..start];
         // write the correct length now
         if data_len > 0 {
-            let mut len_prefix_loc = &mut self.buffer[start - width..start];
             write_wide_varint(width, data_len as u64, &mut len_prefix_loc);
         } else if self.rewind {
             // no data written, remove the tack
