@@ -70,9 +70,9 @@ mod tests {
             //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
             let s = MySimpleMessageSchema {
-                anumber: writer.anumber(Some(anumber)),
+                anumber: writer.anumber(anumber),
                 manynumbers: writer.manynumbers(&manynumbers),
-                manynumbers_unpacked: writer.manynumbers_unpacked(manynumbers.iter().copied()),
+                manynumbers_unpacked: writer.manynumbers_unpacked(&manynumbers),
                 astring: writer.astring(astring.as_deref()),
                 manystrings: writer.manystrings(&manystrings),
                 manybytes: writer.manybytes(&manybytes),

@@ -38,6 +38,7 @@ pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
         Label::Optional => indented!(w, "pub {name}: Field<{number}, Optional<{l}>>,"),
         Label::Repeated => indented!(w, "pub {name}: Field<{number}, Repeated<{l}>>,"),
         Label::Packed => indented!(w, "pub {name}: Field<{number}, Packed<{l}>>,"),
+        Label::Plain => indented!(w, "pub {name}: Field<{number}, Plain<{l}>>,")
     };
     match ty {
         PbType::Scalar(p) => wrap_label(p.tacky_type()),
@@ -116,6 +117,16 @@ pub fn simple_field_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Resul
             indented!(w, r"        {write_fn}(*value, tack.buffer);")?;
             indented!(w, r"    }}")?;
             indented!(w, r"    drop(tack);")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
+        Label::Plain => {
+            let witness_type = format!("Field<{number},Plain<{tacky_type}>>");
+            let write_expr = mk_write_expr(&name);
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> {witness_type} {{")?;
+            indented!(w, r"        if {name} != Default::default() {{")?;
+            indented!(w, r"            {write_expr}")?;
+            indented!(w, r"        }}")?;
             indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
@@ -199,7 +210,8 @@ pub fn simple_message_witness(
         Label::Required => format!("Field<{number},Required<{l}>>"),
         Label::Optional => format!("Field<{number},Optional<{l}>>"),
         Label::Repeated => format!("Field<{number},Repeated<{l}>>"),
-        Label::Packed => panic!("messages cant be packed")
+        Label::Packed => panic!("messages cant be packed"),
+        Label::Plain => todo!(),
     };
     // due to the inremental nature of this lib, its impossible to actually hold an iterator/collection of message writers,
     // so there isnt any syntactic helper for repeated (nested) message type, the user of the lib just has to hoist the write loop outside

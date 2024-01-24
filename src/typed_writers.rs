@@ -33,6 +33,7 @@ pub struct Optional<P>(PhantomData<P>); // also applied to proto3 fields with no
 pub struct Repeated<P>(PhantomData<P>);
 pub struct Required<P>(PhantomData<P>);
 pub struct Packed<P>(PhantomData<P>);
+pub struct Plain<P>(PhantomData<P>);
 
 // a complete field in a message, field number and type
 pub struct Field<const N: usize, P>(PhantomData<P>);
