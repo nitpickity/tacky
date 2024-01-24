@@ -167,7 +167,6 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
             }
         }
         //TODO: resolve correctly to enums/messages.
-        FieldType::MessageOrEnum(s) => PbType::Message(s),
         // pb-rs
         FieldType::Message(m) => {
             let name = &m.get_message(desc).name;
@@ -179,6 +178,7 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
             let values = e.fields.iter().map(|(_, v)| *v).collect();
             PbType::Enum((name, values))
         }
+        FieldType::MessageOrEnum(s) => unreachable!(),
     }
 }
 
