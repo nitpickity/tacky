@@ -7,10 +7,10 @@ use pb_rs::types::{FieldType, FileDescriptor, Message};
 
 use crate::{
     formatter::Fmter,
-    simple_typed::{get_map_writer, get_message_writer, get_scalar_writer},
+    simple_typed::{get_enum_writer, get_map_writer, get_message_writer, get_scalar_writer},
     witness::{
-        field_witness_type, message_def_writer, simple_field_witness, simple_map_witness,
-        simple_message_witness,
+        field_witness_type, message_def_writer, simple_enum_witness, simple_field_witness,
+        simple_map_witness, simple_message_witness,
     },
 };
 
@@ -249,16 +249,6 @@ impl From<pb_rs::types::Frequency> for Label {
         }
     }
 }
-// impl From<pb_rs::types::Field> for Field {
-//     fn from(value: pb_rs::types::Field) -> Self {
-//         Field {
-//             name: value.name,
-//             number: value.number,
-//             ty: value.typ.into(),
-//             label,
-//         }
-//     }
-// }
 
 fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
     for f in fields {
@@ -273,6 +263,7 @@ fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a 
                 // the closure based API for nested messages is already generated
                 get_message_writer(w, &f).unwrap()
             }
+            PbType::Enum(_) => get_enum_writer(w, &f).unwrap(),
             _ => todo!(),
         }
     }
@@ -291,6 +282,7 @@ fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a
                 // the closure based API for nested messages is already generated
                 simple_message_witness(w, &f).unwrap()
             }
+            PbType::Enum(_) => simple_enum_witness(w, &f).unwrap(),
             _ => todo!(),
         }
     }

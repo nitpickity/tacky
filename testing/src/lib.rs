@@ -15,7 +15,7 @@ mod tests {
 
     use prost::Message;
 
-    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, StatData};
+    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, SimpleEnum, StatData};
     use crate::tacky_proto::example::{MySimpleMessageSchema, MySimpleMessageWriter};
     use crate::tacky_proto::useme::StatDataWriter;
 
@@ -63,6 +63,7 @@ mod tests {
                     },
                 ],
             }),
+            numnum: SimpleEnum::One as i32,
         };
 
         let mut buf = Vec::new();
@@ -88,6 +89,7 @@ mod tests {
                         d.levels(["rep", "str"]);
                     });
                 }),
+                numnum: writer.numnum(SimpleEnum::One as i32),
             };
         }
 

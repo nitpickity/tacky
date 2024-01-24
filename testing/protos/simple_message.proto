@@ -13,6 +13,7 @@ message MySimpleMessage {
     optional bytes abytes = 5;
     map<int32,string> amap = 6;
     optional NestedMsg nested = 9;
+    SimpleEnum numnum = 10;
 }
 
 message NestedMsg {
@@ -23,4 +24,9 @@ message NestedMsg {
 
 message NestedMore {
     repeated string levels = 1;
+}
+
+enum SimpleEnum {
+    ONE = 0;
+    TWO = 1;
 }
