@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-pb-rs = "0.10"
-tacky = {path = ".."}
+pb-rs = { path = "../pbrs" }
+tacky = { path = ".." }

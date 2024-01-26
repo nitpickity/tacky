@@ -65,7 +65,7 @@ pub fn get_message_writer(w: &mut Fmter, field: &Field) -> std::fmt::Result {
     };
     let wrap_label = |l: &str| match label {
         Label::Required => format!("Field<{number},Required<{l}>>"),
-        Label::Optional => format!("Field<{number},Optional<{l}>>"),
+        Label::Optional | Label::Plain => format!("Field<{number},Optional<{l}>>"),
         Label::Repeated => format!("Field<{number},Repeated<{l}>>"),
         Label::Packed => panic!("messages cant be packed"),
     };
@@ -87,6 +87,18 @@ pub fn get_message_writer(w: &mut Fmter, field: &Field) -> std::fmt::Result {
 }
 //genrate ate writing method for enum-type fields
 // enums are just i32s, so we take anything thats Into<i32>.
-fn get_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
-    todo!()
+pub fn get_enum_writer(w: &mut Fmter, field: &Field) -> std::fmt::Result {
+    let Field {
+        name,
+        number,
+        ty,
+        label: _,
+    } = field;
+    let PbType::Enum((ename, valid)) = ty else {
+        panic!()
+    };
+    let full_type = format!("EnumWriter<'_,{number}>");
+    indented!(w, r"pub fn {name}_writer(&mut self) -> {full_type} {{")?;
+    indented!(w, r"    <{full_type}>::new(&mut self.tack.buffer)")?;
+    indented!(w, r"}}")
 }

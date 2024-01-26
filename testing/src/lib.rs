@@ -15,7 +15,7 @@ mod tests {
 
     use prost::Message;
 
-    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, StatData};
+    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, SimpleEnum, StatData};
     use crate::tacky_proto::example::{MySimpleMessageSchema, MySimpleMessageWriter};
     use crate::tacky_proto::useme::StatDataWriter;
 
@@ -63,6 +63,7 @@ mod tests {
                     },
                 ],
             }),
+            numnum: SimpleEnum::One as i32,
         };
 
         let mut buf = Vec::new();
@@ -70,9 +71,9 @@ mod tests {
             //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
             let s = MySimpleMessageSchema {
-                anumber: writer.anumber(Some(anumber)),
+                anumber: writer.anumber(anumber),
                 manynumbers: writer.manynumbers(&manynumbers),
-                manynumbers_unpacked: writer.manynumbers_unpacked(manynumbers.iter().copied()),
+                manynumbers_unpacked: writer.manynumbers_unpacked(&manynumbers),
                 astring: writer.astring(astring.as_deref()),
                 manystrings: writer.manystrings(&manystrings),
                 manybytes: writer.manybytes(&manybytes),
@@ -88,6 +89,7 @@ mod tests {
                         d.levels(["rep", "str"]);
                     });
                 }),
+                numnum: writer.numnum(SimpleEnum::One as i32),
             };
         }
 

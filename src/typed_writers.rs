@@ -33,6 +33,7 @@ pub struct Optional<P>(PhantomData<P>); // also applied to proto3 fields with no
 pub struct Repeated<P>(PhantomData<P>);
 pub struct Required<P>(PhantomData<P>);
 pub struct Packed<P>(PhantomData<P>);
+pub struct Plain<P>(PhantomData<P>);
 
 // a complete field in a message, field number and type
 pub struct Field<const N: usize, P>(PhantomData<P>);
@@ -144,6 +145,26 @@ implscalar!(
 );
 implscalar!(PbBytes, &'a [u8], WireType::LEN, write_bytes, len_of_bytes);
 
+pub struct EnumWriter<'b, const N: usize> {
+    buf: &'b mut Vec<u8>,
+}
+
+impl<'b, const N: usize> EnumWriter<'b, N> {
+    pub fn new(buf: &'b mut Vec<u8>) -> Self {
+        Self { buf }
+    }
+
+    pub fn write_field<'a>(&mut self, value: i32) {
+        Int32::write(N as i32, value, self.buf)
+    }
+
+    pub fn write_untagged<'a>(&mut self, value: i32) {
+        Int32::write_value(value, self.buf)
+    }
+    pub fn write_tag<'a>(&mut self) {
+        Int32::write_tag(N as i32, self.buf)
+    }
+}
 pub struct ScalarWriter<'b, const N: usize, P> {
     buf: &'b mut Vec<u8>,
     _pbtype: PhantomData<P>,

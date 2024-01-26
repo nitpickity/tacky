@@ -1,3 +1,4 @@
+use core::panic;
 use std::fmt::Write;
 
 use crate::{
@@ -38,6 +39,7 @@ pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
         Label::Optional => indented!(w, "pub {name}: Field<{number}, Optional<{l}>>,"),
         Label::Repeated => indented!(w, "pub {name}: Field<{number}, Repeated<{l}>>,"),
         Label::Packed => indented!(w, "pub {name}: Field<{number}, Packed<{l}>>,"),
+        Label::Plain => indented!(w, "pub {name}: Field<{number}, Plain<{l}>>,")
     };
     match ty {
         PbType::Scalar(p) => wrap_label(p.tacky_type()),
@@ -119,6 +121,16 @@ pub fn simple_field_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Resul
             indented!(w, r"    <{witness_type}>::new()")?;
             indented!(w, r"}}")
         }
+        Label::Plain => {
+            let witness_type = format!("Field<{number},Plain<{tacky_type}>>");
+            let write_expr = mk_write_expr(&name);
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> {witness_type} {{")?;
+            indented!(w, r"        if {name} != Default::default() {{")?;
+            indented!(w, r"            {write_expr}")?;
+            indented!(w, r"        }}")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
     }
 }
 
@@ -197,9 +209,9 @@ pub fn simple_message_witness(
     };
     let wrap_label = |l: &str| match label {
         Label::Required => format!("Field<{number},Required<{l}>>"),
-        Label::Optional => format!("Field<{number},Optional<{l}>>"),
+        Label::Optional | Label::Plain => format!("Field<{number},Optional<{l}>>"),
         Label::Repeated => format!("Field<{number},Repeated<{l}>>"),
-        Label::Packed => panic!("messages cant be packed")
+        Label::Packed => panic!("messages cant be packed"),
     };
     // due to the inremental nature of this lib, its impossible to actually hold an iterator/collection of message writers,
     // so there isnt any syntactic helper for repeated (nested) message type, the user of the lib just has to hoist the write loop outside
@@ -218,7 +230,64 @@ pub fn simple_message_witness(
 
 // genrate ate writing method for enum-type fields
 // enums are just i32s, so we take anything thats Into<i32>.
+// generate writing methods for simple scalar fields
 #[rustfmt::skip]
-fn simple_enum_writer(w: &mut impl Write, field: Field) -> std::fmt::Result {
-    todo!()
+pub fn simple_enum_witness(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
+    let Field {
+        name,
+        number,
+        ty,
+        label,
+    } = field;
+    let PbType::Enum((ename, valid)) = ty else {
+        panic!("expected enum type")
+    };
+    let rust_type ="i32";
+    let tacky_type = "PbEnum";
+    let mk_write_expr =
+        |arg| format!("Int32::write({number}, {arg}, &mut self.tack.buffer);");
+    match label {
+        Label::Optional => {
+            let witness_type = format!("Field<{number},Optional<{tacky_type}>>");
+            let write_expr = mk_write_expr("value");
+            indented!(w,r"pub fn {name}(&mut self, {name}: Option<i32>) -> {witness_type} {{")?;
+            indented!(w, r"    if let Some(value) = {name}{{")?;
+            indented!(w, r"        {write_expr}")?;
+            indented!(w, r"    }}")?;
+            indented!(w, r"     <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
+
+        Label::Repeated => {
+            let witness_type = format!("Field<{number},Repeated<{tacky_type}>>");
+            let write_expr = mk_write_expr("value");
+            indented!(w,r"pub fn {name}(&mut self, {name}: impl IntoIterator<Item = {rust_type}>) -> {witness_type} {{")?;
+            indented!(w, r"    for value in {name} {{")?;
+            indented!(w, r"        {write_expr}")?;
+            indented!(w, r"    }}")?;
+            indented!(w, r"     <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
+        Label::Required => {
+            let witness_type = format!("Field<{number},Required<{tacky_type}>>");
+            let write_expr = mk_write_expr(&name);
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> {witness_type} {{")?;
+            indented!(w, r"        {write_expr}")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
+        Label::Packed => {
+            panic!("enums cant be packed")
+        }
+        Label::Plain => {
+            let witness_type = format!("Field<{number},Plain<{tacky_type}>>");
+            let write_expr = mk_write_expr(&name);
+            indented!(w,r"pub fn {name}(&mut self, {name}: {rust_type}) -> {witness_type} {{")?;
+            indented!(w, r"        if {name} != Default::default() {{")?;
+            indented!(w, r"            {write_expr}")?;
+            indented!(w, r"        }}")?;
+            indented!(w, r"    <{witness_type}>::new()")?;
+            indented!(w, r"}}")
+        }
+    }
 }
