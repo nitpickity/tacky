@@ -702,7 +702,7 @@ mod test {
 
     #[test]
     fn test_enum() {
-        test_syntaxes(move |syntax: Syntax| -> Result<(), &str> {
+        test_syntaxes(move |_syntax: Syntax| -> Result<(), &str> {
             let msg = r#"enum PairingStatus {
                 DEALPAIRED        = 0;
                 INVENTORYORPHAN   = 1;
@@ -742,8 +742,8 @@ mod test {
             ::nom::IResult::Ok(_) => (),
             e => panic!("Expecting done {:?}", e),
         }
-        assert_desc(msg);
-        assert_desc(msg2);
+        assert_desc(msg).unwrap();
+        assert_desc(msg2).unwrap();
     }
 
     #[test]
@@ -1053,7 +1053,7 @@ mod test {
 
     #[test]
     fn enum_comments() {
-        test_syntaxes(move |syntax: Syntax| -> Result<(), &str> {
+        test_syntaxes(move |_syntax: Syntax| -> Result<(), &str> {
             let msg = r#"enum Turn {
                 UP = 0;
                 // for what?

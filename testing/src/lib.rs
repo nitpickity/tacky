@@ -17,7 +17,6 @@ mod tests {
 
     use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, SimpleEnum, StatData};
     use crate::tacky_proto::example::{MySimpleMessageSchema, MySimpleMessageWriter};
-    use crate::tacky_proto::useme::StatDataWriter;
 
     #[test]
     fn zero_len_msg() {

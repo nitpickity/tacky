@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Error, Result};
@@ -51,19 +51,19 @@ impl MessageIndex {
             .expect("Message index not found")
     }
 
-    fn get_message_mut<'a>(&self, desc: &'a mut FileDescriptor) -> &'a mut Message {
-        let first_message = self
-            .indexes
-            .first()
-            .and_then(move |i| desc.messages.get_mut(*i));
-        self.indexes
-            .iter()
-            .skip(1)
-            .fold(first_message, |cur, next| {
-                cur.and_then(|msg| msg.messages.get_mut(*next))
-            })
-            .expect("Message index not found")
-    }
+    // fn get_message_mut<'a>(&self, desc: &'a mut FileDescriptor) -> &'a mut Message {
+    //     let first_message = self
+    //         .indexes
+    //         .first()
+    //         .and_then(move |i| desc.messages.get_mut(*i));
+    //     self.indexes
+    //         .iter()
+    //         .skip(1)
+    //         .fold(first_message, |cur, next| {
+    //             cur.and_then(|msg| msg.messages.get_mut(*next))
+    //         })
+    //         .expect("Message index not found")
+    // }
 
     fn push(&mut self, i: usize) {
         self.indexes.push(i);
@@ -126,7 +126,7 @@ impl FieldType {
         )
     }
 
-    fn proto_type(&self) -> &str {
+    pub fn proto_type(&self) -> &str {
         match *self {
             FieldType::Int32 => "int32",
             FieldType::Sint32 => "sint32",
@@ -161,15 +161,15 @@ pub struct Field {
     pub deprecated: bool,
 }
 
-fn get_modules(module: &str, imported: bool, desc: &FileDescriptor) -> String {
-    let skip = usize::from(desc.package.is_empty() && !imported);
-    module
-        .split('.')
-        .filter(|p| !p.is_empty())
-        .skip(skip)
-        .map(|p| format!("{}::", p))
-        .collect()
-}
+// fn get_modules(module: &str, imported: bool, desc: &FileDescriptor) -> String {
+//     let skip = usize::from(desc.package.is_empty() && !imported);
+//     module
+//         .split('.')
+//         .filter(|p| !p.is_empty())
+//         .skip(skip)
+//         .map(|p| format!("{}::", p))
+//         .collect()
+// }
 
 #[derive(Debug, Clone, Default)]
 pub struct Extend {
@@ -214,15 +214,15 @@ impl Message {
         }
     }
 
-    fn get_modules(&self, desc: &FileDescriptor) -> String {
-        get_modules(&self.module, self.imported, desc)
-    }
+    // fn get_modules(&self, desc: &FileDescriptor) -> String {
+    //     get_modules(&self.module, self.imported, desc)
+    // }
 
-    fn is_unit(&self) -> bool {
-        self.fields.is_empty()
-            && self.oneofs.is_empty()
-            && self.messages.iter().all(|m| m.is_unit())
-    }
+    // fn is_unit(&self) -> bool {
+    //     self.fields.is_empty()
+    //         && self.oneofs.is_empty()
+    //         && self.messages.iter().all(|m| m.is_unit())
+    // }
 
     fn sanity_checks(&self, desc: &FileDescriptor) -> Result<()> {
         for f in self.all_fields() {
@@ -295,13 +295,13 @@ impl Message {
             .chain(self.oneofs.iter().flat_map(|o| o.fields.iter()))
     }
 
-    /// Return an iterator producing mutable references to all the `Field`s of
-    /// `self`, including both direct and `oneof` fields.
-    fn all_fields_mut(&mut self) -> impl Iterator<Item = &mut Field> {
-        self.fields
-            .iter_mut()
-            .chain(self.oneofs.iter_mut().flat_map(|o| o.fields.iter_mut()))
-    }
+    // /// Return an iterator producing mutable references to all the `Field`s of
+    // /// `self`, including both direct and `oneof` fields.
+    // fn all_fields_mut(&mut self) -> impl Iterator<Item = &mut Field> {
+    //     self.fields
+    //         .iter_mut()
+    //         .chain(self.oneofs.iter_mut().flat_map(|o| o.fields.iter_mut()))
+    // }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -318,8 +318,7 @@ pub struct RpcService {
 }
 
 impl RpcService {
-    fn write_definition<W: Write>(&self, w: &mut W, config: &Config) -> Result<()> {
-        // (config.custom_rpc_generator)(self, w)
+    pub fn write_definition<W: Write>(&self, _w: &mut W, _config: &Config) -> Result<()> {
         Ok(())
     }
 }
@@ -378,9 +377,9 @@ impl Enumerator {
             .collect();
     }
 
-    fn get_modules(&self, desc: &FileDescriptor) -> String {
-        get_modules(&self.module, self.imported, desc)
-    }
+    // fn get_modules(&self, desc: &FileDescriptor) -> String {
+    //     get_modules(&self.module, self.imported, desc)
+    // }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -398,9 +397,9 @@ impl OneOf {
         self.module = module.to_string();
     }
 
-    fn get_modules(&self, desc: &FileDescriptor) -> String {
-        get_modules(&self.module, self.imported, desc)
-    }
+    // fn get_modules(&self, desc: &FileDescriptor) -> String {
+    //     get_modules(&self.module, self.imported, desc)
+    // }
 }
 
 pub struct Config {
@@ -428,11 +427,11 @@ pub struct FileDescriptor {
 impl FileDescriptor {
     pub fn run(configs: &[Config]) -> Result<()> {
         for config in configs {
-            Self::write_proto(config)?
+            Self::print_proto(config)?
         }
         Ok(())
     }
-    pub fn write_proto(config: &Config) -> Result<()> {
+    pub fn print_proto(config: &Config) -> Result<()> {
         let mut desc = FileDescriptor::read_proto(&config.in_file, &config.import_search_path)?;
 
         if desc.messages.is_empty() && desc.enums.is_empty() {
@@ -472,32 +471,26 @@ impl FileDescriptor {
             }
             out_file.push(file);
         }
-        if config.no_output {
-            let imported = |b| if b { " imported" } else { "" };
-            println!("source will be written to {}\n", out_file.display());
-            for m in &desc.messages {
-                println!(
-                    "message {} module {}{}",
-                    m.name,
-                    m.module,
-                    imported(m.imported)
-                );
-            }
-            for e in &desc.enums {
-                println!(
-                    "enum {} module {}{}",
-                    e.name,
-                    e.module,
-                    imported(e.imported)
-                );
-            }
-            return Ok(());
-        }
 
-        let name = config.in_file.file_name().and_then(|e| e.to_str()).unwrap();
-        let mut w = BufWriter::new(File::create(&out_file)?);
-        desc.write(&mut w, name, config)?;
-        update_mod_file(&out_file)
+        let imported = |b| if b { " imported" } else { "" };
+        println!("source will be written to {}\n", out_file.display());
+        for m in &desc.messages {
+            println!(
+                "message {} module {}{}",
+                m.name,
+                m.module,
+                imported(m.imported)
+            );
+        }
+        for e in &desc.enums {
+            println!(
+                "enum {} module {}{}",
+                e.name,
+                e.module,
+                imported(e.imported)
+            );
+        }
+        return Ok(());
     }
 
     /// Opens a proto file, reads it and returns raw parsed data
@@ -508,7 +501,7 @@ impl FileDescriptor {
         if !rem.is_empty() {
             return Err(Error::TrailingGarbage(rem.chars().take(50).collect()));
         }
-        for mut m in &mut desc.messages {
+        for m in &mut desc.messages {
             if m.path.as_os_str().is_empty() {
                 m.path = in_file.to_path_buf();
                 if !import_search_path.is_empty() {
@@ -728,95 +721,6 @@ impl FileDescriptor {
 
         for m in self.messages.iter_mut() {
             rec_resolve_types(m, &full_msgs, &full_enums)?;
-        }
-        Ok(())
-    }
-
-    fn write<W: Write>(&self, w: &mut W, filename: &str, config: &Config) -> Result<()> {
-        println!(
-            "Found {} messages, and {} enums",
-            self.messages.len(),
-            self.enums.len()
-        );
-
-        // self.write_package_start(w)?;
-        // self.write_uses(w, config)?;
-        // self.write_imports(w)?;
-        // self.write_enums(w)?;
-        // self.write_messages(w, config)?;
-        // self.write_rpc_services(w, config)?;
-        // self.write_package_end(w)?;
-        Ok(())
-    }
-
-    fn write_headers<W: Write>(&self, w: &mut W, filename: &str, config: &Config) -> Result<()> {
-        writeln!(
-            w,
-            "// Automatically generated rust module for '{}' file",
-            filename
-        )?;
-        writeln!(w)?;
-        writeln!(w, "#![allow(non_snake_case)]")?;
-        writeln!(w, "#![allow(non_upper_case_globals)]")?;
-        writeln!(w, "#![allow(non_camel_case_types)]")?;
-        writeln!(w, "#![allow(unused_imports)]")?;
-        writeln!(w, "#![allow(unknown_lints)]")?;
-        writeln!(w, "#![allow(clippy::all)]")?;
-
-        if config.add_deprecated_fields {
-            writeln!(w, "#![allow(deprecated)]")?;
-        }
-
-        writeln!(w, "#![cfg_attr(rustfmt, rustfmt_skip)]")?;
-        writeln!(w)?;
-        Ok(())
-    }
-
-    fn write_package_start<W: Write>(&self, w: &mut W) -> Result<()> {
-        writeln!(w)?;
-        Ok(())
-    }
-
-    fn write_imports<W: Write>(&self, w: &mut W) -> Result<()> {
-        // even if we don't have an explicit package, there is an implicit Rust module
-        // This `use` allows us to refer to the package root.
-        // NOTE! I'm suppressing not-needed 'use super::*' errors currently!
-        let mut depth = self.package.split('.').count();
-        if depth == 0 {
-            depth = 1;
-        }
-        write!(w, "use ")?;
-        for _ in 0..depth {
-            write!(w, "super::")?;
-        }
-        writeln!(w, "*;")?;
-        Ok(())
-    }
-
-    fn write_package_end<W: Write>(&self, w: &mut W) -> Result<()> {
-        writeln!(w)?;
-        Ok(())
-    }
-
-    fn write_enums<W: Write>(&self, w: &mut W) -> Result<()> {
-        for m in self.enums.iter().filter(|e| !e.imported) {
-            println!("Writing enum {}", m.name);
-        }
-        Ok(())
-    }
-
-    fn write_rpc_services<W: Write>(&self, w: &mut W, config: &Config) -> Result<()> {
-        for m in self.rpc_services.iter() {
-            println!("Writing Rpc {}", m.service_name);
-            writeln!(w)?;
-            m.write_definition(w, config)?;
-        }
-        Ok(())
-    }
-
-    fn write_messages<W: Write>(&self, w: &mut W, config: &Config) -> Result<()> {
-        for m in self.messages.iter().filter(|m| !m.imported) {
-            // m.write(w, self, config)?;
         }
         Ok(())
     }
