@@ -84,19 +84,19 @@ pub trait ProtobufScalar {
     const WIRE_TYPE: usize;
     /// how to write the value itself.
     /// can also be used to write the value without tag.
-    fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut);
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut);
 
     /// length of the value being written, exluding tag.
-    fn value_len<'a>(value: Self::RustType<'a>) -> usize;
+    fn value_len(value: Self::RustType<'_>) -> usize;
     //provided:
 
     /// writes the full field, tag + value
-    fn write<'a>(field_nr: i32, value: Self::RustType<'a>, buf: &mut impl BufMut) {
+    fn write(field_nr: i32, value: Self::RustType<'_>, buf: &mut impl BufMut) {
         Self::write_tag(field_nr, buf);
         Self::write_value(value, buf);
     }
     /// len on the wire, tag + value;
-    fn len<'a>(field_nr: i32, value: Self::RustType<'a>) -> usize {
+    fn len(field_nr: i32, value: Self::RustType<'_>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as i32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
     }
@@ -113,10 +113,10 @@ macro_rules! implscalar {
         impl ProtobufScalar for $t {
             type RustType<'a> = $rt;
             const WIRE_TYPE: usize = $wt as usize;
-            fn write_value<'a>(value: Self::RustType<'a>, buf: &mut impl BufMut) {
+            fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
                 $f(value, buf)
             }
-            fn value_len<'a>(value: Self::RustType<'a>) -> usize {
+            fn value_len(value: Self::RustType<'_>) -> usize {
                 $fl(value)
             }
         }
@@ -178,11 +178,11 @@ impl<'b, const N: usize, P: ProtobufScalar> ScalarWriter<'b, N, P> {
         }
     }
 
-    pub fn write_field<'a>(&mut self, value: P::RustType<'a>) {
+    pub fn write_field(&mut self, value: P::RustType<'_>) {
         P::write(N as i32, value, self.buf)
     }
 
-    pub fn write_untagged<'a>(&mut self, value: P::RustType<'a>) {
+    pub fn write_untagged(&mut self, value: P::RustType<'_>) {
         P::write_value(value, self.buf)
     }
     pub fn write_tag<'a>(&mut self) {
@@ -231,5 +231,5 @@ impl<'b, const N: usize, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b
 
 pub trait MessageSchema {
     type Writer<'a>;
-    fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a>;
+    fn new_writer(buffer: &mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'_>;
 }

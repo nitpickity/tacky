@@ -84,7 +84,7 @@ pub fn mk_me(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             #schema {
                 #( #fields ),*
             };
-        );
+        )
     } else {
         quote!(
             
@@ -92,7 +92,7 @@ pub fn mk_me(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                 #( #fields ),*
                 ..#schema::values()
             };
-        );
+        )
     };
     println!("{q}");
     q.into()
