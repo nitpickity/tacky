@@ -355,6 +355,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tacky-macros"
+version = "0.1.0"
+dependencies = [
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
