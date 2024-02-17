@@ -154,14 +154,14 @@ impl<'b, const N: usize> EnumWriter<'b, N> {
         Self { buf }
     }
 
-    pub fn write_field<'a>(&mut self, value: i32) {
+    pub fn write_field(&mut self, value: i32) {
         Int32::write(N as i32, value, self.buf)
     }
 
-    pub fn write_untagged<'a>(&mut self, value: i32) {
+    pub fn write_untagged(&mut self, value: i32) {
         Int32::write_value(value, self.buf)
     }
-    pub fn write_tag<'a>(&mut self) {
+    pub fn write_tag(&mut self) {
         Int32::write_tag(N as i32, self.buf)
     }
 }
@@ -185,7 +185,7 @@ impl<'b, const N: usize, P: ProtobufScalar> ScalarWriter<'b, N, P> {
     pub fn write_untagged(&mut self, value: P::RustType<'_>) {
         P::write_value(value, self.buf)
     }
-    pub fn write_tag<'a>(&mut self) {
+    pub fn write_tag(&mut self) {
         P::write_tag(N as i32, self.buf)
     }
 }

@@ -36,7 +36,7 @@ impl Parse for Input {
             writer,
             schema,
             fields,
-            exhaustive: exhaustive_token.is_some()
+            exhaustive: exhaustive_token.is_some(),
         })
     }
 }
@@ -87,7 +87,7 @@ pub fn mk_me(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         )
     } else {
         quote!(
-            
+
             #schema {
                 #( #fields ),*
                 ..#schema::values()
