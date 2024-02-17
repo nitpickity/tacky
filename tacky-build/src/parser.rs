@@ -6,6 +6,10 @@ use std::io::Write;
 use pb_rs::types::{FieldType, FileDescriptor, Message};
 
 use crate::{
+    builder_api::{
+        message_builder, simple_enum_build, simple_field_build, simple_map_build,
+        simple_message_build,
+    },
     formatter::Fmter,
     simple_typed::{get_enum_writer, get_map_writer, get_message_writer, get_scalar_writer},
     witness::{
@@ -288,7 +292,13 @@ fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a
     }
 }
 
-fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
+fn write_simple_message(
+    w: &mut Fmter<'_>,
+    m: &Message,
+    desc: &FileDescriptor,
+    builder: bool,
+    witness: bool,
+) {
     let name = &m.name;
     let fields = m
         .fields
@@ -297,17 +307,20 @@ fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
         .collect::<Vec<_>>();
 
     //write struct
-    indented!(w, r"pub struct {name};").unwrap();
-    indented!(w).unwrap();
+    write_simple_message_schema(w, name, &fields);
     message_def_writer(w, &name).unwrap();
+    if builder {
+        message_builder(w, &name, &fields).unwrap();
+    }
     write_trait_impl(w, name);
     indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     w.indent();
     write_writer_api(w, &fields);
-    write_witness_api(w, &fields);
+    if witness {
+        write_witness_api(w, &fields);
+    }
     w.unindent();
     indented!(w, "}}").unwrap();
-    write_simple_message_schema(w, name, &fields);
 }
 
 pub trait MessageWriterImpl {
@@ -335,7 +348,7 @@ fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
 
 fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) {
     //write struct
-    indented!(w, r"pub struct {name}Schema {{").unwrap();
+    indented!(w, r"pub struct {name} {{").unwrap();
     w.indent();
     for f in fields {
         field_witness_type(w, &f).unwrap()
@@ -344,7 +357,7 @@ fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) 
     indented!(w, "}}").unwrap();
 }
 
-pub fn write_proto(file: &str, output: &str) {
+pub fn write_proto(file: &str, output: &str, builder_api: bool, witness_api: bool) {
     let mut files = read_proto_file(file, ".");
     let test_file = files.pop().unwrap();
     let mut buf = String::new();
@@ -355,7 +368,7 @@ pub fn write_proto(file: &str, output: &str) {
     fmter.indent();
     indented!(fmter, "use ::tacky::*;").unwrap();
     for m in &test_file.messages {
-        write_simple_message(&mut fmter, m, &test_file);
+        write_simple_message(&mut fmter, m, &test_file, builder_api, witness_api);
     }
     fmter.unindent();
     indented!(fmter, "}}").unwrap();
