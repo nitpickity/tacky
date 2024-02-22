@@ -1,7 +1,6 @@
 use quote::quote;
 use syn::{
-    braced, parse::Parse, parse_macro_input, punctuated::Punctuated, token::Colon, DeriveInput,
-    Expr, ExprPath, Ident, MetaNameValue, Path, Token,
+    braced, parse::Parse, parse_macro_input, punctuated::Punctuated, Expr, Ident, Path, Token,
 };
 
 #[derive(Debug)]
@@ -27,7 +26,7 @@ impl Parse for Input {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let writer = input.parse::<Ident>()?;
         let _comma: Token![,] = input.parse()?;
-        let exhaustive_token: Option<kw::with> = input.parse()?;
+        let exhaustive_token: Option<kw::exhaustive> = input.parse()?;
         let schema = input.parse::<Path>()?;
         let content;
         let _brace_token = braced!(content in input);
@@ -60,7 +59,7 @@ impl Parse for WriteExpr {
     }
 }
 #[proc_macro]
-pub fn mk_me(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
+pub fn write_proto(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let content = parse_macro_input!(input as Input);
     let Input {
         writer,
@@ -79,18 +78,20 @@ pub fn mk_me(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             #s: #w
         },
     });
+    let fields = quote! {
+        #( #fields ),*
+    };
     let q = if exhaustive {
         quote!(
             #schema {
-                #( #fields ),*
+                #fields
             };
         )
     } else {
         quote!(
-
             #schema {
-                #( #fields ),*
-                ..#schema::values()
+                #fields,
+                ..Default::default()
             };
         )
     };

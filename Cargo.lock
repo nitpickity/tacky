@@ -383,6 +383,7 @@ dependencies = [
  "prost-build",
  "tacky",
  "tacky-build",
+ "tacky-macros",
 ]
 
 [[package]]

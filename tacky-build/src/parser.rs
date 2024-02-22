@@ -166,8 +166,6 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
                 _ => panic!("invalid map structure"),
             }
         }
-        //TODO: resolve correctly to enums/messages.
-        // pb-rs
         FieldType::Message(m) => {
             let name = &m.get_message(desc).name;
             PbType::Message(name.clone())
@@ -297,23 +295,17 @@ fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
         .collect::<Vec<_>>();
 
     //write struct
-    indented!(w, r"pub struct {name};").unwrap();
+
     indented!(w).unwrap();
-    message_def_writer(w, &name).unwrap();
+    write_simple_message_schema(w, name, &fields);
     write_trait_impl(w, name);
+    message_def_writer(w, &name).unwrap();
     indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     w.indent();
     write_writer_api(w, &fields);
     write_witness_api(w, &fields);
     w.unindent();
     indented!(w, "}}").unwrap();
-    write_simple_message_schema(w, name, &fields);
-}
-
-pub trait MessageWriterImpl {
-    type Writer<'a>;
-    type Schema;
-    fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a>;
 }
 
 fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
@@ -335,7 +327,8 @@ fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
 
 fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) {
     //write struct
-    indented!(w, r"pub struct {name}Schema {{").unwrap();
+    indented!(w, r"#[derive(Default)]");
+    indented!(w, r"pub struct {name} {{").unwrap();
     w.indent();
     for f in fields {
         field_witness_type(w, &f).unwrap()

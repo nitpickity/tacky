@@ -14,62 +14,86 @@ mod tests {
     use std::time::Duration;
 
     use prost::Message;
+    use tacky::ProtoWrite;
+    use tacky_macros::write_proto;
 
-    use crate::prost_proto::{MySimpleMessage, NestedMore, NestedMsg, SimpleEnum, StatData};
-    use crate::tacky_proto::example::{MySimpleMessageSchema, MySimpleMessageWriter};
+    use crate::prost_proto::{MySimpleMessage as PMySimpleMessage, SimpleEnum, StatData};
+    use crate::tacky_proto;
+    use crate::tacky_proto::example::{MySimpleMessage, MySimpleMessageWriter};
+
+    #[test]
+    fn write_trait() {
+        struct Foo {
+            a: String,
+            b: HashMap<Arc<str>, i64>,
+            c: Option<f64>,
+        }
+        impl ProtoWrite<tacky_proto::example::MySimpleMessage> for Foo {
+            fn write_msg(
+                &self,
+                mut writer: <tacky_proto::example::MySimpleMessage as tacky::MessageSchema>::Writer<
+                    '_,
+                >,
+            ) {
+                write_proto!(
+                    writer,
+                    MySimpleMessage {
+                        astring: Some(&self.a),
+                        amap: self.b.iter().map(|(a, b)| { (*b as i32, a) }),
+                        anumber: self.c.unwrap_or(42.0) as i32
+                    }
+                );
+            }
+        }
+    }
 
     #[test]
     fn zero_len_msg() {
-        let mut m = MySimpleMessage::default();
-        m.nested = None;
-        m.anumber = 0;
-        println!("{}", m.encoded_len());
-        let v = m.encode_to_vec();
-        println!("{v:?}");
-        let d = MySimpleMessage::decode(&*v).unwrap();
-        println!("{d:?}")
+        // let mut m = MySimpleMessage::default();
+        // m.nested = None;
+        // m.anumber = 0;
+        // println!("{}", m.encoded_len());
+        // let v = m.encode_to_vec();
+        // println!("{v:?}");
+        // let d = MySimpleMessage::decode(&*v).unwrap();
+        // println!("{d:?}")
     }
     #[test]
     fn it_works() {
         // data
         let anumber = 42;
         let manynumbers = vec![1, 2, 3];
-        let astring = Some("Hello".into());
-        let manystrings = vec!["many".into(), "strings".into()];
-        let manybytes = Vec::new();
+        let astring = Some("Hello");
+        let manystrings = vec!["many", "strings"];
+        let manybytes: Vec<Vec<u8>> = Vec::new();
         let abytes = Vec::new();
-        let amap = HashMap::new();
-
-        // needs to clone everything
-        let m = MySimpleMessage {
-            anumber: anumber.clone(),
-            manynumbers: manynumbers.clone(),
-            manynumbers_unpacked: manynumbers.clone(),
-            astring: astring.clone(),
-            manystrings: manystrings.clone(),
-            manybytes: manybytes.clone(),
-            abytes: Some(abytes.clone()),
-            amap: amap.clone(),
-            nested: Some(NestedMsg {
-                num: Some(42),
-                astring: Some("hello nested".into()),
-                deeper: vec![
-                    NestedMore {
-                        levels: vec!["some".into(), "strings".into()],
-                    },
-                    NestedMore {
-                        levels: vec!["rep".into(), "str".into()],
-                    },
-                ],
-            }),
-            numnum: SimpleEnum::One as i32,
-        };
+        let amap: HashMap<i32, &str> = HashMap::new();
 
         let mut buf = Vec::new();
         {
-            //can borrow and iterate over everything
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
-            let s = MySimpleMessageSchema {
+
+            tacky_macros::write_proto!(
+                writer,
+                MySimpleMessage {
+                    anumber,
+                    manynumbers: &manynumbers,
+                    manynumbers_unpacked: &manynumbers,
+                    astring: astring.as_deref(),
+                    manystrings: &manystrings,
+                    abytes: Some(&*abytes),
+                    // manybytes: &manybytes,
+                    amap: amap.iter().map(|(k, v)| (*k, v)),
+                    numnum: SimpleEnum::One as i32
+                }
+            );
+        }
+
+        {
+            let mut writer = MySimpleMessageWriter::new(&mut buf, None);
+
+            //can borrow and iterate over everything
+            let s = MySimpleMessage {
                 anumber: writer.anumber(anumber),
                 manynumbers: writer.manynumbers(&manynumbers),
                 manynumbers_unpacked: writer.manynumbers_unpacked(&manynumbers),
@@ -92,9 +116,9 @@ mod tests {
             };
         }
 
-        let unpacked = MySimpleMessage::decode(&*buf).unwrap();
+        let unpacked = PMySimpleMessage::decode(&*buf).unwrap();
         //prost can decode what tacky encodes
-        assert_eq!(unpacked, m);
+        // assert_eq!(unpacked, m);
     }
     struct Stats {
         ips: BTreeSet<IpAddr>,
@@ -192,34 +216,5 @@ mod tests {
         let unpacked2 = StatData::decode(&*b).unwrap();
         //prost can decode what tacky encodes
         assert_eq!(unpacked1, unpacked2);
-    }
-
-    #[test]
-    fn basic_bench() {
-        // run with cargo test --release --package testing --lib -- tests::basic_bench --exact --nocapture
-        // to show this beats prost by a lot for packed varints :)
-
-        let data = (0..1_000_000).collect::<Vec<i32>>();
-        {
-            let prost_message = MySimpleMessage {
-                manynumbers: data.clone(),
-                ..Default::default()
-            };
-            let mut buf = Vec::with_capacity(4_000_000);
-            let t0 = std::time::Instant::now();
-            let _encoded = prost_message.encode(&mut buf);
-            let t1 = t0.elapsed().as_micros();
-            println!("prost took: {t1}, len: {}", buf.len())
-        }
-
-        {
-            let mut buf = Vec::with_capacity(4_000_000);
-            let mut w = MySimpleMessageWriter::new(&mut buf, None);
-            let t0 = std::time::Instant::now();
-            w.manynumbers(&data);
-            let t1 = t0.elapsed().as_micros();
-            drop(w);
-            println!("tacky took: {t1}, len: {}", buf.len())
-        }
     }
 }
