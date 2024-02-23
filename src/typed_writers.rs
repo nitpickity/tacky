@@ -51,7 +51,7 @@ where
     Self: Sized,
 {
     type Writer<'a>;
-    fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a>;
+    fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a>;
 }
 
 pub mod optional {
@@ -102,7 +102,7 @@ pub mod optional {
 
     impl<const N: usize, P> FieldWriter for Field<N, Optional<P>> {
         type Writer<'a> = OptionalValueWriter<'a, N, P>;
-        fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
+        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
             OptionalValueWriter {
                 buf,
                 _m: PhantomData,
@@ -141,6 +141,14 @@ pub mod repeated {
             value.write_msg(writer);
             Field::new()
         }
+        pub fn append_msg_with(
+            &mut self,
+            mut func: impl FnMut(M::Writer<'_>),
+        ) -> Field<N, Repeated<M>> {
+            let writer = M::new_writer(self.buf, Some(N as i32));
+            func(writer);
+            Field::new()
+        }
         pub fn close(self) -> Field<N, Repeated<M>> {
             Field::new()
         }
@@ -169,7 +177,7 @@ pub mod repeated {
 
     impl<const N: usize, P> FieldWriter for Field<N, Repeated<P>> {
         type Writer<'a> = RepeatedValueWriter<'a, N, P>;
-        fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
+        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
             RepeatedValueWriter {
                 buf,
                 _m: PhantomData,
@@ -200,7 +208,7 @@ pub mod packed {
 
     impl<const N: usize, P> FieldWriter for Field<N, Packed<P>> {
         type Writer<'a> = PackedValueWriter<'a, N, P>;
-        fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
+        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
             PackedValueWriter {
                 buf,
                 _m: PhantomData,
@@ -228,10 +236,17 @@ pub mod required {
             Field::new()
         }
     }
+    impl<'b, const N: usize, M: MessageSchema> RequiredValueWriter<'b, N, M> {
+        pub fn write_with(self, mut func: impl FnMut(M::Writer<'_>)) -> Field<N, Required<M>> {
+            let w = M::new_writer(self.buf, Some(N as i32));
+            func(w);
+            Field::new()
+        }
+    }
 
     impl<const N: usize, P> FieldWriter for Field<N, Required<P>> {
         type Writer<'a> = RequiredValueWriter<'a, N, P>;
-        fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
+        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
             RequiredValueWriter {
                 buf,
                 _m: PhantomData,
@@ -267,7 +282,7 @@ pub mod plain {
 
     impl<const N: usize, P> FieldWriter for Field<N, Plain<P>> {
         type Writer<'a> = PlainValueWriter<'a, N, P>;
-        fn get_writer<'a>(&self, buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
+        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
             PlainValueWriter {
                 buf,
                 _m: PhantomData,

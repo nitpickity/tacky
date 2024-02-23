@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::fmt::{format, Write};
 
 use crate::{
     formatter::Fmter,
@@ -12,14 +12,42 @@ pub fn get_scalar_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
         name,
         number,
         ty,
-        label: _,
+        label,
     } = field;
-    let PbType::Scalar(pb_type) = ty else {
-        panic!()
+    let ty = match ty {
+        PbType::Scalar(s) => s.tacky_type(),
+        PbType::Enum(e) => &e.0,
+        PbType::Message(m) => m,
+        PbType::SimpleMap(_, _) => todo!(),
+        PbType::Map(_, _) => todo!(),
     };
-    let full_type = format!("ScalarWriter<'_,{number},{}>", pb_type.tacky_type());
-    indented!(w, r"pub fn {name}_writer(&mut self) -> {full_type} {{")?;
-    indented!(w, r"    <{full_type}>::new(&mut self.tack.buffer)")?;
+
+    let generics = format!("<'_,{number},{ty}>");
+    let (return_type, field_type) = match label {
+        Label::Required =>(
+            format!("RequiredValueWriter{generics}"),
+            format!("Field<{number},Required<{ty}>>")
+        ),
+        Label::Optional => (
+            format!("OptionalValueWriter{generics}"),
+            format!("Field<{number},Optional<{ty}>>")
+        ),
+
+        Label::Repeated => (
+            format!("RepeatedValueWriter{generics}"),
+            format!("Field<{number},Repeated<{ty}>>")
+        ),
+        Label::Packed => (
+            format!("PackedValueWriter{generics}"),
+            format!("Field<{number},Packed<{ty}>>")
+        ),
+        Label::Plain => (
+            format!("PlainValueWriter{generics}"),
+            format!("Field<{number},Plain<{ty}>>")
+        )
+    };
+    indented!(w, r"pub fn {name}_writer(&mut self) -> {return_type} {{")?;
+    indented!(w, r"    <{field_type}>::get_writer(&mut self.tack.buffer)")?;
     indented!(w, r"}}")
 }
 
@@ -50,41 +78,6 @@ pub fn get_map_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
     indented!(w, r"}}")
 }
 
-// generate writing method for message-type fields
-pub fn get_message_writer(w: &mut Fmter, field: &Field) -> std::fmt::Result {
-    let Field {
-        name,
-        number,
-        ty,
-        label,
-    } = field;
-    let tag = ty.tag(*number as u32);
-    let ty = match ty {
-        PbType::Message(m) => m,
-        _ => panic!(),
-    };
-    let wrap_label = |l: &str| match label {
-        Label::Required => format!("Field<{number},Required<{l}>>"),
-        Label::Optional | Label::Plain => format!("Field<{number},Optional<{l}>>"),
-        Label::Repeated => format!("Field<{number},Repeated<{l}>>"),
-        Label::Packed => panic!("messages cant be packed"),
-    };
-    // due to the inremental nature of this lib, its impossible to actually hold an iterator/collection of message writers,
-    // so there isnt any syntactic helper for repeated (nested) message type, the user of the lib just has to hoist the write loop outside
-    // for i in 0..10 {
-    //   m.write_nested(|w| {
-    //     w.write_field(i);
-    //})
-    //}
-    let witness_type = wrap_label("PbMessage");
-    let t = format!("MessageWriter<'_, {number}, {ty}Writer>");
-    indented!(w, r"pub fn {name}_writer(&mut self) -> {ty}Writer<'_> {{ ")?;
-    indented!(
-        w,
-        r"    <{ty}Writer>::new(&mut self.tack.buffer, Some({number}))"
-    )?;
-    indented!(w, r"}}")
-}
 //genrate ate writing method for enum-type fields
 // enums are just i32s, so we take anything thats Into<i32>.
 pub fn get_enum_writer(w: &mut Fmter, field: &Field) -> std::fmt::Result {

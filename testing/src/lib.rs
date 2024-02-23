@@ -40,7 +40,7 @@ mod tests {
                     MySimpleMessage {
                         astring: Some(&self.a),
                         amap: self.b.iter().map(|(a, b)| { (*b as i32, a) }),
-                        anumber: self.c.unwrap_or(42.0) as i32
+                        anumber: self.c.map(|f| f as i32)
                     }
                 );
             }
@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn it_works() {
         // data
-        let anumber = 42;
+        let anumber = Some(42);
         let manynumbers = vec![1, 2, 3];
         let astring = Some("Hello");
         let manystrings = vec!["many", "strings"];
@@ -73,18 +73,19 @@ mod tests {
         {
             let mut writer = MySimpleMessageWriter::new(&mut buf, None);
 
-            tacky_macros::write_proto!(
+            let k = tacky_macros::write_proto!(
                 writer,
-                MySimpleMessage {
+                exhaustive MySimpleMessage {
                     anumber,
                     manynumbers: &manynumbers,
-                    manynumbers_unpacked: &manynumbers,
-                    astring: astring.as_deref(),
+                    manynumbers_unpacked: manynumbers.iter().copied(),
+                    astring: fmt Some("hello"),
                     manystrings: &manystrings,
                     abytes: Some(&*abytes),
-                    // manybytes: &manybytes,
+                    manybytes: &manybytes,
                     amap: amap.iter().map(|(k, v)| (*k, v)),
-                    numnum: SimpleEnum::One as i32
+                    nested: with writer.nested_writer().write_msg_with(|m| {}),
+                    numnum: Some(SimpleEnum::One as i32),
                 }
             );
         }
@@ -96,7 +97,7 @@ mod tests {
             let s = MySimpleMessage {
                 anumber: writer.anumber(anumber),
                 manynumbers: writer.manynumbers(&manynumbers),
-                manynumbers_unpacked: writer.manynumbers_unpacked(&manynumbers),
+                manynumbers_unpacked: writer.manynumbers_unpacked(manynumbers),
                 astring: writer.astring(astring.as_deref()),
                 manystrings: writer.manystrings(&manystrings),
                 manybytes: writer.manybytes(&manybytes),
@@ -112,7 +113,7 @@ mod tests {
                         d.levels(["rep", "str"]);
                     });
                 }),
-                numnum: writer.numnum(SimpleEnum::One as i32),
+                numnum: writer.numnum(Some(SimpleEnum::One as i32)),
             };
         }
 

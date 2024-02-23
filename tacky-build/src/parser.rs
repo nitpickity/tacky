@@ -7,7 +7,7 @@ use pb_rs::types::{FieldType, FileDescriptor, Message};
 
 use crate::{
     formatter::Fmter,
-    simple_typed::{get_enum_writer, get_map_writer, get_message_writer, get_scalar_writer},
+    simple_typed::{get_enum_writer, get_map_writer, get_scalar_writer},
     witness::{
         field_witness_type, message_def_writer, simple_enum_witness, simple_field_witness,
         simple_map_witness, simple_message_witness,
@@ -254,15 +254,15 @@ fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a 
             PbType::SimpleMap(_, _) => {
                 get_map_writer(w, &f).unwrap();
             }
-            PbType::Scalar(_) => {
-                get_scalar_writer(w, &f).unwrap();
-            }
-            PbType::Message(_) => {
-                // the closure based API for nested messages is already generated
-                get_message_writer(w, &f).unwrap()
-            }
+            // PbType::Scalar(_) => {
+            //     get_scalar_writer(w, &f).unwrap();
+            // }
+            // PbType::Message(_) => {
+            //     // the closure based API for nested messages is already generated
+            //     get_message_writer(w, &f).unwrap()
+            // }
             PbType::Enum(_) => get_enum_writer(w, &f).unwrap(),
-            _ => todo!(),
+            _ => get_scalar_writer(w, &f).unwrap(),
         }
     }
 }
@@ -276,10 +276,7 @@ fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a
             PbType::Scalar(_) => {
                 simple_field_witness(w, &f).unwrap();
             }
-            PbType::Message(_) => {
-                // the closure based API for nested messages is already generated
-                simple_message_witness(w, &f).unwrap()
-            }
+            PbType::Message(_) => simple_message_witness(w, &f).unwrap(),
             PbType::Enum(_) => simple_enum_witness(w, &f).unwrap(),
             _ => todo!(),
         }

@@ -44,7 +44,7 @@ pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result 
     match ty {
         PbType::Scalar(p) => wrap_label(p.tacky_type()),
         PbType::SimpleMap(k, v) => indented!(w,"pub {name}: Field<{number}, PbMap<{}, {}>>,",k.tacky_type(), v.tacky_type()),
-        PbType::Message(_) => wrap_label("PbMessage"),
+        PbType::Message(m) => wrap_label(m),
         PbType::Enum(_) => wrap_label("PbEnum"),
         PbType::Map(_, _) => todo!(),
     }
@@ -220,7 +220,7 @@ pub fn simple_message_witness(
     //     w.write_field(i);
     //})
     //}
-    let witness_type = wrap_label("PbMessage");
+    let witness_type = wrap_label(ty);
     indented!(w,r"pub fn {name}(&mut self, mut {name}: impl FnMut({ty}Writer)) -> {witness_type} {{ ")?;
     indented!(w,r"    let writer = {ty}Writer::new(&mut self.tack.buffer,Some({tag}));")?;
     indented!(w,r"    {name}(writer);")?;
