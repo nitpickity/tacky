@@ -9,8 +9,9 @@ edition = "2021"
 tacky = { path = "../" }
 prost = "0.12"
 # quick-protobuf = "0.8.1"
-
+tacky-macros = { path = "../tacky-macros" }
 [build-dependencies]
 prost-build = "0.12"
 # pb-rs = "0.10"
 tacky-build = { path = "../tacky-build" }
+tacky-macros = { path = "../tacky-macros" }

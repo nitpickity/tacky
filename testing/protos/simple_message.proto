@@ -1,32 +1,43 @@
-syntax = "proto3";
+syntax = "proto2";
 
 package example;
-
-message MySimpleMessage {
-
-    int32 anumber = 1;
-    repeated int32 manynumbers = 7 [packed=true];
-    repeated int32 manynumbers_unpacked = 8;
-    optional string astring = 2;
-    repeated string manystrings = 3;
-    repeated bytes manybytes = 4;
-    optional bytes abytes = 5;
-    map<int32,string> amap = 6;
-    optional NestedMsg nested = 9;
-    SimpleEnum numnum = 10;
+// Test message with all simple scalar fields
+message SimpleMessage {
+    optional int64 normal_int = 1;
+    optional sint64 zigzag_int = 2;
+    optional sfixed64 fixed_int = 3;
+    repeated int32 manynumbers = 4 [packed=true];
+    repeated int32 manynumbers_unpacked = 5;
+    optional string astring = 6;
+    repeated string manystrings = 7;
+    repeated bytes manybytes = 8;
+    optional bytes abytes = 9;
+    optional bool yesno = 10;
 }
 
-message NestedMsg {
-    optional int32 num = 1;
-    optional string astring = 2;
-    repeated NestedMore deeper = 3;
+
+// Some maps
+message MsgWithMaps {
+    map<string,int32> map1 = 1;
+    map<sfixed32,double> map2 = 2;
 }
 
-message NestedMore {
-    repeated string levels = 1;
+message MsgWithEnums {
+    optional SimpleEnum enum1 = 1;
+    repeated AnotherEnum enum2 = 2;
+}
+
+message MsgWithNesting {
+    optional MsgWithEnums enums = 1;
+    repeated SimpleMessage nested = 2;
 }
 
 enum SimpleEnum {
-    ONE = 0;
-    TWO = 1;
+    FIRST = 0;
+    SECOND = 1;
+}
+
+enum AnotherEnum {
+    A = 0;
+    B = 1;
 }

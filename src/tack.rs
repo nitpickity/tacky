@@ -35,7 +35,8 @@ fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
 impl<'b> Tack<'b> {
     /// creates a new tack, which marks the start of a length-delimited field of TBD length.
     /// takes a buffer, and an optional tag. for top level messages, this will be None, as they dont have a tag or length delimiter of their own.
-    pub fn new(buffer: &'b mut Vec<u8>, tag: Option<u32>) -> Self {
+    pub fn new(buffer: &'b mut Vec<u8>, field_nr: Option<u32>) -> Self {
+        let tag = field_nr.map(|n| (n << 3) | 2);
         let tag = tag.and_then(NonZeroU32::new);
         if let Some(tag) = tag {
             // writing in a nested context, need to write down the tag, and then len.
