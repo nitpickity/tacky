@@ -3,15 +3,12 @@
 
 use std::io::Write;
 
-use pb_rs::types::{FieldType, FileDescriptor, Message};
+use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
 
 use crate::{
     formatter::Fmter,
-    simple_typed::{get_enum_writer, get_map_writer, get_scalar_writer},
-    witness::{
-        field_witness_type, message_def_writer, simple_enum_witness, simple_field_witness,
-        simple_map_witness, simple_message_witness,
-    },
+    simple_typed::get_writer,
+    witness::{field_witness_type, message_def_writer},
 };
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
@@ -188,9 +185,6 @@ impl PbType {
             PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => 2,
         }
     }
-    pub const fn tag(&self, field_nr: u32) -> u32 {
-        (field_nr << 3) | self.wire_type()
-    }
 }
 
 impl std::fmt::Display for PbType {
@@ -251,34 +245,7 @@ impl From<pb_rs::types::Frequency> for Label {
 fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
     for f in fields {
         match f.ty {
-            PbType::SimpleMap(_, _) => {
-                get_map_writer(w, &f).unwrap();
-            }
-            // PbType::Scalar(_) => {
-            //     get_scalar_writer(w, &f).unwrap();
-            // }
-            // PbType::Message(_) => {
-            //     // the closure based API for nested messages is already generated
-            //     get_message_writer(w, &f).unwrap()
-            // }
-            PbType::Enum(_) => get_enum_writer(w, &f).unwrap(),
-            _ => get_scalar_writer(w, &f).unwrap(),
-        }
-    }
-}
-
-fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
-    for f in fields {
-        match &f.ty {
-            PbType::SimpleMap(_, _) => {
-                simple_map_witness(w, &f).unwrap();
-            }
-            PbType::Scalar(_) => {
-                simple_field_witness(w, &f).unwrap();
-            }
-            PbType::Message(_) => simple_message_witness(w, &f).unwrap(),
-            PbType::Enum(_) => simple_enum_witness(w, &f).unwrap(),
-            _ => todo!(),
+            _ => get_writer(w, &f).unwrap(),
         }
     }
 }
@@ -286,8 +253,7 @@ fn write_witness_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a
 fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
     let name = &m.name;
     let fields = m
-        .fields
-        .iter()
+        .all_fields()
         .map(|f| convert_field(f, desc))
         .collect::<Vec<_>>();
 
@@ -300,7 +266,32 @@ fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
     indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
     w.indent();
     write_writer_api(w, &fields);
-    write_witness_api(w, &fields);
+    w.unindent();
+    indented!(w, "}}").unwrap();
+}
+
+fn write_simple_enum(w: &mut Fmter<'_>, m: &Enumerator, desc: &FileDescriptor) {
+    let name = &m.name;
+
+    //write struct
+
+    indented!(w).unwrap();
+    indented!(w, "pub enum {name} {{").unwrap();
+    w.indent();
+    for (n, number) in &m.fields {
+        indented!(w, "{n} = {number},").unwrap()
+    }
+    w.unindent();
+    indented!(w, "}}").unwrap();
+    indented!(w, "impl ProtoEncode<{name}> for {name} {{").unwrap();
+    w.indent();
+    indented!(
+        w,
+        "fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {{"
+    )
+    .unwrap();
+    indented!(w, "    tacky::Int32::write(field_nr, value as i32, buf)").unwrap();
+    indented!(w, "}}").unwrap();
     w.unindent();
     indented!(w, "}}").unwrap();
 }
@@ -346,6 +337,10 @@ pub fn write_proto(file: &str, output: &str) {
     indented!(fmter, "use ::tacky::*;").unwrap();
     for m in &test_file.messages {
         write_simple_message(&mut fmter, m, &test_file);
+    }
+
+    for m in &test_file.enums {
+        write_simple_enum(&mut fmter, m, &test_file);
     }
     fmter.unindent();
     indented!(fmter, "}}").unwrap();

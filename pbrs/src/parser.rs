@@ -382,12 +382,20 @@ fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
                     tag("}"),
                 ),
             ),
-            |(name, fields)| OneOf {
-                name,
-                fields,
-                package: "".to_string(),
-                module: "".to_string(),
-                imported: false,
+            |(name, mut fields)| {
+                for field in &mut fields {
+                    match syntax {
+                        Syntax::Proto2 => field.frequency = Some(Frequency::Optional),
+                        Syntax::Proto3 => field.frequency = Some(Frequency::Plain),
+                    }
+                }
+                OneOf {
+                    name,
+                    fields,
+                    package: "".to_string(),
+                    module: "".to_string(),
+                    imported: false,
+                }
             },
         )(input)
     }

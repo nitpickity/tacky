@@ -3,8 +3,6 @@
 use crate::{scalars::*, tack::Tack};
 use std::{fmt::Display, marker::PhantomData};
 
-pub struct PbMessage;
-pub struct PbEnum;
 // compound types
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
 pub struct OneOf<O>(PhantomData<O>); // OneOf<(Field<1,Int32>,Field<3,PbString>)>
@@ -42,16 +40,9 @@ impl_wrapped!(Required<P>);
 impl_wrapped!(Packed<P>);
 
 impl<const N: usize, P> Field<N, P> {
-    pub fn new() -> Field<N, P> {
+    fn new() -> Field<N, P> {
         Field(PhantomData)
     }
-}
-pub trait FieldWriter
-where
-    Self: Sized,
-{
-    type Writer<'a>;
-    fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a>;
 }
 
 pub mod optional {
@@ -61,10 +52,17 @@ pub mod optional {
         _m: PhantomData<P>,
     }
 
-    impl<'b, const N: usize, P: ProtobufScalar> OptionalValueWriter<'b, N, P> {
-        pub fn write(self, value: Option<P::RustType<'_>>) -> Field<N, Optional<P>> {
+    impl<'b, const N: usize, P> OptionalValueWriter<'b, N, P> {
+        pub fn new(buf: &'b mut Vec<u8>) -> Self {
+            Self {
+                buf,
+                _m: PhantomData,
+            }
+        }
+
+        pub fn write<K: ProtoEncode<P>>(self, value: Option<K>) -> Field<N, Optional<P>> {
             if let Some(value) = value {
-                P::write(N as i32, value, self.buf);
+                <K as ProtoEncode<P>>::encode(N as i32, self.buf, value);
             }
             Field::new()
         }
@@ -75,82 +73,59 @@ pub mod optional {
             value: Option<T>,
             incl_empty: bool,
         ) -> Field<N, Optional<PbString>> {
+            use std::io::Write;
             if let Some(value) = value {
-                use std::io::Write;
                 let tag = ((N as i32) << 3) | (PbString::WIRE_TYPE as i32);
                 let mut t = Tack::new_with_width(self.buf, Some(tag as u32), 1);
                 t.rewind = !incl_empty;
                 write!(t.buffer, "{value}").unwrap();
             }
+
             Field::new()
         }
     }
     impl<'b, const N: usize, M: MessageSchema> OptionalValueWriter<'b, N, M> {
-        pub fn write_msg<T: ProtoWrite<M>>(self, value: Option<T>) -> Field<N, Optional<M>> {
-            if let Some(value) = value {
-                let w = M::new_writer(self.buf, Some(N as i32));
-                value.write_msg(w)
-            }
-            Field::new()
-        }
-        pub fn write_msg_with(self, mut f: impl FnMut(M::Writer<'_>)) -> Field<N, Optional<M>> {
+        pub fn write_msg(self, mut f: impl FnMut(M::Writer<'_>)) -> Field<N, Optional<M>> {
             let w = M::new_writer(self.buf, Some(N as i32));
             f(w);
             Field::new()
-        }
-    }
-
-    impl<const N: usize, P> FieldWriter for Field<N, Optional<P>> {
-        type Writer<'a> = OptionalValueWriter<'a, N, P>;
-        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
-            OptionalValueWriter {
-                buf,
-                _m: PhantomData,
-            }
         }
     }
 }
 
 pub mod repeated {
     use super::*;
-    impl<'b, const N: usize, P: ProtobufScalar> RepeatedValueWriter<'b, N, P> {
-        pub fn write<'a>(
+    impl<'b, const N: usize, P> RepeatedValueWriter<'b, N, P> {
+        pub fn new(buf: &'b mut Vec<u8>) -> Self {
+            Self {
+                buf,
+                _m: PhantomData,
+            }
+        }
+
+        pub fn write<K: ProtoEncode<P>>(
             self,
-            values: impl IntoIterator<Item = P::RustType<'a>>,
+            values: impl IntoIterator<Item = K>,
         ) -> Field<N, Repeated<P>> {
             for value in values {
-                P::write(N as i32, value, self.buf)
+                K::encode(N as i32, self.buf, value)
             }
+            Field::new()
+        }
+        pub fn append<K: ProtoEncode<P>>(&mut self, value: K) -> &mut Self {
+            K::encode(N as i32, self.buf, value);
+            self
+        }
+        pub fn close(self) -> Field<N, Repeated<P>> {
             Field::new()
         }
     }
 
     impl<'b, const N: usize, M: MessageSchema> RepeatedValueWriter<'b, N, M> {
-        pub fn write_msg<'a, T: ProtoWrite<M>>(
-            self,
-            values: impl IntoIterator<Item = T>,
-        ) -> Field<N, Repeated<M>> {
-            for value in values {
-                let writer = M::new_writer(self.buf, Some(N as i32));
-                value.write_msg(writer)
-            }
-            Field::new()
-        }
-        pub fn append_msg<'a, T: ProtoWrite<M>>(&mut self, value: T) -> Field<N, Repeated<M>> {
-            let writer = M::new_writer(self.buf, Some(N as i32));
-            value.write_msg(writer);
-            Field::new()
-        }
-        pub fn append_msg_with(
-            &mut self,
-            mut func: impl FnMut(M::Writer<'_>),
-        ) -> Field<N, Repeated<M>> {
+        pub fn append_msg_with(&mut self, mut func: impl FnMut(M::Writer<'_>)) -> &mut Self {
             let writer = M::new_writer(self.buf, Some(N as i32));
             func(writer);
-            Field::new()
-        }
-        pub fn close(self) -> Field<N, Repeated<M>> {
-            Field::new()
+            self
         }
     }
 
@@ -174,16 +149,6 @@ pub mod repeated {
         buf: &'b mut Vec<u8>,
         _m: PhantomData<P>,
     }
-
-    impl<const N: usize, P> FieldWriter for Field<N, Repeated<P>> {
-        type Writer<'a> = RepeatedValueWriter<'a, N, P>;
-        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
-            RepeatedValueWriter {
-                buf,
-                _m: PhantomData,
-            }
-        }
-    }
 }
 
 pub mod packed {
@@ -194,25 +159,22 @@ pub mod packed {
         buf: &'b mut Vec<u8>,
         _m: PhantomData<P>,
     }
-    impl<'b, const N: usize, P: ProtobufScalar> PackedValueWriter<'b, N, P> {
-        pub fn write<'a>(
-            self,
-            values: impl IntoIterator<Item = P::RustType<'a>>,
-        ) -> Field<N, Packed<P>> {
-            for value in values {
-                P::write(N as i32, value, self.buf)
-            }
-            Field::new()
-        }
-    }
 
-    impl<const N: usize, P> FieldWriter for Field<N, Packed<P>> {
-        type Writer<'a> = PackedValueWriter<'a, N, P>;
-        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
-            PackedValueWriter {
+    impl<'b, const N: usize, P> PackedValueWriter<'b, N, P> {
+        pub fn new(buf: &'b mut Vec<u8>) -> Self {
+            Self {
                 buf,
                 _m: PhantomData,
             }
+        }
+        pub fn write<'a, K: ProtoEncode<P>>(
+            self,
+            values: impl IntoIterator<Item = K>,
+        ) -> Field<N, Packed<P>> {
+            for value in values {
+                K::encode(N as i32, self.buf, value)
+            }
+            Field::new()
         }
     }
 }
@@ -223,34 +185,25 @@ pub mod required {
         buf: &'b mut Vec<u8>,
         _m: PhantomData<P>,
     }
-    impl<'b, const N: usize, P: ProtobufScalar> RequiredValueWriter<'b, N, P> {
-        pub fn write(self, value: P::RustType<'_>) -> Field<N, Required<P>> {
-            P::write(N as i32, value, self.buf);
+    impl<'b, const N: usize, P> RequiredValueWriter<'b, N, P> {
+        pub fn new(buf: &'b mut Vec<u8>) -> Self {
+            Self {
+                buf,
+                _m: PhantomData,
+            }
+        }
+
+        pub fn write<T: ProtoEncode<P>>(self, value: T) -> Field<N, Required<P>> {
+            T::encode(N as i32, self.buf, value);
             Field::new()
         }
     }
-    impl<'b, const N: usize, M: MessageSchema> RequiredValueWriter<'b, N, M> {
-        pub fn write_msg<T: ProtoWrite<M>>(self, value: T) -> Field<N, Required<M>> {
-            let w = M::new_writer(self.buf, Some(N as i32));
-            value.write_msg(w);
-            Field::new()
-        }
-    }
+
     impl<'b, const N: usize, M: MessageSchema> RequiredValueWriter<'b, N, M> {
         pub fn write_with(self, mut func: impl FnMut(M::Writer<'_>)) -> Field<N, Required<M>> {
             let w = M::new_writer(self.buf, Some(N as i32));
             func(w);
             Field::new()
-        }
-    }
-
-    impl<const N: usize, P> FieldWriter for Field<N, Required<P>> {
-        type Writer<'a> = RequiredValueWriter<'a, N, P>;
-        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
-            RequiredValueWriter {
-                buf,
-                _m: PhantomData,
-            }
         }
     }
 }
@@ -262,31 +215,17 @@ pub mod plain {
         _m: PhantomData<P>,
     }
 
-    impl<'b, const N: usize, P: ProtobufScalar> PlainValueWriter<'b, N, P> {
-        pub fn write(self, value: P::RustType<'_>) -> Field<N, Plain<P>> {
-            P::write(N as i32, value, self.buf);
-
-            Field::new()
-        }
-    }
-    //plain messages are treated as optional
-    impl<'b, const N: usize, M: MessageSchema> PlainValueWriter<'b, N, M> {
-        pub fn write_msg<T: ProtoWrite<M>>(self, value: Option<T>) -> Field<N, Plain<M>> {
-            if let Some(value) = value {
-                let w = M::new_writer(self.buf, Some(N as i32));
-                value.write_msg(w)
-            }
-            Field::new()
-        }
-    }
-
-    impl<const N: usize, P> FieldWriter for Field<N, Plain<P>> {
-        type Writer<'a> = PlainValueWriter<'a, N, P>;
-        fn get_writer<'a>(buf: &'a mut Vec<u8>) -> Self::Writer<'a> {
-            PlainValueWriter {
+    impl<'b, const N: usize, P> PlainValueWriter<'b, N, P> {
+        pub fn new(buf: &'b mut Vec<u8>) -> Self {
+            Self {
                 buf,
                 _m: PhantomData,
             }
+        }
+
+        pub fn write<T: ProtoEncode<P>>(self, value: T) -> Field<N, Plain<P>> {
+            T::encode(N as i32, self.buf, value);
+            Field::new()
         }
     }
 }
@@ -294,66 +233,6 @@ pub mod plain {
 impl<K, V> PbMap<K, V> {
     pub fn new() -> PbMap<K, V> {
         PbMap(PhantomData)
-    }
-}
-
-pub struct EnumWriter<'b, const N: usize> {
-    buf: &'b mut Vec<u8>,
-}
-
-impl<'b, const N: usize> EnumWriter<'b, N> {
-    pub fn new(buf: &'b mut Vec<u8>) -> Self {
-        Self { buf }
-    }
-
-    pub fn write_field(&mut self, value: i32) {
-        Int32::write(N as i32, value, self.buf)
-    }
-
-    pub fn write_untagged(&mut self, value: i32) {
-        Int32::write_value(value, self.buf)
-    }
-    pub fn write_tag(&mut self) {
-        Int32::write_tag(N as i32, self.buf)
-    }
-}
-pub struct ScalarWriter<'b, const N: usize, P> {
-    buf: &'b mut Vec<u8>,
-    _pbtype: PhantomData<P>,
-}
-
-impl<'b, const N: usize, P: ProtobufScalar> ScalarWriter<'b, N, P> {
-    pub fn new(buf: &'b mut Vec<u8>) -> Self {
-        Self {
-            buf,
-            _pbtype: PhantomData,
-        }
-    }
-
-    pub fn write_field(&mut self, value: P::RustType<'_>) {
-        P::write(N as i32, value, self.buf)
-    }
-
-    pub fn write_untagged(&mut self, value: P::RustType<'_>) {
-        P::write_value(value, self.buf)
-    }
-    pub fn write_tag(&mut self) {
-        P::write_tag(N as i32, self.buf)
-    }
-}
-
-impl<'b, const N: usize> ScalarWriter<'b, N, PbString> {
-    /// Writes values to string via their Display impl.
-    /// the max length of the string here is 127 bytes, which should cover most cases this is designed for.
-    /// NOTE: incl_empty controls wether the write will have proto3 or proto2 semantics.
-    /// if false, if the written length ends up being 0 ("", empty string), the tag/len wont be written either (proto3)
-    /// if true, the empty value will still be written, like proto2 or proto3 with explicit presence
-    pub fn write_display(&mut self, d: impl Display, incl_empty: bool) {
-        use std::io::Write;
-        let tag = ((N as i32) << 3) | (PbString::WIRE_TYPE as i32);
-        let mut t = Tack::new_with_width(self.buf, Some(tag as u32), 1);
-        t.rewind = !incl_empty;
-        write!(t.buffer, "{d}").unwrap();
     }
 }
 
@@ -371,7 +250,16 @@ impl<'b, const N: usize, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b
         }
     }
 
-    pub fn write_entry<'a>(&mut self, key: K::RustType<'a>, value: V::RustType<'a>) {
+    pub fn write<'a>(&mut self, key: K::RustType<'a>, value: V::RustType<'a>) {
+        let tag = (N << 3) | 2;
+        write_varint(tag as u64, self.buf);
+        let len = K::len(1, key) + V::len(2, value);
+        write_varint(len as u64, self.buf);
+        K::write(1, key, self.buf);
+        V::write(2, value, self.buf);
+    }
+
+    pub fn write_entry(&mut self, key: K::RustType<'_>, value: V::RustType<'_>) {
         let tag = (N << 3) | 2;
         write_varint(tag as u64, self.buf);
         let len = K::len(1, key) + V::len(2, value);
@@ -381,21 +269,95 @@ impl<'b, const N: usize, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b
     }
 }
 
+pub struct MapWriter<'b, const N: usize, K, V> {
+    buf: &'b mut Vec<u8>,
+    _pbtype: PhantomData<(K, V)>,
+}
+
+impl<'b, const N: usize, K, V> MapWriter<'b, N, K, V> {
+    pub fn new(buf: &'b mut Vec<u8>) -> Self {
+        Self {
+            buf,
+            _pbtype: PhantomData,
+        }
+    }
+
+    pub fn insert<'a, A: ProtoEncode<K>, B: ProtoEncode<V>>(&mut self, key: A, value: B) {
+        let t = Tack::new(self.buf, Some(N as u32));
+        A::encode(1, t.buffer, key);
+        B::encode(2, t.buffer, value);
+    }
+
+    pub fn close(self) -> Field<N, PbMap<K, V>> {
+        Field::new()
+    }
+    pub fn write<'a, I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
+        self,
+        values: I,
+    ) -> Field<N, PbMap<K, V>> {
+        ProtoEncode::<PbMap<K, V>>::encode(N as i32, self.buf, values);
+        Field::new()
+    }
+}
+
 // automatically codegened for a message in a proto file.
 pub trait MessageSchema {
     type Writer<'a>;
     fn new_writer(buffer: &mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'_>;
 }
 
-pub trait ProtoWrite<M>
-where
-    M: MessageSchema,
-{
-    fn write_msg(&self, writer: M::Writer<'_>);
+pub trait ProtoEncode<P> {
+    fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self);
 }
 
-impl<T: ProtoWrite<M>, M: MessageSchema> ProtoWrite<M> for &T {
-    fn write_msg(&self, writer: <M as MessageSchema>::Writer<'_>) {
-        T::write_msg(self, writer)
+impl<T: AsRef<str>> ProtoEncode<PbString> for T {
+    fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {
+        PbString::write(field_nr, value.as_ref(), buf)
+    }
+}
+
+impl<T: AsRef<[u8]>> ProtoEncode<PbBytes> for T {
+    fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {
+        PbBytes::write(field_nr, value.as_ref(), buf)
+    }
+}
+
+macro_rules! gen_encodes {
+    ($src:ty => $($dst:ty),*) => {
+        $(
+            impl ProtoEncode<$dst> for $src {
+                fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {
+                    <$dst>::write(field_nr, value, buf)
+                }
+            }
+            impl<'a> ProtoEncode<$dst> for &'a $src {
+                fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {
+                    <$dst>::write(field_nr, *value, buf)
+                }
+            }
+        )*
+    };
+}
+
+gen_encodes!(i32 => Int32, Sint32, Sfixed32);
+gen_encodes!(u32 => Uint32, Fixed32);
+gen_encodes!(i64 => Int64, Sint64, Sfixed64);
+gen_encodes!(u64 => Uint64, Fixed64);
+gen_encodes!(f32 => Float);
+gen_encodes!(f64 => Double);
+gen_encodes!(bool => Bool);
+
+impl<A, B, K, V, I> ProtoEncode<PbMap<K, V>> for I
+where
+    I: IntoIterator<Item = (A, B)>,
+    A: ProtoEncode<K>,
+    B: ProtoEncode<V>,
+{
+    fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {
+        for (k, v) in value {
+            let t = Tack::new(buf, Some(field_nr as u32));
+            A::encode(1, t.buffer, k);
+            B::encode(2, t.buffer, v);
+        }
     }
 }
