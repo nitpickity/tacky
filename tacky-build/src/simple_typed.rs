@@ -25,7 +25,7 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
             {
                 let return_type = format!("MapWriter<'_,{number},{k},{v}>");
                 indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-                indented!(w, r"    <{return_type}>::new(&mut self.tack.buffer)")?;
+                indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
                 indented!(w, r"}}")?;
                 return Ok(())
 
@@ -44,7 +44,7 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
             {
                 let return_type = format!("MapWriter<'_,{number},{k},{v}>");
                 indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-                indented!(w, r"    <{return_type}>::new(&mut self.tack.buffer)")?;
+                indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
                 indented!(w, r"}}")?;
                 return Ok(())
 
@@ -64,6 +64,6 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
         Label::Plain => mk_it("Plain")
     };
     indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-    indented!(w, r"    <{return_type}>::new(&mut self.tack.buffer)")?;
+    indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
     indented!(w, r"}}")
 }

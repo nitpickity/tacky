@@ -130,7 +130,7 @@ pub mod repeated {
     }
 
     impl<'b, const N: usize> RepeatedValueWriter<'b, N, PbString> {
-        pub fn write_fmt<'a, T: Display>(
+        pub fn write_fmt<T: Display>(
             self,
             values: impl IntoIterator<Item = T>,
             incl_empty: bool,
@@ -167,7 +167,7 @@ pub mod packed {
                 _m: PhantomData,
             }
         }
-        pub fn write<'a, K: ProtoEncode<P>>(
+        pub fn write<K: ProtoEncode<P>>(
             self,
             values: impl IntoIterator<Item = K>,
         ) -> Field<N, Packed<P>> {
@@ -282,7 +282,7 @@ impl<'b, const N: usize, K, V> MapWriter<'b, N, K, V> {
         }
     }
 
-    pub fn insert<'a, A: ProtoEncode<K>, B: ProtoEncode<V>>(&mut self, key: A, value: B) {
+    pub fn insert<A: ProtoEncode<K>, B: ProtoEncode<V>>(&mut self, key: A, value: B) {
         let t = Tack::new(self.buf, Some(N as u32));
         A::encode(1, t.buffer, key);
         B::encode(2, t.buffer, value);
@@ -291,7 +291,7 @@ impl<'b, const N: usize, K, V> MapWriter<'b, N, K, V> {
     pub fn close(self) -> Field<N, PbMap<K, V>> {
         Field::new()
     }
-    pub fn write<'a, I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
+    pub fn write<I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
         self,
         values: I,
     ) -> Field<N, PbMap<K, V>> {
