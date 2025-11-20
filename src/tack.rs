@@ -54,7 +54,8 @@ impl<'b> Tack<'b> {
         }
     }
 
-    pub fn new_with_width(buffer: &'b mut Vec<u8>, tag: Option<u32>, width: u32) -> Self {
+    pub fn new_with_width(buffer: &'b mut Vec<u8>, field_nr: Option<u32>, width: u32) -> Self {
+        let tag = field_nr.map(|n| (n << 3) | 2);
         let tag = tag.and_then(NonZeroU32::new);
         if let Some(tag) = tag {
             // writing in a nested context, need to write down the tag, and then len.

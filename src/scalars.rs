@@ -110,38 +110,39 @@ pub fn write_bool(value: bool, buf: &mut impl BufMut) {
 }
 
 // lengths
+#[inline]
 pub const fn len_of_value<T: Copy>(_: T) -> usize {
     std::mem::size_of::<T>()
 }
-
+#[inline]
 pub const fn len_of_string(value: &str) -> usize {
     encoded_len_varint(value.len() as u64) + value.len()
 }
-
+#[inline]
 pub const fn len_of_bytes(value: &[u8]) -> usize {
     encoded_len_varint(value.len() as u64) + value.len()
 }
-
+#[inline]
 pub const fn len_of_int32(value: i32) -> usize {
     encoded_len_varint(value as u64)
 }
-
+#[inline]
 pub const fn len_of_int64(value: i64) -> usize {
     encoded_len_varint(value as u64)
 }
-
+#[inline]
 pub const fn len_of_uint32(value: u32) -> usize {
     encoded_len_varint(value as u64)
 }
-
+#[inline]
 pub const fn len_of_uint64(value: u64) -> usize {
     encoded_len_varint(value)
 }
-
+#[inline]
 pub const fn len_of_sint32(value: i32) -> usize {
     encoded_len_varint(((value << 1) ^ (value >> 31)) as u64)
 }
-
+#[inline]
 pub const fn len_of_sint64(value: i64) -> usize {
     encoded_len_varint(((value << 1) ^ (value >> 63)) as u64)
 }
@@ -151,7 +152,7 @@ pub const fn len_of_sint64(value: i64) -> usize {
 /// public only because its needed for the codegen crate.
 pub trait ProtobufScalar {
     type RustType<'a>: Copy;
-    const WIRE_TYPE: usize;
+    const WIRE_TYPE: WireType;
     /// how to write the value itself.
     /// can also be used to write the value without tag.
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut);
@@ -182,7 +183,7 @@ macro_rules! implscalar {
     ($t:ident, $rt:ty, $wt:expr, $f:expr, $fl:expr) => {
         impl ProtobufScalar for $t {
             type RustType<'a> = $rt;
-            const WIRE_TYPE: usize = $wt as usize;
+            const WIRE_TYPE: WireType = $wt;
             fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
                 $f(value, buf)
             }

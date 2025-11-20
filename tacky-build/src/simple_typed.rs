@@ -7,7 +7,7 @@ use crate::{
 
 // generate writing methods for simple scalar fields
 #[rustfmt::skip]
-pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
+pub fn get_writer(w: &mut Fmter<'_>, field: &Field) {
     let Field {
         name,
         number,
@@ -24,11 +24,11 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
             let (k,v) = (k.tacky_type(), v.tacky_type());
             {
                 let return_type = format!("MapWriter<'_,{number},{k},{v}>");
-                indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-                indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
-                indented!(w, r"}}")?;
-                return Ok(())
-
+                indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{");
+                indented!(w, r"    <{return_type}>::new(self.tack.buffer)");
+                indented!(w, r"}}");
+                return;
+                
             }
         }
 
@@ -43,11 +43,11 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
 
             {
                 let return_type = format!("MapWriter<'_,{number},{k},{v}>");
-                indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-                indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
-                indented!(w, r"}}")?;
-                return Ok(())
-
+                indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{");
+                indented!(w, r"    <{return_type}>::new(self.tack.buffer)");
+                indented!(w, r"}}");
+                return;
+               
             }
         }
     };
@@ -63,7 +63,7 @@ pub fn get_writer(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
         Label::Packed =>   mk_it("Packed"),
         Label::Plain => mk_it("Plain")
     };
-    indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{")?;
-    indented!(w, r"    <{return_type}>::new(self.tack.buffer)")?;
+    indented!(w, r"pub fn {name}(&mut self) -> {return_type} {{");
+    indented!(w, r"    <{return_type}>::new(self.tack.buffer)");
     indented!(w, r"}}")
 }
