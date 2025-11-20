@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 pb-rs = { path = "../pbrs" }
 tacky = { path = ".." }
+heck = "0.5"

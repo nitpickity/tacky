@@ -1,10 +1,8 @@
 mod prost_proto {
     include!(concat!(env!("OUT_DIR"), "/example.rs"));
-    include!(concat!(env!("OUT_DIR"), "/useme.rs"));
 }
 mod tacky_proto {
     include!(concat!(env!("OUT_DIR"), "/simple.rs"));
-    include!(concat!(env!("OUT_DIR"), "/useful.rs"));
 }
 
 #[cfg(test)]
@@ -117,7 +115,7 @@ mod tests {
             tacky_macros::write_proto!(
                 writer,
                 MsgWithEnums {
-                    enum1: Some(SimpleEnum::FIRST),
+                    enum1: Some(SimpleEnum::First),
                     enum2: [AnotherEnum::A, AnotherEnum::B],
                 }
             );
@@ -150,7 +148,7 @@ mod tests {
                             tacky_macros::write_proto!(
                                 m,
                                 MsgWithEnums {
-                                    enum1: Some(SimpleEnum::FIRST),
+                                    enum1: Some(SimpleEnum::First),
                                     enum2: [AnotherEnum::A, AnotherEnum::B],
                                 }
                             );

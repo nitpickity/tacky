@@ -245,7 +245,7 @@ impl From<pb_rs::types::Frequency> for Label {
 fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
     for f in fields {
         match f.ty {
-            _ => get_writer(w, &f).unwrap(),
+            _ => get_writer(w, &f),
         }
     }
 }
@@ -259,70 +259,73 @@ fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
 
     //write struct
 
-    indented!(w).unwrap();
+    indented!(w);
     write_simple_message_schema(w, name, &fields);
     write_trait_impl(w, name);
-    message_def_writer(w, &name).unwrap();
-    indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#).unwrap();
+    message_def_writer(w, &name);
+    indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#);
     w.indent();
     write_writer_api(w, &fields);
     w.unindent();
-    indented!(w, "}}").unwrap();
+    indented!(w, "}}")
 }
 
 fn write_simple_enum(w: &mut Fmter<'_>, m: &Enumerator, desc: &FileDescriptor) {
     let name = &m.name;
 
-    //write struct
+    //write enum
 
-    indented!(w).unwrap();
-    indented!(w, "pub enum {name} {{").unwrap();
+    indented!(w);
+    indented!(w, "pub enum {name} {{");
     w.indent();
-    for (n, number) in &m.fields {
-        indented!(w, "{n} = {number},").unwrap()
+    for (field, number) in &m.fields {
+        indented!(
+            w,
+            "{field} = {number},",
+            field = heck::AsUpperCamelCase(field)
+        );
     }
     w.unindent();
-    indented!(w, "}}").unwrap();
-    indented!(w, "impl ProtoEncode<{name}> for {name} {{").unwrap();
+    indented!(w, "}}");
+    indented!(w, "impl ProtoEncode<{name}> for {name} {{");
     w.indent();
     indented!(
         w,
-        "fn encode(field_nr: i32, buf: &mut Vec<u8>, value: Self) {{"
-    )
-    .unwrap();
-    indented!(w, "    tacky::Int32::write(field_nr, value as i32, buf)").unwrap();
-    indented!(w, "}}").unwrap();
+        "const WIRE_TYPE: tacky::WireType = tacky::WireType::VARINT;"
+    );
+    indented!(w, "fn encode(buf: &mut Vec<u8>, value: Self) {{");
+    indented!(w, "    tacky::Int32::write_value(value as i32, buf)");
+    indented!(w, "}}");
     w.unindent();
-    indented!(w, "}}").unwrap();
+    indented!(w, "}}");
 }
 
 fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
-    indented!(w, r#"impl MessageSchema for {name} {{"#).unwrap();
+    indented!(w, r#"impl MessageSchema for {name} {{"#);
     w.indent();
-    indented!(w, "type Writer<'a> = {name}Writer<'a>; ").unwrap();
+    indented!(w, "type Writer<'a> = {name}Writer<'a>; ");
     indented!(
         w,
         "fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a> {{"
-    )
-    .unwrap();
+    );
     w.indent();
-    indented!(w, " <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))").unwrap();
+    indented!(w, " <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))");
     w.unindent();
-    indented!(w, "}}").unwrap();
+    indented!(w, "}}");
     w.unindent();
-    indented!(w, "}}").unwrap();
+    indented!(w, "}}");
 }
 
 fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) {
     //write struct
     indented!(w, r"#[derive(Default)]");
-    indented!(w, r"pub struct {name} {{").unwrap();
+    indented!(w, r"pub struct {name} {{");
     w.indent();
     for f in fields {
-        field_witness_type(w, &f).unwrap()
+        field_witness_type(w, &f);
     }
     w.unindent();
-    indented!(w, "}}").unwrap();
+    indented!(w, "}}");
 }
 
 pub fn write_proto(file: &str, output: &str) {
@@ -331,10 +334,10 @@ pub fn write_proto(file: &str, output: &str) {
     let mut buf = String::new();
     let mut fmter = Fmter::new(&mut buf);
     let mod_name = test_file.package.clone();
-    indented!(fmter, "#[allow(unused, dead_code)]").unwrap();
-    indented!(fmter, "pub mod {mod_name} {{").unwrap();
+    indented!(fmter, "#[allow(unused, dead_code)]");
+    indented!(fmter, "pub mod {mod_name} {{");
     fmter.indent();
-    indented!(fmter, "use ::tacky::*;").unwrap();
+    indented!(fmter, "use ::tacky::*;");
     for m in &test_file.messages {
         write_simple_message(&mut fmter, m, &test_file);
     }
@@ -343,7 +346,7 @@ pub fn write_proto(file: &str, output: &str) {
         write_simple_enum(&mut fmter, m, &test_file);
     }
     fmter.unindent();
-    indented!(fmter, "}}").unwrap();
+    indented!(fmter, "}}");
     let mut file = std::fs::File::create(output).unwrap();
     file.write_all(buf.as_bytes()).unwrap();
 }

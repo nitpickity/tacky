@@ -7,27 +7,27 @@ use crate::{
 };
 
 #[rustfmt::skip]
-pub fn message_def_writer(w: &mut Fmter<'_>, name: &str) -> std::fmt::Result {
+pub fn message_def_writer(w: &mut Fmter<'_>, name: &str){
     //write struct
-    indented!(w, r"pub struct {name}Writer<'buf> {{")?;
-    indented!(w, r"   tack: Tack<'buf>")?;
-    indented!(w, r"}}")?;
-    indented!(w)?;
-    indented!(w, r"impl<'buf> {name}Writer<'buf> {{")?;
+    indented!(w, r"pub struct {name}Writer<'buf> {{");
+    indented!(w, r"   tack: Tack<'buf>");
+    indented!(w, r"}}");
+    indented!(w);
+    indented!(w, r"impl<'buf> {name}Writer<'buf> {{");
     w.indent();
-    indented!(w, r"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{")?;
-    indented!(w, r"    Self {{tack: Tack::new(buf, tag)}}")?;
-    indented!(w, r"}}")?;
-    indented!(w, r"pub fn written(&self) -> usize {{")?;
-    indented!(w, r"    self.tack.buffer.len()")?;
-    indented!(w, r"}}")?;
+    indented!(w, r"pub fn new(buf: &'buf mut Vec<u8>, tag: Option<u32>) -> Self {{");
+    indented!(w, r"    Self {{tack: Tack::new(buf, tag)}}");
+    indented!(w, r"}}");
+    indented!(w, r"pub fn written(&self) -> usize {{");
+    indented!(w, r"    self.tack.buffer.len()");
+    indented!(w, r"}}");
     w.unindent();
-    indented!(w, r"}}")?;
+    indented!(w, r"}}");
     indented!(w)
 }
 
 #[rustfmt::skip]
-pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field) -> std::fmt::Result {
+pub fn field_witness_type(w: &mut Fmter<'_>, field: &Field){
     let Field {
         name,
         number,

@@ -20,9 +20,9 @@ impl<'w> Fmter<'w> {
 
 macro_rules! indented {
     ($fmter:expr $(,)?) => {
-        write!($fmter.w, "\n")
+        write!($fmter.w, "\n").unwrap()
     };
     ($fmter:expr, $($arg:tt)*) => {
-        write!($fmter.w, "{}",$fmter.leading_spaces).and_then(|_| writeln!($fmter.w, $($arg)*))
+        write!($fmter.w, "{}",$fmter.leading_spaces).and_then(|_| writeln!($fmter.w, $($arg)*)).unwrap()
     };
 }
