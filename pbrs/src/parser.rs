@@ -282,6 +282,9 @@ fn frequencies(
     pf: Option<ParsingStageFrequencyToken>,
     packed: bool,
 ) -> Option<Frequency> {
+    // keep the parsed frequency as packed until we resolve the types, as enums (which are just varints) can be packed, but are unknown here
+    // we'll error out later if this is wrong.
+
     match (syntax, typ, pf) {
         (_, FieldType::Map(..), _) => None, //map types dont have it.
         (Syntax::Proto2, _, Some(ParsingStageFrequencyToken::Required)) => {
@@ -290,13 +293,11 @@ fn frequencies(
         (Syntax::Proto2, _, Some(ParsingStageFrequencyToken::Optional)) => {
             Some(Frequency::Optional)
         }
-        (Syntax::Proto2, t, Some(ParsingStageFrequencyToken::Repeated)) => {
-            Some(if t.is_primitive() && packed {
-                Frequency::Packed
-            } else {
-                Frequency::Repeated
-            })
-        }
+        (Syntax::Proto2, _, Some(ParsingStageFrequencyToken::Repeated)) => Some(if packed {
+            Frequency::Packed
+        } else {
+            Frequency::Repeated
+        }),
         (Syntax::Proto2, _, None) => None, //only allowed within oneOfs
 
         (Syntax::Proto3, _, Some(ParsingStageFrequencyToken::Required)) => {
@@ -305,13 +306,7 @@ fn frequencies(
         (Syntax::Proto3, _, Some(ParsingStageFrequencyToken::Optional)) => {
             Some(Frequency::Optional)
         }
-        (Syntax::Proto3, t, Some(ParsingStageFrequencyToken::Repeated)) => {
-            Some(if t.is_primitive() {
-                Frequency::Packed
-            } else {
-                Frequency::Repeated
-            })
-        }
+        (Syntax::Proto3, _, Some(ParsingStageFrequencyToken::Repeated)) => Some(Frequency::Packed),
         (Syntax::Proto3, _, None) => Some(Frequency::Plain),
     }
 }

@@ -40,6 +40,7 @@ mod tests {
                     normal_int: anumber,
                     zigzag_int: Some(24),
                     fixed_int: Some(12),
+                    packed_enum: [SimpleEnum::First, SimpleEnum::Second],
                     manynumbers,
                     manynumbers_unpacked: manynumbers,
                     astring,
@@ -66,6 +67,10 @@ mod tests {
                 manybytes: manybytes.into_iter().map(|arr| arr.to_vec()).collect(),
                 abytes: Some(abytes),
                 yesno: Some(false),
+                packed_enum: vec![
+                    prost_proto::SimpleEnum::First.into(),
+                    prost_proto::SimpleEnum::Second.into(),
+                ],
             }
         };
 
@@ -169,6 +174,7 @@ mod tests {
                                         astring: None::<&str>,
                                         manystrings: ["hello"],
                                         abytes: None::<Vec<_>>,
+                                        packed_enum: [SimpleEnum::First, SimpleEnum::Second],
                                         manybytes: <Vec<Vec<u8>>>::new(),
                                         yesno: Some(false),
                                     }
@@ -201,6 +207,10 @@ mod tests {
                             astring: None,
                             manystrings: vec!["hello".into()],
                             abytes: None,
+                            packed_enum: vec![
+                                prost_proto::SimpleEnum::First.into(),
+                                prost_proto::SimpleEnum::Second.into(),
+                            ],
                             manybytes: vec![],
                             yesno: Some(false),
                         })

@@ -226,6 +226,20 @@ impl Message {
 
     fn sanity_checks(&self, desc: &FileDescriptor) -> Result<()> {
         for f in self.all_fields() {
+            match (f.frequency, &f.typ) {
+                (Some(Frequency::Packed), x)
+                    if !(x.is_primitive() || matches!(x, FieldType::Enum(_))) =>
+                {
+                    return Err(Error::InvalidMessage(
+                        format!(
+                            "{} field marked as packed but is not a primitive or enum type",
+                            f.name
+                        )
+                        .into(),
+                    ));
+                }
+                _ => {}
+            }
             // check reserved
             if self
                 .reserved_names
@@ -521,6 +535,7 @@ impl FileDescriptor {
 
         desc.fetch_imports(in_file, import_search_path)?;
         desc.resolve_types()?;
+        desc.sanity_checks()?;
         Ok(desc)
     }
 

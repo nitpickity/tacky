@@ -8,6 +8,7 @@ message SimpleMessage {
     optional sfixed64 fixed_int = 3;
     repeated int32 manynumbers = 4 [packed=true];
     repeated int32 manynumbers_unpacked = 5;
+    repeated SimpleEnum packed_enum = 11 [packed = true];
     optional string astring = 6;
     repeated string manystrings = 7;
     repeated bytes manybytes = 8;
