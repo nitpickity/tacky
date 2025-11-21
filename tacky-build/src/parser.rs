@@ -298,6 +298,27 @@ fn write_simple_enum(w: &mut Fmter<'_>, m: &Enumerator, desc: &FileDescriptor) {
     indented!(w, "}}");
     w.unindent();
     indented!(w, "}}");
+    indented!(w, "impl std::convert::TryFrom<i32> for {name} {{");
+    w.indent();
+    indented!(w, "type Error = ();");
+    indented!(w, "fn try_from(value: i32) -> Result<Self, Self::Error> {{");
+    w.indent();
+    indented!(w, "match value {{");
+    w.indent();
+    for (field, number) in &m.fields {
+        indented!(
+            w,
+            "{number} => Ok({name}::{field}),",
+            field = heck::AsUpperCamelCase(field)
+        );
+    }
+    indented!(w, "_ => Err(()),");
+    w.unindent();
+    indented!(w, "}}");
+    w.unindent();
+    indented!(w, "}}");
+    w.unindent();
+    indented!(w, "}}");
 }
 
 fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
