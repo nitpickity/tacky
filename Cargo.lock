@@ -345,6 +345,10 @@ version = "0.1.0"
 dependencies = [
  "heck",
  "pb-rs",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
  "tacky",
 ]
 

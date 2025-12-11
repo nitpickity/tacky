@@ -1,22 +1,37 @@
 use bytes::BufMut;
 
 /// The protobuf types, as ZST markers.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Int32;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Sint32;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Int64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Sint64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Uint32;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Uint64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Bool;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Fixed32;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Sfixed32;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Float;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Fixed64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Sfixed64;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Double;
 
 // length-delimited
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbString;
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbBytes;
 
 #[inline]
@@ -218,6 +233,7 @@ implscalar!(PbBytes, &'a [u8], WireType::LEN, write_bytes, len_of_bytes);
 
 // https://protobuf.dev/programming-guides/encoding/#structure
 #[repr(usize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WireType {
     VARINT = 0, //	int32, int64, uint32, uint64, sint32, sint64, bool, enum
     I64 = 1,    //	fixed64, sfixed64, double
