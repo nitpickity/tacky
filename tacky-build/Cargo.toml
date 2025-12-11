@@ -9,3 +9,7 @@ edition = "2021"
 pb-rs = { path = "../pbrs" }
 tacky = { path = ".." }
 heck = "0.5"
+quote = "1.0"
+proc-macro2 = "1.0"
+syn = { version = "2.0", features = ["full"] }
+prettyplease = "0.2"

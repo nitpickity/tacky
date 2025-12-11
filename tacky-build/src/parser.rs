@@ -1,15 +1,19 @@
 //! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
 //! and dont i dont to write my own (yet).
 
+use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
 use std::io::Write;
 
-use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
-
 use crate::{
-    formatter::Fmter,
     simple_typed::get_writer,
     witness::{field_witness_type, message_def_writer},
 };
+
+pub fn parse_ty(s: &str) -> syn::Type {
+    syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
+}
 
 fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
@@ -82,32 +86,7 @@ impl Scalar {
             Scalar::Bytes => "PbBytes",
         }
     }
-    pub const fn rust_type_no_ref(&self) -> &str {
-        match self {
-            Scalar::String => "str",
-            Scalar::Bytes => "[u8]",
-            _ => self.rust_type(),
-        }
-    }
-    pub const fn rust_type(&self) -> &str {
-        match self {
-            Scalar::Int32 => "i32",
-            Scalar::Sint32 => "i32",
-            Scalar::Int64 => "i64",
-            Scalar::Sint64 => "i64",
-            Scalar::Uint32 => "u32",
-            Scalar::Uint64 => "u64",
-            Scalar::Bool => "bool",
-            Scalar::Fixed32 => "u32",
-            Scalar::Sfixed32 => "i32",
-            Scalar::Float => "f32",
-            Scalar::Fixed64 => "u64",
-            Scalar::Sfixed64 => "i64",
-            Scalar::Double => "f64",
-            Scalar::String => "&str",
-            Scalar::Bytes => "&[u8]",
-        }
-    }
+
     pub const fn wire_type(&self) -> u32 {
         match self {
             Scalar::Int32
@@ -242,132 +221,136 @@ impl From<pb_rs::types::Frequency> for Label {
     }
 }
 
-fn write_writer_api<'a>(w: &mut Fmter<'_>, fields: impl IntoIterator<Item = &'a Field>) {
-    for f in fields {
-        match f.ty {
-            _ => get_writer(w, &f),
-        }
+fn write_writer_api<'a>(fields: impl IntoIterator<Item = &'a Field>) -> TokenStream {
+    let methods = fields.into_iter().map(|f| get_writer(f));
+    quote! {
+        #(#methods)*
     }
 }
 
-fn write_simple_message(w: &mut Fmter<'_>, m: &Message, desc: &FileDescriptor) {
+fn write_simple_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
     let name = &m.name;
+    let name_ident = format_ident!("{name}");
+    let writer_name_ident = format_ident!("{name}Writer");
+
     let fields = m
         .all_fields()
         .map(|f| convert_field(f, desc))
         .collect::<Vec<_>>();
 
-    //write struct
+    let struct_schema = write_simple_message_schema(name, &fields);
+    let trait_impl = write_trait_impl(name);
+    let writer_def = message_def_writer(name);
+    let writer_api = write_writer_api(&fields);
 
-    indented!(w);
-    write_simple_message_schema(w, name, &fields);
-    write_trait_impl(w, name);
-    message_def_writer(w, &name);
-    indented!(w, r#"impl<'buf> {name}Writer<'buf> {{"#);
-    w.indent();
-    write_writer_api(w, &fields);
-    w.unindent();
-    indented!(w, "}}")
+    quote! {
+        #struct_schema
+        #trait_impl
+        #writer_def
+        impl<'buf> #writer_name_ident<'buf> {
+            #writer_api
+        }
+    }
 }
 
-fn write_simple_enum(w: &mut Fmter<'_>, m: &Enumerator, desc: &FileDescriptor) {
+fn write_simple_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
     let name = &m.name;
+    let name_ident = format_ident!("{name}");
 
-    //write enum
+    let variants = m.fields.iter().map(|(field, number)| {
+        let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
+        quote! {
+             #field_ident = #number
+        }
+    });
 
-    indented!(w);
-    indented!(w, "pub enum {name} {{");
-    w.indent();
-    for (field, number) in &m.fields {
-        indented!(
-            w,
-            "{field} = {number},",
-            field = heck::AsUpperCamelCase(field)
-        );
+    let from_matches = m.fields.iter().map(|(field, number)| {
+        let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
+        quote! {
+            #number => Ok(#name_ident::#field_ident)
+        }
+    });
+
+    quote! {
+        #[repr(i32)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        pub enum #name_ident {
+            #(#variants,)*
+        }
+
+        impl ProtoEncode<#name_ident> for #name_ident {
+            const WIRE_TYPE: tacky::WireType = tacky::WireType::VARINT;
+            fn encode(buf: &mut Vec<u8>, value: Self) {
+                tacky::Int32::write_value(value as i32, buf)
+            }
+        }
+
+        impl std::convert::TryFrom<i32> for #name_ident {
+            type Error = ();
+            fn try_from(value: i32) -> Result<Self, Self::Error> {
+                match value {
+                    #(#from_matches,)*
+                    _ => Err(()),
+                }
+            }
+        }
     }
-    w.unindent();
-    indented!(w, "}}");
-    indented!(w, "impl ProtoEncode<{name}> for {name} {{");
-    w.indent();
-    indented!(
-        w,
-        "const WIRE_TYPE: tacky::WireType = tacky::WireType::VARINT;"
-    );
-    indented!(w, "fn encode(buf: &mut Vec<u8>, value: Self) {{");
-    indented!(w, "    tacky::Int32::write_value(value as i32, buf)");
-    indented!(w, "}}");
-    w.unindent();
-    indented!(w, "}}");
-    indented!(w, "impl std::convert::TryFrom<i32> for {name} {{");
-    w.indent();
-    indented!(w, "type Error = ();");
-    indented!(w, "fn try_from(value: i32) -> Result<Self, Self::Error> {{");
-    w.indent();
-    indented!(w, "match value {{");
-    w.indent();
-    for (field, number) in &m.fields {
-        indented!(
-            w,
-            "{number} => Ok({name}::{field}),",
-            field = heck::AsUpperCamelCase(field)
-        );
-    }
-    indented!(w, "_ => Err(()),");
-    w.unindent();
-    indented!(w, "}}");
-    w.unindent();
-    indented!(w, "}}");
-    w.unindent();
-    indented!(w, "}}");
 }
 
-fn write_trait_impl(w: &mut Fmter<'_>, name: &str) {
-    indented!(w, r#"impl MessageSchema for {name} {{"#);
-    w.indent();
-    indented!(w, "type Writer<'a> = {name}Writer<'a>; ");
-    indented!(
-        w,
-        "fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a> {{"
-    );
-    w.indent();
-    indented!(w, " <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))");
-    w.unindent();
-    indented!(w, "}}");
-    w.unindent();
-    indented!(w, "}}");
+fn write_trait_impl(name: &str) -> TokenStream {
+    let name_ident = format_ident!("{name}");
+    let writer_name_ident = format_ident!("{name}Writer");
+
+    quote! {
+        impl MessageSchema for #name_ident {
+            type Writer<'a> = #writer_name_ident<'a>;
+            fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a> {
+                <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))
+            }
+        }
+    }
 }
 
-fn write_simple_message_schema(w: &mut Fmter<'_>, name: &str, fields: &[Field]) {
-    //write struct
-    indented!(w, r"#[derive(Default)]");
-    indented!(w, r"pub struct {name} {{");
-    w.indent();
-    for f in fields {
-        field_witness_type(w, &f);
+fn write_simple_message_schema(name: &str, fields: &[Field]) -> TokenStream {
+    let name_ident = format_ident!("{name}");
+    let field_defs = fields.iter().map(|f| field_witness_type(f));
+
+    quote! {
+        #[derive(Default, Debug, Copy, Clone)]
+        pub struct #name_ident {
+            #(#field_defs,)*
+        }
     }
-    w.unindent();
-    indented!(w, "}}");
 }
 
 pub fn write_proto(file: &str, output: &str) {
     let mut files = read_proto_file(file, ".");
     let test_file = files.pop().unwrap();
-    let mut buf = String::new();
-    let mut fmter = Fmter::new(&mut buf);
-    let mod_name = test_file.package.clone();
-    indented!(fmter, "#[allow(unused, dead_code)]");
-    indented!(fmter, "pub mod {mod_name} {{");
-    fmter.indent();
-    indented!(fmter, "use ::tacky::*;");
-    for m in &test_file.messages {
-        write_simple_message(&mut fmter, m, &test_file);
-    }
+    let mod_name = format_ident!("{}", test_file.package);
 
-    for m in &test_file.enums {
-        write_simple_enum(&mut fmter, m, &test_file);
-    }
-    fmter.unindent();
-    indented!(fmter, "}}");
+    let messages = test_file
+        .messages
+        .iter()
+        .map(|m| write_simple_message(m, &test_file));
+    let enums = test_file
+        .enums
+        .iter()
+        .map(|m| write_simple_enum(m, &test_file));
+
+    let token_stream = quote! {
+        #[allow(unused, dead_code)]
+        pub mod #mod_name {
+            use ::tacky::*;
+            #(#messages)*
+            #(#enums)*
+        }
+    };
+
+    // eprintln!("GENERATED CODE:\n{}", token_stream.to_string());
+
+    let syntax_tree = syn::parse2(token_stream).unwrap();
+    let formatted = prettyplease::unparse(&syntax_tree);
+
     let mut file = std::fs::File::create(output).unwrap();
-    file.write_all(buf.as_bytes()).unwrap();
+    file.write_all(formatted.as_bytes()).unwrap();
 }

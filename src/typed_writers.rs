@@ -6,14 +6,21 @@ use std::{fmt::Display, marker::PhantomData};
 // compound types
 // OneOf<(Field<1,Int32>,Field<3,PbString>)>
 // currently unused as Oneof fields just get flattened into the main message
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct OneOf<O>(PhantomData<O>);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
 
 //field labels/modifiers that can be applied to the above (except maps and oneOfs)
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Optional<P>(PhantomData<P>); // also applied to proto3 fields with no modifier
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Repeated<P>(PhantomData<P>);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Required<P>(PhantomData<P>);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Packed<P>(PhantomData<P>);
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct Plain<P>(PhantomData<P>);
 
 // a complete field in a message, field number and type
@@ -47,21 +54,26 @@ impl<const N: usize, P> Field<N, P> {
     }
 }
 
+// Generic FieldWriter replacing all specific ValueWriters
+pub struct FieldWriter<'b, const N: usize, P> {
+    buf: &'b mut Vec<u8>,
+    _m: PhantomData<P>,
+}
+
+impl<'b, const N: usize, P> FieldWriter<'b, N, P> {
+    pub fn new(buf: &'b mut Vec<u8>) -> Self {
+        Self {
+            buf,
+            _m: PhantomData,
+        }
+    }
+}
+
 pub mod optional {
     use super::*;
-    pub struct OptionalValueWriter<'b, const N: usize, P> {
-        buf: &'b mut Vec<u8>,
-        _m: PhantomData<P>,
-    }
 
-    impl<'b, const N: usize, P> OptionalValueWriter<'b, N, P> {
-        pub const fn new(buf: &'b mut Vec<u8>) -> Self {
-            Self {
-                buf,
-                _m: PhantomData,
-            }
-        }
-
+    // Generic implementation for any ProtoEncode type
+    impl<'b, const N: usize, P> FieldWriter<'b, N, Optional<P>> {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(self, value: Option<V>) -> Field<N, Optional<P>> {
             if let Some(value) = value {
@@ -72,7 +84,8 @@ pub mod optional {
         }
     }
 
-    impl<'b, const N: usize> OptionalValueWriter<'b, N, PbString> {
+    // Specialization for PbString to support Display
+    impl<'b, const N: usize> FieldWriter<'b, N, Optional<PbString>> {
         #[inline]
         pub fn write_fmt<V: Display>(
             self,
@@ -88,7 +101,9 @@ pub mod optional {
             Field::new()
         }
     }
-    impl<'b, const N: usize, M: MessageSchema> OptionalValueWriter<'b, N, M> {
+
+    // Specialization for MessageSchema
+    impl<'b, const N: usize, M: MessageSchema> FieldWriter<'b, N, Optional<M>> {
         #[inline]
         pub fn write_msg(self, mut f: impl FnMut(M::Writer<'_>)) -> Field<N, Optional<M>> {
             let w = M::new_writer(self.buf, Some(N as i32));
@@ -100,14 +115,8 @@ pub mod optional {
 
 pub mod repeated {
     use super::*;
-    impl<'b, const N: usize, P> RepeatedValueWriter<'b, N, P> {
-        pub fn new(buf: &'b mut Vec<u8>) -> Self {
-            Self {
-                buf,
-                _m: PhantomData,
-            }
-        }
 
+    impl<'b, const N: usize, P> FieldWriter<'b, N, Repeated<P>> {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
@@ -130,7 +139,7 @@ pub mod repeated {
         }
     }
 
-    impl<'b, const N: usize, M: MessageSchema> RepeatedValueWriter<'b, N, M> {
+    impl<'b, const N: usize, M: MessageSchema> FieldWriter<'b, N, Repeated<M>> {
         #[inline]
         pub fn append_msg_with(&mut self, mut func: impl FnMut(M::Writer<'_>)) -> &mut Self {
             let writer = M::new_writer(self.buf, Some(N as i32));
@@ -139,7 +148,7 @@ pub mod repeated {
         }
     }
 
-    impl<'b, const N: usize> RepeatedValueWriter<'b, N, PbString> {
+    impl<'b, const N: usize> FieldWriter<'b, N, Repeated<PbString>> {
         #[inline]
         pub fn write_fmt<V: Display>(
             self,
@@ -155,28 +164,14 @@ pub mod repeated {
             Field::new()
         }
     }
-    pub struct RepeatedValueWriter<'b, const N: usize, P> {
-        buf: &'b mut Vec<u8>,
-        _m: PhantomData<P>,
-    }
 }
 
 pub mod packed {
+    use super::*;
     //todo: not all scalars can be packed (strings, bytes),
     // make this more typesafe by not implementing it on those.
-    use super::*;
-    pub struct PackedValueWriter<'b, const N: usize, P> {
-        buf: &'b mut Vec<u8>,
-        _m: PhantomData<P>,
-    }
 
-    impl<'b, const N: usize, P> PackedValueWriter<'b, N, P> {
-        pub fn new(buf: &'b mut Vec<u8>) -> Self {
-            Self {
-                buf,
-                _m: PhantomData,
-            }
-        }
+    impl<'b, const N: usize, P> FieldWriter<'b, N, Packed<P>> {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
@@ -197,18 +192,8 @@ pub mod packed {
 
 pub mod required {
     use super::*;
-    pub struct RequiredValueWriter<'b, const N: usize, P> {
-        buf: &'b mut Vec<u8>,
-        _m: PhantomData<P>,
-    }
-    impl<'b, const N: usize, P> RequiredValueWriter<'b, N, P> {
-        pub fn new(buf: &'b mut Vec<u8>) -> Self {
-            Self {
-                buf,
-                _m: PhantomData,
-            }
-        }
 
+    impl<'b, const N: usize, P> FieldWriter<'b, N, Required<P>> {
         pub fn write<V: ProtoEncode<P>>(self, value: V) -> Field<N, Required<P>> {
             <V as ProtoEncode<P>>::encode_tag(N as i32, self.buf);
             <V as ProtoEncode<P>>::encode(self.buf, value);
@@ -216,7 +201,7 @@ pub mod required {
         }
     }
 
-    impl<'b, const N: usize, M: MessageSchema> RequiredValueWriter<'b, N, M> {
+    impl<'b, const N: usize, M: MessageSchema> FieldWriter<'b, N, Required<M>> {
         pub fn write_with(self, mut func: impl FnMut(M::Writer<'_>)) -> Field<N, Required<M>> {
             let w = M::new_writer(self.buf, Some(N as i32));
             func(w);
@@ -227,19 +212,8 @@ pub mod required {
 
 pub mod plain {
     use super::*;
-    pub struct PlainValueWriter<'b, const N: usize, P> {
-        buf: &'b mut Vec<u8>,
-        _m: PhantomData<P>,
-    }
 
-    impl<'b, const N: usize, P> PlainValueWriter<'b, N, P> {
-        pub fn new(buf: &'b mut Vec<u8>) -> Self {
-            Self {
-                buf,
-                _m: PhantomData,
-            }
-        }
-
+    impl<'b, const N: usize, P> FieldWriter<'b, N, Plain<P>> {
         pub fn write<V: ProtoEncode<P>>(self, value: V) -> Field<N, Plain<P>> {
             <V as ProtoEncode<P>>::encode_tag(N as i32, self.buf);
             <V as ProtoEncode<P>>::encode(self.buf, value);
@@ -378,16 +352,14 @@ gen_encodes!(bool => Bool);
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_map_int_string() {
         let mut buf = Vec::new();
         let mut writer = MapEntryWriter::<1, Int32, PbString>::new(&mut buf);
         writer.write(1, "one");
         writer.write(2, "two");
-
-        // Each entry: tag=1, wire=2, 4-byte length, key, value
-        // 1 -> "one": length = 8, encoded as 88 80 80 00
-        // 2 -> "two": length = 8, encoded as 88 80 80 00
         assert_eq!(
             hex(&buf),
             "0a 07 08 01 12 03 6f 6e 65 0a 07 08 02 12 03 74 77 6f"
@@ -400,9 +372,6 @@ mod tests {
         let mut writer = MapEntryWriter::<1, PbString, PbString>::new(&mut buf);
         writer.write("a", "alpha");
         writer.write("b", "beta");
-        // Each entry: tag=1, wire=2, 4-byte length, key, value
-        // "a"->"alpha": length = 11,
-        // "b"->"beta": length = 10,
         assert_eq!(
             hex(&buf),
             "0a 0a 0a 01 61 12 05 61 6c 70 68 61 0a 09 0a 01 62 12 04 62 65 74 61"
@@ -415,8 +384,6 @@ mod tests {
         let mut writer = MapEntryWriter::<1, Int32, Float>::new(&mut buf);
         writer.write(1, 1.5f32);
         writer.write(2, 2.5f32);
-        // 1->1.5: 0a 09 08 01 15 00 00 c0 3f
-        // 2->2.5: 0a 09 08 02 15 00 00 20 40
         assert_eq!(
             hex(&buf),
             "0a 07 08 01 15 00 00 c0 3f 0a 07 08 02 15 00 00 20 40"
@@ -426,11 +393,11 @@ mod tests {
     fn test_required_string_and_bytes() {
         let mut buf = Vec::new();
         // String
-        let _ = required::RequiredValueWriter::<1, PbString>::new(&mut buf).write("hello");
+        let _ = FieldWriter::<1, Required<PbString>>::new(&mut buf).write("hello");
         assert_eq!(hex(&buf), "0a 05 68 65 6c 6c 6f"); // tag=1, wire=2, len=5, "hello"
         buf.clear();
         // Bytes
-        let _ = required::RequiredValueWriter::<2, PbBytes>::new(&mut buf).write(b"abc");
+        let _ = FieldWriter::<2, Required<PbBytes>>::new(&mut buf).write(b"abc");
         assert_eq!(hex(&buf), "12 03 61 62 63"); // tag=2, wire=2, len=3, "abc"
     }
 
@@ -438,19 +405,19 @@ mod tests {
     fn test_optional_string_and_bytes() {
         let mut buf = Vec::new();
         // String Some
-        let _ = optional::OptionalValueWriter::<1, PbString>::new(&mut buf).write(Some("hello"));
+        let _ = FieldWriter::<1, Optional<PbString>>::new(&mut buf).write(Some("hello"));
         assert_eq!(hex(&buf), "0a 05 68 65 6c 6c 6f");
         buf.clear();
         // String None
-        let _ = optional::OptionalValueWriter::<1, PbString>::new(&mut buf).write(None::<&str>);
+        let _ = FieldWriter::<1, Optional<PbString>>::new(&mut buf).write(None::<&str>);
         assert_eq!(hex(&buf), "");
         buf.clear();
         // Bytes Some
-        let _ = optional::OptionalValueWriter::<2, PbBytes>::new(&mut buf).write(Some(b"abc"));
+        let _ = FieldWriter::<2, Optional<PbBytes>>::new(&mut buf).write(Some(b"abc"));
         assert_eq!(hex(&buf), "12 03 61 62 63");
         buf.clear();
         // Bytes None
-        let _ = optional::OptionalValueWriter::<2, PbBytes>::new(&mut buf).write(None::<&[u8]>);
+        let _ = FieldWriter::<2, Optional<PbBytes>>::new(&mut buf).write(None::<&[u8]>);
         assert_eq!(hex(&buf), "");
     }
 
@@ -458,15 +425,13 @@ mod tests {
     fn test_repeated_string_and_bytes() {
         let mut buf = Vec::new();
         // String
-        let _ = repeated::RepeatedValueWriter::<1, PbString>::new(&mut buf).write(vec!["a", "b"]);
+        let _ = FieldWriter::<1, Repeated<PbString>>::new(&mut buf).write(vec!["a", "b"]);
         assert_eq!(hex(&buf), "0a 01 61 0a 01 62");
         buf.clear();
         // Bytes
-        let _ = repeated::RepeatedValueWriter::<2, PbBytes>::new(&mut buf).write(vec![b"x", b"y"]);
+        let _ = FieldWriter::<2, Repeated<PbBytes>>::new(&mut buf).write(vec![b"x", b"y"]);
         assert_eq!(hex(&buf), "12 01 78 12 01 79");
     }
-
-    use super::*;
 
     // Helper to get hex string of buffer for assertions
     fn hex(buf: &[u8]) -> String {
@@ -480,34 +445,31 @@ mod tests {
     fn test_required_numeric_types() {
         let mut buf = Vec::new();
         // i32
-        let _ = required::RequiredValueWriter::<1, Int32>::new(&mut buf).write(42);
+        let _ = FieldWriter::<1, Required<Int32>>::new(&mut buf).write(42);
         assert_eq!(hex(&buf), "08 2a"); // tag=1, wire=0, value=42
         buf.clear();
         // u32
-        let _ = required::RequiredValueWriter::<2, Uint32>::new(&mut buf).write(123u32);
+        let _ = FieldWriter::<2, Required<Uint32>>::new(&mut buf).write(123u32);
         assert_eq!(hex(&buf), "10 7b");
         buf.clear();
-        // i64
-        let _ = required::RequiredValueWriter::<3, Int64>::new(&mut buf).write(1000i64);
+        let _ = FieldWriter::<3, Required<Int64>>::new(&mut buf).write(1000i64);
         assert_eq!(hex(&buf), "18 e8 07");
         buf.clear();
-        // u64
-        let _ = required::RequiredValueWriter::<4, Uint64>::new(&mut buf).write(1000u64);
+        let _ = FieldWriter::<4, Required<Uint64>>::new(&mut buf).write(1000u64);
         assert_eq!(hex(&buf), "20 e8 07");
         buf.clear();
-        // f32
-        let _ = required::RequiredValueWriter::<5, Float>::new(&mut buf).write(1.5f32);
-        assert_eq!(hex(&buf), "2d 00 00 c0 3f"); // tag=5, wire=5, value=1.5f32
+        let _ = FieldWriter::<5, Required<Float>>::new(&mut buf).write(1.5f32);
+        assert_eq!(hex(&buf), "2d 00 00 c0 3f");
         buf.clear();
         // f64
-        let _ = required::RequiredValueWriter::<6, Double>::new(&mut buf).write(2.5f64);
+        let _ = FieldWriter::<6, Required<Double>>::new(&mut buf).write(2.5f64);
         assert_eq!(hex(&buf), "31 00 00 00 00 00 00 04 40"); // tag=6, wire=1, value=2.5f64
         buf.clear();
         // bool
-        let _ = required::RequiredValueWriter::<7, Bool>::new(&mut buf).write(true);
+        let _ = FieldWriter::<7, Required<Bool>>::new(&mut buf).write(true);
         assert_eq!(hex(&buf), "38 01");
         buf.clear();
-        let _ = required::RequiredValueWriter::<8, Bool>::new(&mut buf).write(false);
+        let _ = FieldWriter::<8, Required<Bool>>::new(&mut buf).write(false);
         assert_eq!(hex(&buf), "40 00");
     }
 
@@ -515,47 +477,41 @@ mod tests {
     fn test_optional_numeric_types() {
         let mut buf = Vec::new();
         // i32
-        let _ = optional::OptionalValueWriter::<1, Int32>::new(&mut buf).write(Some(42));
+        let _ = FieldWriter::<1, Optional<Int32>>::new(&mut buf).write(Some(42));
         assert_eq!(hex(&buf), "08 2a");
         buf.clear();
-        let _ = optional::OptionalValueWriter::<1, Int32>::new(&mut buf).write(None::<i32>);
+        let _ = FieldWriter::<1, Optional<Int32>>::new(&mut buf).write(None::<i32>);
         assert_eq!(hex(&buf), "");
         buf.clear();
         // u32
-        let _ = optional::OptionalValueWriter::<2, Uint32>::new(&mut buf).write(Some(123u32));
+        let _ = FieldWriter::<2, Optional<Uint32>>::new(&mut buf).write(Some(123u32));
         assert_eq!(hex(&buf), "10 7b");
         buf.clear();
         // bool
-        let _ = optional::OptionalValueWriter::<3, Bool>::new(&mut buf).write(Some(true));
+        let _ = FieldWriter::<3, Optional<Bool>>::new(&mut buf).write(Some(true));
         assert_eq!(hex(&buf), "18 01");
         buf.clear();
-        let _ = optional::OptionalValueWriter::<3, Bool>::new(&mut buf).write(None::<bool>);
+        let _ = FieldWriter::<3, Optional<Bool>>::new(&mut buf).write(None::<bool>);
         assert_eq!(hex(&buf), "");
     }
 
     #[test]
     fn test_repeated_numeric_types() {
         let mut buf = Vec::new();
-        // i32
-        let _ = repeated::RepeatedValueWriter::<1, Int32>::new(&mut buf).write(vec![1, 2, 3]);
+        let _ = FieldWriter::<1, Repeated<Int32>>::new(&mut buf).write(vec![1, 2, 3]);
         assert_eq!(hex(&buf), "08 01 08 02 08 03");
         buf.clear();
-        // bool
-        let _ =
-            repeated::RepeatedValueWriter::<2, Bool>::new(&mut buf).write(vec![true, false, true]);
+        let _ = FieldWriter::<2, Repeated<Bool>>::new(&mut buf).write(vec![true, false, true]);
         assert_eq!(hex(&buf), "10 01 10 00 10 01");
     }
 
     #[test]
     fn test_packed_numeric_types() {
         let mut buf = Vec::new();
-        // i32
-        let _ = packed::PackedValueWriter::<1, Int32>::new(&mut buf).write(vec![1, 2, 3]);
-        // tag=1, wire=2, length=3, values=1,2,3
+        let _ = FieldWriter::<1, Packed<Int32>>::new(&mut buf).write(vec![1, 2, 3]);
         assert_eq!(hex(&buf), "0a 03 01 02 03");
         buf.clear();
-        // bool
-        let _ = packed::PackedValueWriter::<2, Bool>::new(&mut buf).write(vec![true, false, true]);
+        let _ = FieldWriter::<2, Packed<Bool>>::new(&mut buf).write(vec![true, false, true]);
         assert_eq!(hex(&buf), "12 03 01 00 01");
     }
 }

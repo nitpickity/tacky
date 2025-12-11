@@ -226,20 +226,6 @@ impl Message {
 
     fn sanity_checks(&self, desc: &FileDescriptor) -> Result<()> {
         for f in self.all_fields() {
-            match (f.frequency, &f.typ) {
-                (Some(Frequency::Packed), x)
-                    if !(x.is_primitive() || matches!(x, FieldType::Enum(_))) =>
-                {
-                    return Err(Error::InvalidMessage(
-                        format!(
-                            "{} field marked as packed but is not a primitive or enum type",
-                            f.name
-                        )
-                        .into(),
-                    ));
-                }
-                _ => {}
-            }
             // check reserved
             if self
                 .reserved_names
@@ -728,6 +714,20 @@ impl FileDescriptor {
                     return Err(Error::MessageOrEnumNotFound(name));
                 }
             }
+
+            // Downgrade 'Packed' frequency to 'Repeated' for non-primitive types
+            // (like Messages) now that types are fully resolved.
+            // Enums are primitives so they remain Packed.
+            for f in m
+                .fields
+                .iter_mut()
+                .chain(m.oneofs.iter_mut().flat_map(|o| o.fields.iter_mut()))
+            {
+                if f.frequency == Some(Frequency::Packed) && !f.typ.is_primitive() {
+                    f.frequency = Some(Frequency::Repeated);
+                }
+            }
+
             for m in m.messages.iter_mut() {
                 rec_resolve_types(m, full_msgs, full_enums)?;
             }
