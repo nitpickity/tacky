@@ -16,7 +16,7 @@ enum WriteExpr {
     Scope(Ident),       // foo, assumes value in scope, writer.write(foo)
     Write(Ident, Expr), // foo: 42, implies -> foo: writer.write_foo(42)
     Block(Ident, Expr), // foo: with { expr} -> foo: { raw expr }
-    Fmt(Ident, Expr),
+    Fmt(Ident, Expr),   // foo: write_fmt(some_uuid)
 }
 
 impl Parse for Input {
