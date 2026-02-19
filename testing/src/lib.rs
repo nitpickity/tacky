@@ -1,8 +1,9 @@
 mod prost_proto {
     include!(concat!(env!("OUT_DIR"), "/example.rs"));
 }
+
 mod tacky_proto {
-    include!(concat!(env!("OUT_DIR"), "/simple.rs"));
+    include!(concat!(env!("OUT_DIR"), "/example-tacky.rs"));
 }
 
 #[cfg(test)]
@@ -13,12 +14,13 @@ mod tests {
     use tacky::MessageSchema;
 
     use crate::prost_proto::{
-        self, AnotherEnum as PAnotherEnum, MsgWithEnums as PMsgWithEnums,
+        self, AnotherEnum as PAnotherEnum, Json as PJson, MsgWithEnums as PMsgWithEnums,
         MsgWithMaps as PMsgWithMaps, MsgWithNesting as PMsgWithNesting,
         SimpleMessage as PSimpleMessage,
     };
+
     use crate::tacky_proto::example::{
-        AnotherEnum, MsgWithEnums, MsgWithMaps, MsgWithNesting, SimpleEnum, SimpleMessage,
+        AnotherEnum, Json, MsgWithEnums, MsgWithMaps, MsgWithNesting, SimpleEnum, SimpleMessage,
     };
 
     #[test]
@@ -110,6 +112,7 @@ mod tests {
         //prost can decode what tacky encodes
         assert_eq!(unpacked, prost_msg);
     }
+
     #[test]
     fn test_with_enums() {
         //data
@@ -223,5 +226,38 @@ mod tests {
         let unpacked = PMsgWithNesting::decode(&*tacky_packed).unwrap();
         //prost can decode what tacky encodes
         assert_eq!(unpacked, prost_msg);
+    }
+
+    #[test]
+    fn test_streamed() {
+        #[derive(serde::Serialize)]
+        struct JsonData {
+            hello: &'static str,
+            world: i32,
+        }
+
+        let data = JsonData {
+            hello: "world",
+            world: 42,
+        };
+
+        let tacky_packed = {
+            let mut buf = Vec::new();
+            let mut writer = Json::new_writer(&mut buf, None);
+            tacky_macros::write_proto!(
+                writer,
+                Json {
+                    json: stream(|w| serde_json::to_writer(w, &data)),
+                }
+            );
+            drop(writer);
+            buf
+        };
+
+        let unpacked = PJson::decode(&*tacky_packed).unwrap();
+        assert_eq!(
+            unpacked.json.unwrap(),
+            serde_json::to_string(&data).unwrap()
+        );
     }
 }

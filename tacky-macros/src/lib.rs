@@ -13,10 +13,11 @@ struct Input {
 
 #[derive(Debug)]
 enum WriteExpr {
-    Scope(Ident),       // foo, assumes value in scope, writer.write(foo)
-    Write(Ident, Expr), // foo: 42, implies -> foo: writer.write_foo(42)
-    Block(Ident, Expr), // foo: with { expr} -> foo: { raw expr }
-    Fmt(Ident, Expr),   // foo: write_fmt(some_uuid)
+    Scope(Ident),        // foo, assumes value in scope, writer.write(foo)
+    Write(Ident, Expr),  // foo: 42, implies -> foo: writer.write_foo(42)
+    Block(Ident, Expr),  // foo: with { expr} -> foo: { raw expr }
+    Fmt(Ident, Expr),    // foo: write_fmt(some_uuid)
+    Stream(Ident, Expr), // foo: to_writer(fn) -> foo: write_streamed(fn)
 }
 
 impl Parse for Input {
@@ -27,6 +28,7 @@ impl Parse for Input {
         let content;
         let _brace_token = braced!(content in input);
         let fields = content.parse_terminated(WriteExpr::parse, Token![,])?;
+        let _comma = input.parse::<Option<Token![,]>>()?;
         Ok(Input {
             writer,
             schema,
@@ -49,6 +51,9 @@ impl Parse for WriteExpr {
                     if p.path.is_ident("write_fmt") {
                         let arg = args.first().unwrap();
                         Self::Fmt(name, arg.clone())
+                    } else if p.path.is_ident("stream") {
+                        let arg = args.first().unwrap();
+                        Self::Stream(name, arg.clone())
                     } else {
                         Self::Write(name, e.clone())
                     }
@@ -85,6 +90,11 @@ pub fn write_proto(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         WriteExpr::Block(s, w) => {
             quote! {
                 #s: #w
+            }
+        }
+        WriteExpr::Stream(s, w) => {
+            quote! {
+                #s: ::tacky::stream(#writer.#s(), #w)
             }
         }
     });

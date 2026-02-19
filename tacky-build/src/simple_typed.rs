@@ -1,6 +1,6 @@
+use crate::parser::{parse_ty, Field, Label, PbType};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
-use crate::parser::{parse_ty, Field, Label, PbType};
 
 // generate writing methods for simple scalar fields
 pub fn get_writer(field: &Field) -> TokenStream {
@@ -22,7 +22,7 @@ pub fn get_writer(field: &Field) -> TokenStream {
             let (k, v) = (k.tacky_type(), v.tacky_type());
             let k_ident = parse_ty(k);
             let v_ident = parse_ty(v);
-            
+
             return quote! {
                 pub fn #name_ident(&mut self) -> MapWriter<'_, #number_lit, #k_ident, #v_ident> {
                     MapWriter::new(self.tack.buffer)

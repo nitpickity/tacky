@@ -222,6 +222,17 @@ pub mod plain {
     }
 }
 
+pub fn stream<'b, const N: usize, P, Ok, Err>(
+    writer: FieldWriter<'b, N, P>,
+    mut func: impl FnMut(&mut dyn std::io::Write) -> Result<Ok, Err>,
+) -> Field<N, P> {
+    let mut t = Tack::new_with_width(writer.buf, Some(N as u32), 2);
+    t.rewind = true; // if nothing is written, we can rewind and not write an empty field
+    let _ = func(&mut t.buffer); // ignore errors
+    drop(t);
+    Field::new()
+}
+
 impl<K, V> PbMap<K, V> {
     pub fn new() -> PbMap<K, V> {
         PbMap(PhantomData)

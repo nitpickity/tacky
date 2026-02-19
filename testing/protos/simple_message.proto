@@ -1,6 +1,7 @@
 syntax = "proto2";
 
 package example;
+
 // Test message with all simple scalar fields
 message SimpleMessage {
     optional int64 normal_int = 1;
@@ -41,4 +42,8 @@ enum SimpleEnum {
 enum AnotherEnum {
     A = 0;
     B = 1;
+}
+
+message Json {
+    optional string json = 1;
 }
