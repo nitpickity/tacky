@@ -17,7 +17,7 @@ enum WriteExpr {
     Write(Ident, Expr),  // foo: 42, implies -> foo: writer.write_foo(42)
     Block(Ident, Expr),  // foo: with { expr} -> foo: { raw expr }
     Fmt(Ident, Expr),    // foo: write_fmt(some_uuid)
-    Stream(Ident, Expr), // foo: to_writer(fn) -> foo: write_streamed(fn)
+    Stream(Ident, Expr), // foo: stream(fn) -> foo: ::tacky::stream(writer, fn)
 }
 
 impl Parse for Input {
