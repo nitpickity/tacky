@@ -336,7 +336,6 @@ name = "tacky"
 version = "0.2.0"
 dependencies = [
  "bytes",
- "prost",
 ]
 
 [[package]]

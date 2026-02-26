@@ -7,6 +7,7 @@ use quote::{format_ident, quote};
 use std::io::Write;
 
 use crate::{
+    field_enum::write_field_enum,
     simple_typed::get_writer,
     witness::{field_witness_type, message_def_writer},
 };
@@ -242,6 +243,7 @@ fn write_simple_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
     let trait_impl = write_trait_impl(name);
     let writer_def = message_def_writer(name);
     let writer_api = write_writer_api(&fields);
+    let field_enum = write_field_enum(name, &fields);
 
     quote! {
         #struct_schema
@@ -250,6 +252,7 @@ fn write_simple_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
         impl<'buf> #writer_name_ident<'buf> {
             #writer_api
         }
+        #field_enum
     }
 }
 

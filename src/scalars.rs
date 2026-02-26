@@ -242,3 +242,202 @@ pub enum WireType {
     // EGROUP = 4, //	group end (deprecated)
     I32 = 5, //	fixed32, sfixed32, float
 }
+
+// --- Decode support ---
+
+#[derive(Debug)]
+pub enum DecodeError {
+    Truncated,
+    InvalidWireType(u32),
+    WireTypeMismatch {
+        field: &'static str,
+        expected: WireType,
+        actual: WireType,
+    },
+    InvalidUtf8,
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Truncated => f.write_str("unexpected end of input"),
+            DecodeError::InvalidWireType(wt) => write!(f, "invalid wire type: {wt}"),
+            DecodeError::WireTypeMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "wire type mismatch for field \"{field}\": expected {expected:?}, got {actual:?}"
+            ),
+            DecodeError::InvalidUtf8 => f.write_str("invalid UTF-8 in string field"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<core::str::Utf8Error> for DecodeError {
+    fn from(_: core::str::Utf8Error) -> Self {
+        DecodeError::InvalidUtf8
+    }
+}
+
+#[inline]
+pub const fn decode_zigzag32(n: u32) -> i32 {
+    ((n >> 1) as i32) ^ (-((n & 1) as i32))
+}
+
+#[inline]
+pub const fn decode_zigzag64(n: u64) -> i64 {
+    ((n >> 1) as i64) ^ (-((n & 1) as i64))
+}
+
+#[inline]
+pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    loop {
+        let &b = buf.first().ok_or(DecodeError::Truncated)?;
+        *buf = &buf[1..];
+        result |= ((b & 0x7F) as u64) << shift;
+        if b & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(DecodeError::Truncated);
+        }
+    }
+}
+
+#[inline]
+pub fn decode_key(buf: &mut &[u8]) -> Result<(u32, WireType), DecodeError> {
+    let v = decode_varint(buf)?;
+    let tag = (v >> 3) as u32;
+    let wire = (v & 0x07) as u32;
+    let wire_type = match wire {
+        0 => WireType::VARINT,
+        1 => WireType::I64,
+        2 => WireType::LEN,
+        5 => WireType::I32,
+        other => return Err(DecodeError::InvalidWireType(other)),
+    };
+    Ok((tag, wire_type))
+}
+
+/// Decode a length-delimited field, returning a sub-slice of the input.
+#[inline]
+pub fn decode_len<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
+    let len = decode_varint(buf)? as usize;
+    if buf.len() < len {
+        return Err(DecodeError::Truncated);
+    }
+    let (data, rest) = buf.split_at(len);
+    *buf = rest;
+    Ok(data)
+}
+
+#[inline]
+pub fn check_wire_type(
+    actual: WireType,
+    expected: WireType,
+    field: &'static str,
+) -> Result<(), DecodeError> {
+    if actual != expected {
+        return Err(DecodeError::WireTypeMismatch {
+            field,
+            expected,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Skip an unknown field value based on wire type.
+#[inline]
+pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeError> {
+    match wire_type {
+        WireType::VARINT => {
+            decode_varint(buf)?;
+        }
+        WireType::I64 => {
+            if buf.len() < 8 {
+                return Err(DecodeError::Truncated);
+            }
+            *buf = &buf[8..];
+        }
+        WireType::LEN => {
+            decode_len(buf)?;
+        }
+        WireType::I32 => {
+            if buf.len() < 4 {
+                return Err(DecodeError::Truncated);
+            }
+            *buf = &buf[4..];
+        }
+    }
+    Ok(())
+}
+
+// Fixed-width decode functions
+
+#[inline]
+pub fn decode_i64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
+    if buf.len() < 8 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = i64::from_le_bytes(buf[..8].try_into().unwrap());
+    *buf = &buf[8..];
+    Ok(val)
+}
+
+#[inline]
+pub fn decode_u64(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+    if buf.len() < 8 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = u64::from_le_bytes(buf[..8].try_into().unwrap());
+    *buf = &buf[8..];
+    Ok(val)
+}
+
+#[inline]
+pub fn decode_f64(buf: &mut &[u8]) -> Result<f64, DecodeError> {
+    if buf.len() < 8 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = f64::from_le_bytes(buf[..8].try_into().unwrap());
+    *buf = &buf[8..];
+    Ok(val)
+}
+
+#[inline]
+pub fn decode_i32(buf: &mut &[u8]) -> Result<i32, DecodeError> {
+    if buf.len() < 4 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = i32::from_le_bytes(buf[..4].try_into().unwrap());
+    *buf = &buf[4..];
+    Ok(val)
+}
+
+#[inline]
+pub fn decode_u32(buf: &mut &[u8]) -> Result<u32, DecodeError> {
+    if buf.len() < 4 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = u32::from_le_bytes(buf[..4].try_into().unwrap());
+    *buf = &buf[4..];
+    Ok(val)
+}
+
+#[inline]
+pub fn decode_f32(buf: &mut &[u8]) -> Result<f32, DecodeError> {
+    if buf.len() < 4 {
+        return Err(DecodeError::Truncated);
+    }
+    let val = f32::from_le_bytes(buf[..4].try_into().unwrap());
+    *buf = &buf[4..];
+    Ok(val)
+}
