@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod prost_proto {
     include!(concat!(env!("OUT_DIR"), "/example.rs"));
 }
