@@ -21,7 +21,10 @@ fn variant_type(field: &Field) -> TokenStream {
         Label::Packed => packed_variant_type(field),
         _ => match &field.ty {
             PbType::Scalar(s) => scalar_variant_type(s),
-            PbType::Enum(_) => quote!(i32),
+            PbType::Enum((name, _)) => {
+                let ident = format_ident!("{}", name);
+                quote!(#ident)
+            }
             PbType::Message(_) => quote!(&'a [u8]),
             PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote!(&'a [u8]),
         },
@@ -99,9 +102,17 @@ fn decode_expr(field: &Field) -> TokenStream {
         }
         _ => match &field.ty {
             PbType::Scalar(s) => scalar_decode_expr(s),
-            PbType::Enum(_) => quote! {
-                let val = tacky::decode_varint(buf)? as i32;
-            },
+            PbType::Enum((name, _)) => {
+                let ident = format_ident!("{}", name);
+                let field_name_str = &field.name;
+                quote! {
+                    let raw = tacky::decode_varint(buf)? as i32;
+                    let val = #ident::try_from(raw).map_err(|_| tacky::DecodeError::InvalidEnumValue {
+                        field: #field_name_str,
+                        value: raw,
+                    })?;
+                }
+            }
             PbType::Message(_) => quote! {
                 let data = tacky::decode_len(buf)?;
             },

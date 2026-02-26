@@ -255,6 +255,10 @@ pub enum DecodeError {
         actual: WireType,
     },
     InvalidUtf8,
+    InvalidEnumValue {
+        field: &'static str,
+        value: i32,
+    },
 }
 
 impl std::fmt::Display for DecodeError {
@@ -271,6 +275,9 @@ impl std::fmt::Display for DecodeError {
                 "wire type mismatch for field \"{field}\": expected {expected:?}, got {actual:?}"
             ),
             DecodeError::InvalidUtf8 => f.write_str("invalid UTF-8 in string field"),
+            DecodeError::InvalidEnumValue { field, value } => {
+                write!(f, "invalid enum value {value} for field \"{field}\"")
+            }
         }
     }
 }
@@ -407,6 +414,16 @@ impl<'a> PackedVarints<'a> {
     }
     pub fn bools(self) -> impl Iterator<Item = Result<bool, DecodeError>> + 'a {
         self.map(|r| r.map(|v| v != 0))
+    }
+    pub fn enums<E: TryFrom<i32>>(self) -> impl Iterator<Item = Result<E, DecodeError>> + 'a {
+        self.map(|r| {
+            r.and_then(|v| {
+                E::try_from(v as i32).map_err(|_| DecodeError::InvalidEnumValue {
+                    field: "<packed>",
+                    value: v as i32,
+                })
+            })
+        })
     }
 }
 

@@ -295,7 +295,7 @@ mod tests {
         let mut fixed_int = None;
         let mut packed_numbers: Vec<i32> = Vec::new();
         let mut unpacked_numbers: Vec<i32> = Vec::new();
-        let mut packed_enums: Vec<i32> = Vec::new();
+        let mut packed_enums: Vec<SimpleEnum> = Vec::new();
         let mut astring = None;
         let mut manystrings: Vec<&str> = Vec::new();
         let mut abytes: Option<&[u8]> = None;
@@ -321,7 +321,7 @@ mod tests {
                 }
                 SimpleMessageField::ManynumbersUnpacked(v) => unpacked_numbers.push(v),
                 SimpleMessageField::PackedEnum(iter) => {
-                    packed_enums.extend(iter.int32s().map(|r| r.unwrap()));
+                    packed_enums.extend(iter.enums::<SimpleEnum>().map(|r| r.unwrap()));
                 }
                 SimpleMessageField::Astring(s) => astring = Some(s),
                 SimpleMessageField::Manystrings(s) => manystrings.push(s),
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(fixed_int, Some(999));
         assert_eq!(packed_numbers, vec![10, 20, 30]);
         assert_eq!(unpacked_numbers, vec![100, 200]);
-        assert_eq!(packed_enums, vec![0, 1]); // First=0, Second=1
+        assert_eq!(packed_enums, vec![SimpleEnum::First, SimpleEnum::Second]);
         assert_eq!(astring, Some("hello"));
         assert_eq!(manystrings, vec!["foo", "bar"]);
         assert_eq!(abytes, Some(b"raw".as_slice()));
@@ -383,7 +383,7 @@ mod tests {
 
         let mut remaining: &[u8] = &buf;
         let mut enum1 = None;
-        let mut enum2: Vec<i32> = Vec::new();
+        let mut enum2: Vec<AnotherEnum> = Vec::new();
 
         while !remaining.is_empty() {
             let Some(field) = MsgWithEnumsField::decode(&mut remaining).unwrap() else {
@@ -395,8 +395,8 @@ mod tests {
             }
         }
 
-        assert_eq!(enum1, Some(1)); // Second = 1
-        assert_eq!(enum2, vec![0, 1]); // A=0, B=1
+        assert_eq!(enum1, Some(SimpleEnum::Second));
+        assert_eq!(enum2, vec![AnotherEnum::A, AnotherEnum::B]);
     }
 
     #[test]
@@ -476,8 +476,8 @@ mod tests {
                 MsgWithEnumsField::Enum2(v) => inner_enum2.push(v),
             }
         }
-        assert_eq!(inner_enum1, Some(0)); // First = 0
-        assert_eq!(inner_enum2, vec![1]); // B = 1
+        assert_eq!(inner_enum1, Some(SimpleEnum::First));
+        assert_eq!(inner_enum2, vec![AnotherEnum::B]);
 
         // Decode nested SimpleMessage
         assert_eq!(nested_msgs.len(), 1);
