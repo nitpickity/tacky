@@ -380,6 +380,113 @@ pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeErro
     Ok(())
 }
 
+// --- Packed iterators ---
+
+/// Zero-copy iterator over packed varint-encoded values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackedVarints<'a>(pub &'a [u8]);
+
+impl<'a> PackedVarints<'a> {
+    pub fn int32s(self) -> impl Iterator<Item = Result<i32, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| v as i32))
+    }
+    pub fn sint32s(self) -> impl Iterator<Item = Result<i32, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| decode_zigzag32(v as u32)))
+    }
+    pub fn int64s(self) -> impl Iterator<Item = Result<i64, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| v as i64))
+    }
+    pub fn sint64s(self) -> impl Iterator<Item = Result<i64, DecodeError>> + 'a {
+        self.map(|r| r.map(decode_zigzag64))
+    }
+    pub fn uint32s(self) -> impl Iterator<Item = Result<u32, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| v as u32))
+    }
+    pub fn uint64s(self) -> impl Iterator<Item = Result<u64, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| v))
+    }
+    pub fn bools(self) -> impl Iterator<Item = Result<bool, DecodeError>> + 'a {
+        self.map(|r| r.map(|v| v != 0))
+    }
+}
+
+impl<'a> Iterator for PackedVarints<'a> {
+    type Item = Result<u64, DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        Some(decode_varint(&mut self.0))
+    }
+}
+
+/// Zero-copy iterator over packed fixed 32-bit values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackedFixed32s<'a>(pub &'a [u8]);
+
+impl<'a> PackedFixed32s<'a> {
+    pub fn u32s(self) -> impl Iterator<Item = Result<u32, DecodeError>> + 'a {
+        self.map(|r| r.map(u32::from_le_bytes))
+    }
+    pub fn i32s(self) -> impl Iterator<Item = Result<i32, DecodeError>> + 'a {
+        self.map(|r| r.map(i32::from_le_bytes))
+    }
+    pub fn f32s(self) -> impl Iterator<Item = Result<f32, DecodeError>> + 'a {
+        self.map(|r| r.map(f32::from_le_bytes))
+    }
+}
+
+impl<'a> Iterator for PackedFixed32s<'a> {
+    type Item = Result<[u8; 4], DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        if self.0.len() < 4 {
+            self.0 = &[];
+            return Some(Err(DecodeError::Truncated));
+        }
+        let (val, rest) = self.0.split_at(4);
+        self.0 = rest;
+        Some(Ok(val.try_into().unwrap()))
+    }
+}
+
+/// Zero-copy iterator over packed fixed 64-bit values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackedFixed64s<'a>(pub &'a [u8]);
+
+impl<'a> PackedFixed64s<'a> {
+    pub fn u64s(self) -> impl Iterator<Item = Result<u64, DecodeError>> + 'a {
+        self.map(|r| r.map(u64::from_le_bytes))
+    }
+    pub fn i64s(self) -> impl Iterator<Item = Result<i64, DecodeError>> + 'a {
+        self.map(|r| r.map(i64::from_le_bytes))
+    }
+    pub fn f64s(self) -> impl Iterator<Item = Result<f64, DecodeError>> + 'a {
+        self.map(|r| r.map(f64::from_le_bytes))
+    }
+}
+
+impl<'a> Iterator for PackedFixed64s<'a> {
+    type Item = Result<[u8; 8], DecodeError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+        if self.0.len() < 8 {
+            self.0 = &[];
+            return Some(Err(DecodeError::Truncated));
+        }
+        let (val, rest) = self.0.split_at(8);
+        self.0 = rest;
+        Some(Ok(val.try_into().unwrap()))
+    }
+}
+
 // Fixed-width decode functions
 
 #[inline]

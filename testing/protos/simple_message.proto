@@ -14,6 +14,12 @@ message SimpleMessage {
     repeated bytes manybytes = 8;
     optional bytes abytes = 9;
     optional bool yesno = 10;
+    repeated double packed_doubles = 12 [packed=true];
+    repeated float packed_floats = 13 [packed=true];
+    repeated fixed32 packed_fixed32 = 14 [packed=true];
+    repeated fixed64 packed_fixed64 = 15 [packed=true];
+    repeated sfixed32 packed_sfixed32 = 16 [packed=true];
+    repeated sfixed64 packed_sfixed64 = 17 [packed=true];
 }
 
 

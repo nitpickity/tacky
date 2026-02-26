@@ -18,13 +18,30 @@ fn field_borrows(field: &Field) -> bool {
 /// The Rust type carried by this field's enum variant.
 fn variant_type(field: &Field) -> TokenStream {
     match field.label {
-        Label::Packed => quote!(&'a [u8]),
+        Label::Packed => packed_variant_type(field),
         _ => match &field.ty {
             PbType::Scalar(s) => scalar_variant_type(s),
             PbType::Enum(_) => quote!(i32),
             PbType::Message(_) => quote!(&'a [u8]),
             PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote!(&'a [u8]),
         },
+    }
+}
+
+fn packed_variant_type(field: &Field) -> TokenStream {
+    match &field.ty {
+        PbType::Scalar(s) => match s {
+            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => {
+                quote!(tacky::PackedFixed32s<'a>)
+            }
+            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => {
+                quote!(tacky::PackedFixed64s<'a>)
+            }
+            _ => quote!(tacky::PackedVarints<'a>),
+        },
+        // Enum packed fields are varint-encoded
+        PbType::Enum(_) => quote!(tacky::PackedVarints<'a>),
+        _ => quote!(tacky::PackedVarints<'a>),
     }
 }
 
@@ -125,9 +142,25 @@ fn scalar_decode_expr(s: &Scalar) -> TokenStream {
 }
 
 /// The value expression to wrap in `Some(Self::Variant(...))`.
+fn packed_value_expr(field: &Field) -> TokenStream {
+    match &field.ty {
+        PbType::Scalar(s) => match s {
+            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => {
+                quote!(tacky::PackedFixed32s(data))
+            }
+            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => {
+                quote!(tacky::PackedFixed64s(data))
+            }
+            _ => quote!(tacky::PackedVarints(data)),
+        },
+        PbType::Enum(_) => quote!(tacky::PackedVarints(data)),
+        _ => quote!(tacky::PackedVarints(data)),
+    }
+}
+
 fn variant_value_expr(field: &Field) -> TokenStream {
     match field.label {
-        Label::Packed => quote!(data),
+        Label::Packed => packed_value_expr(field),
         _ => match &field.ty {
             PbType::Scalar(Scalar::String) => quote!(val),
             PbType::Scalar(Scalar::Bytes) => quote!(data),
