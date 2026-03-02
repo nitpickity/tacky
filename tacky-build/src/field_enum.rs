@@ -33,18 +33,13 @@ fn variant_type(field: &Field) -> TokenStream {
 
 fn packed_variant_type(field: &Field) -> TokenStream {
     match &field.ty {
-        PbType::Scalar(s) => match s {
-            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => {
-                quote!(tacky::PackedFixed32s<'a>)
-            }
-            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => {
-                quote!(tacky::PackedFixed64s<'a>)
-            }
-            _ => quote!(tacky::PackedVarints<'a>),
-        },
-        // Enum packed fields are varint-encoded
-        PbType::Enum(_) => quote!(tacky::PackedVarints<'a>),
-        _ => quote!(tacky::PackedVarints<'a>),
+        PbType::Scalar(s) => {
+            let t = s.tacky_type();
+            let ty_ident = format_ident!("{t}");
+            quote!(tacky::packed::PackedIter::<'a, #ty_ident>)
+        }
+        PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>),
+        _ => quote!(tacky::packed::PackedIter::<'a, Int32>),
     }
 }
 
@@ -83,8 +78,13 @@ fn wire_type_token(field: &Field) -> TokenStream {
 
 fn scalar_wire_type_token(s: &Scalar) -> TokenStream {
     match s {
-        Scalar::Int32 | Scalar::Sint32 | Scalar::Int64 | Scalar::Sint64 | Scalar::Uint32
-        | Scalar::Uint64 | Scalar::Bool => quote!(tacky::WireType::VARINT),
+        Scalar::Int32
+        | Scalar::Sint32
+        | Scalar::Int64
+        | Scalar::Sint64
+        | Scalar::Uint32
+        | Scalar::Uint64
+        | Scalar::Bool => quote!(tacky::WireType::VARINT),
         Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => quote!(tacky::WireType::I32),
         Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => quote!(tacky::WireType::I64),
         Scalar::String | Scalar::Bytes => quote!(tacky::WireType::LEN),
@@ -106,7 +106,7 @@ fn decode_expr(field: &Field) -> TokenStream {
                 let ident = format_ident!("{}", name);
                 let field_name_str = &field.name;
                 quote! {
-                    let raw = tacky::decode_varint(buf)? as i32;
+                    let raw = <Int32 as tacky::ProtobufScalar>::read(buf)?; // enums are always varint-encoded
                     let val = #ident::try_from(raw).map_err(|_| tacky::DecodeError::InvalidEnumValue {
                         field: #field_name_str,
                         value: raw,
@@ -124,48 +124,23 @@ fn decode_expr(field: &Field) -> TokenStream {
 }
 
 fn scalar_decode_expr(s: &Scalar) -> TokenStream {
-    match s {
-        Scalar::Int32 => quote! { let val = tacky::decode_varint(buf)? as i32; },
-        Scalar::Int64 => quote! { let val = tacky::decode_varint(buf)? as i64; },
-        Scalar::Uint32 => quote! { let val = tacky::decode_varint(buf)? as u32; },
-        Scalar::Uint64 => quote! { let val = tacky::decode_varint(buf)?; },
-        Scalar::Sint32 => quote! {
-            let val = tacky::decode_zigzag32(tacky::decode_varint(buf)? as u32);
-        },
-        Scalar::Sint64 => quote! {
-            let val = tacky::decode_zigzag64(tacky::decode_varint(buf)?);
-        },
-        Scalar::Bool => quote! { let val = tacky::decode_varint(buf)? != 0; },
-        Scalar::Fixed32 => quote! { let val = tacky::decode_u32(buf)?; },
-        Scalar::Sfixed32 => quote! { let val = tacky::decode_i32(buf)?; },
-        Scalar::Float => quote! { let val = tacky::decode_f32(buf)?; },
-        Scalar::Fixed64 => quote! { let val = tacky::decode_u64(buf)?; },
-        Scalar::Sfixed64 => quote! { let val = tacky::decode_i64(buf)?; },
-        Scalar::Double => quote! { let val = tacky::decode_f64(buf)?; },
-        Scalar::String => quote! {
-            let data = tacky::decode_len(buf)?;
-            let val = core::str::from_utf8(data)?;
-        },
-        Scalar::Bytes => quote! {
-            let data = tacky::decode_len(buf)?;
-        },
+    let t = s.tacky_type();
+    let ty_ident = format_ident!("{t}");
+    quote! {
+        let val = <#ty_ident as tacky::ProtobufScalar>::read(buf)?;
     }
 }
 
 /// The value expression to wrap in `Some(Self::Variant(...))`.
 fn packed_value_expr(field: &Field) -> TokenStream {
     match &field.ty {
-        PbType::Scalar(s) => match s {
-            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => {
-                quote!(tacky::PackedFixed32s(data))
-            }
-            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => {
-                quote!(tacky::PackedFixed64s(data))
-            }
-            _ => quote!(tacky::PackedVarints(data)),
-        },
-        PbType::Enum(_) => quote!(tacky::PackedVarints(data)),
-        _ => quote!(tacky::PackedVarints(data)),
+        PbType::Scalar(s) => {
+            let t = s.tacky_type();
+            let ty_ident = format_ident!("{t}");
+            quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
+        }
+        PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
+        _ => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
     }
 }
 
@@ -174,7 +149,7 @@ fn variant_value_expr(field: &Field) -> TokenStream {
         Label::Packed => packed_value_expr(field),
         _ => match &field.ty {
             PbType::Scalar(Scalar::String) => quote!(val),
-            PbType::Scalar(Scalar::Bytes) => quote!(data),
+            PbType::Scalar(Scalar::Bytes) => quote!(val),
             PbType::Scalar(_) | PbType::Enum(_) => quote!(val),
             PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote!(data),
         },
@@ -190,8 +165,7 @@ pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
     let variants: Vec<TokenStream> = fields
         .iter()
         .map(|f| {
-            let variant_name =
-                format_ident!("{}", heck::AsUpperCamelCase(&f.name).to_string());
+            let variant_name = format_ident!("{}", heck::AsUpperCamelCase(&f.name).to_string());
             let ty = variant_type(f);
             quote! { #variant_name(#ty) }
         })
@@ -202,8 +176,7 @@ pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
         .iter()
         .map(|f| {
             let tag = f.number as u32;
-            let variant_name =
-                format_ident!("{}", heck::AsUpperCamelCase(&f.name).to_string());
+            let variant_name = format_ident!("{}", heck::AsUpperCamelCase(&f.name).to_string());
             let field_name_str = &f.name;
             let wt = wire_type_token(f);
             let decode = decode_expr(f);

@@ -170,7 +170,6 @@ pub mod packed {
     use super::*;
     //todo: not all scalars can be packed (strings, bytes),
     // make this more typesafe by not implementing it on those.
-
     impl<'b, const N: usize, P> FieldWriter<'b, N, Packed<P>> {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
@@ -186,6 +185,31 @@ pub mod packed {
             }
             drop(t);
             Field::new()
+        }
+    }
+    #[derive(Debug, Copy, Clone, PartialEq)]
+    pub struct PackedIter<'a, T: ProtobufScalar> {
+        buf: &'a [u8],
+        _t: PhantomData<T>,
+    }
+
+    impl<'a, T: ProtobufScalar> PackedIter<'a, T> {
+        pub fn new(buf: &'a [u8]) -> Self {
+            Self {
+                buf,
+                _t: PhantomData,
+            }
+        }
+    }
+
+    impl<'a, T: ProtobufScalar> Iterator for PackedIter<'a, T> {
+        type Item = Result<T::RustType<'a>, DecodeError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let mut buf = self.buf;
+            let out = Some(T::read(&mut buf));
+            self.buf = buf;
+            out
         }
     }
 }
@@ -234,6 +258,18 @@ pub struct MapEntryWriter<'b, const N: usize, K, V> {
     _pbtype: PhantomData<(K, V)>,
 }
 
+pub struct SimpleMapEntry<'a, K: ProtobufScalar, V: ProtobufScalar> {
+    pub key: K::RustType<'a>,
+    pub value: V::RustType<'a>,
+}
+impl<'a, K: ProtobufScalar, V: ProtobufScalar> SimpleMapEntry<'a, K, V> {
+    pub fn read(buf: &mut &'a [u8]) -> Result<Self, DecodeError> {
+        let mut entry_buf = decode_len(buf)?;
+        let key = K::read(&mut entry_buf)?;
+        let value = V::read(&mut entry_buf)?;
+        Ok(Self { key, value })
+    }
+}
 impl<'b, const N: usize, K: ProtobufScalar, V: ProtobufScalar> MapEntryWriter<'b, N, K, V> {
     pub fn new(buf: &'b mut Vec<u8>) -> Self {
         Self {

@@ -317,11 +317,11 @@ mod tests {
                 SimpleMessageField::ZigzagInt(v) => zigzag_int = Some(v),
                 SimpleMessageField::FixedInt(v) => fixed_int = Some(v),
                 SimpleMessageField::Manynumbers(iter) => {
-                    packed_numbers.extend(iter.int32s().map(|r| r.unwrap()));
+                    packed_numbers.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::ManynumbersUnpacked(v) => unpacked_numbers.push(v),
                 SimpleMessageField::PackedEnum(iter) => {
-                    packed_enums.extend(iter.enums::<SimpleEnum>().map(|r| r.unwrap()));
+                    packed_enums.extend(iter.map(|r| SimpleEnum::try_from(r.unwrap()).unwrap()));
                 }
                 SimpleMessageField::Astring(s) => astring = Some(s),
                 SimpleMessageField::Manystrings(s) => manystrings.push(s),
@@ -329,22 +329,22 @@ mod tests {
                 SimpleMessageField::Manybytes(b) => manybytes.push(b),
                 SimpleMessageField::Yesno(v) => yesno = Some(v),
                 SimpleMessageField::PackedDoubles(iter) => {
-                    doubles.extend(iter.f64s().map(|r| r.unwrap()));
+                    doubles.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFloats(iter) => {
-                    floats.extend(iter.f32s().map(|r| r.unwrap()));
+                    floats.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFixed32(iter) => {
-                    fixed32s.extend(iter.u32s().map(|r| r.unwrap()));
+                    fixed32s.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFixed64(iter) => {
-                    fixed64s.extend(iter.u64s().map(|r| r.unwrap()));
+                    fixed64s.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedSfixed32(iter) => {
-                    sfixed32s.extend(iter.i32s().map(|r| r.unwrap()));
+                    sfixed32s.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedSfixed64(iter) => {
-                    sfixed64s.extend(iter.i64s().map(|r| r.unwrap()));
+                    sfixed64s.extend(iter.map(|r| r.unwrap()));
                 }
             }
         }
@@ -506,7 +506,7 @@ mod tests {
         // Unknown: tag=99, wire type VARINT => key = (99 << 3) | 0 = 792
         tacky::write_varint(792, &mut buf);
         tacky::write_varint(42, &mut buf); // some value
-        // Known: tag=10, wire type VARINT => key = (10 << 3) | 0 = 80
+                                           // Known: tag=10, wire type VARINT => key = (10 << 3) | 0 = 80
         tacky::write_varint(80, &mut buf);
         tacky::write_varint(1, &mut buf); // true
 
@@ -605,22 +605,22 @@ mod tests {
             };
             match field {
                 SimpleMessageField::PackedDoubles(iter) => {
-                    decoded_doubles.extend(iter.f64s().map(|r| r.unwrap()));
+                    decoded_doubles.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFloats(iter) => {
-                    decoded_floats.extend(iter.f32s().map(|r| r.unwrap()));
+                    decoded_floats.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFixed32(iter) => {
-                    decoded_fixed32.extend(iter.u32s().map(|r| r.unwrap()));
+                    decoded_fixed32.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedFixed64(iter) => {
-                    decoded_fixed64.extend(iter.u64s().map(|r| r.unwrap()));
+                    decoded_fixed64.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedSfixed32(iter) => {
-                    decoded_sfixed32.extend(iter.i32s().map(|r| r.unwrap()));
+                    decoded_sfixed32.extend(iter.map(|r| r.unwrap()));
                 }
                 SimpleMessageField::PackedSfixed64(iter) => {
-                    decoded_sfixed64.extend(iter.i64s().map(|r| r.unwrap()));
+                    decoded_sfixed64.extend(iter.map(|r| r.unwrap()));
                 }
                 _ => {}
             }
@@ -636,43 +636,47 @@ mod tests {
 
     #[test]
     fn test_packed_iter_edge_cases() {
+        use tacky::scalars::*;
         // Empty packed field - iterator yields nothing
-        let empty = tacky::PackedVarints(&[]);
+        fn iter<T: ProtobufScalar>(data: &[u8]) -> tacky::packed::PackedIter<'_, T> {
+            tacky::packed::PackedIter::<T>::new(data)
+        }
+        let empty = iter::<Uint64>(&[]);
         assert_eq!(empty.count(), 0);
 
-        let empty_f32 = tacky::PackedFixed32s(&[]);
+        let empty_f32 = iter::<Float>(&[]);
         assert_eq!(empty_f32.count(), 0);
 
-        let empty_f64 = tacky::PackedFixed64s(&[]);
+        let empty_f64 = iter::<Double>(&[]);
         assert_eq!(empty_f64.count(), 0);
 
         // Single element packed varint
         let mut single_buf = Vec::new();
         tacky::write_varint(42, &mut single_buf);
-        let single = tacky::PackedVarints(&single_buf);
+        let single = iter::<Uint64>(&single_buf);
         let vals: Vec<u64> = single.map(|r| r.unwrap()).collect();
         assert_eq!(vals, vec![42]);
 
         // Single element packed fixed32
         let bytes_f32 = 3.14f32.to_le_bytes();
-        let single_f32 = tacky::PackedFixed32s(&bytes_f32);
-        let vals: Vec<f32> = single_f32.f32s().map(|r| r.unwrap()).collect();
+        let single_f32 = iter::<Float>(&bytes_f32);
+        let vals: Vec<f32> = single_f32.map(|r| r.unwrap()).collect();
         assert_eq!(vals, vec![3.14f32]);
 
         // Single element packed fixed64
         let bytes_f64 = 2.718f64.to_le_bytes();
-        let single_f64 = tacky::PackedFixed64s(&bytes_f64);
-        let vals: Vec<f64> = single_f64.f64s().map(|r| r.unwrap()).collect();
+        let single_f64 = iter::<Double>(&bytes_f64);
+        let vals: Vec<f64> = single_f64.map(|r| r.unwrap()).collect();
         assert_eq!(vals, vec![2.718f64]);
 
         // Truncated fixed32 should error
-        let truncated = tacky::PackedFixed32s(&[1, 2, 3]);
+        let truncated = iter::<Float>(&[1, 2, 3]);
         let results: Vec<_> = truncated.collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
 
         // Truncated fixed64 should error
-        let truncated = tacky::PackedFixed64s(&[1, 2, 3, 4, 5, 6, 7]);
+        let truncated = iter::<Double>(&[1, 2, 3, 4, 5, 6, 7]);
         let results: Vec<_> = truncated.collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
