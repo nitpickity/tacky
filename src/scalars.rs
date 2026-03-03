@@ -34,134 +34,300 @@ pub struct PbString;
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbBytes;
 
-#[inline]
-pub fn write_varint(mut value: u64, buf: &mut impl BufMut) {
-    loop {
-        if value < 0x80 {
-            buf.put_u8(value as u8);
-            break;
-        } else {
-            buf.put_u8(((value & 0x7F) | 0x80) as u8);
-            value >>= 7;
+pub mod encode {
+    pub use super::*;
+
+    #[inline]
+    pub fn write_varint(mut value: u64, buf: &mut impl BufMut) {
+        loop {
+            if value < 0x80 {
+                buf.put_u8(value as u8);
+                break;
+            } else {
+                buf.put_u8(((value & 0x7F) | 0x80) as u8);
+                value >>= 7;
+            }
         }
+    }
+
+    #[inline]
+    pub const fn encode_zigzag32(n: i32) -> u32 {
+        ((n << 1) ^ (n >> 31)) as u32
+    }
+    #[inline]
+    pub const fn encode_zigzag64(n: i64) -> u64 {
+        ((n << 1) ^ (n >> 63)) as u64
+    }
+    #[inline]
+    pub fn write_double(value: f64, buf: &mut impl BufMut) {
+        buf.put_f64_le(value);
+    }
+    #[inline]
+    pub fn write_float(value: f32, buf: &mut impl BufMut) {
+        buf.put_f32_le(value);
+    }
+    #[inline]
+    pub fn write_int32(value: i32, buf: &mut impl BufMut) {
+        write_varint(value as u64, buf);
+    }
+    #[inline]
+    pub fn write_int64(value: i64, buf: &mut impl BufMut) {
+        write_varint(value as u64, buf);
+    }
+    #[inline]
+    pub fn write_uint32(value: u32, buf: &mut impl BufMut) {
+        write_varint(value as u64, buf);
+    }
+    #[inline]
+    pub fn write_uint64(value: u64, buf: &mut impl BufMut) {
+        write_varint(value, buf);
+    }
+    #[inline]
+    pub fn write_sint32(value: i32, buf: &mut impl BufMut) {
+        write_varint(encode_zigzag32(value) as u64, buf);
+    }
+    #[inline]
+    pub fn write_sint64(value: i64, buf: &mut impl BufMut) {
+        write_varint(encode_zigzag64(value), buf);
+    }
+    #[inline]
+    pub fn write_fixed32(value: u32, buf: &mut impl BufMut) {
+        buf.put_u32_le(value);
+    }
+    #[inline]
+    pub fn write_fixed64(value: u64, buf: &mut impl BufMut) {
+        buf.put_u64_le(value);
+    }
+    #[inline]
+    pub fn write_sfixed32(value: i32, buf: &mut impl BufMut) {
+        buf.put_i32_le(value);
+    }
+    #[inline]
+    pub fn write_sfixed64(value: i64, buf: &mut impl BufMut) {
+        buf.put_i64_le(value);
+    }
+    #[inline]
+    pub fn write_bytes(value: &[u8], buf: &mut impl BufMut) {
+        write_varint(value.len() as u64, buf);
+        buf.put(value);
+    }
+    #[inline]
+    pub fn write_string(value: &str, buf: &mut impl BufMut) {
+        write_bytes(value.as_bytes(), buf);
+    }
+    #[inline]
+    pub fn write_bool(value: bool, buf: &mut impl BufMut) {
+        buf.put_u8(value as u8);
+    }
+}
+pub mod lengths {
+
+    #[inline]
+    pub const fn encoded_len_varint(value: u64) -> usize {
+        // Based on [VarintSize64][1].
+        // [1]: https://github.com/google/protobuf/blob/3.3.x/src/google/protobuf/io/coded_stream.h#L1301-L1309
+        ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
+    }
+
+    // lengths
+    #[inline]
+    pub const fn len_of_value<T: Copy>(_: T) -> usize {
+        std::mem::size_of::<T>()
+    }
+    #[inline]
+    pub const fn len_of_string(value: &str) -> usize {
+        encoded_len_varint(value.len() as u64) + value.len()
+    }
+    #[inline]
+    pub const fn len_of_bytes(value: &[u8]) -> usize {
+        encoded_len_varint(value.len() as u64) + value.len()
+    }
+    #[inline]
+    pub const fn len_of_int32(value: i32) -> usize {
+        encoded_len_varint(value as u64)
+    }
+    #[inline]
+    pub const fn len_of_int64(value: i64) -> usize {
+        encoded_len_varint(value as u64)
+    }
+    #[inline]
+    pub const fn len_of_uint32(value: u32) -> usize {
+        encoded_len_varint(value as u64)
+    }
+    #[inline]
+    pub const fn len_of_uint64(value: u64) -> usize {
+        encoded_len_varint(value)
+    }
+    #[inline]
+    pub const fn len_of_sint32(value: i32) -> usize {
+        encoded_len_varint(((value << 1) ^ (value >> 31)) as u64)
+    }
+    #[inline]
+    pub const fn len_of_sint64(value: i64) -> usize {
+        encoded_len_varint(((value << 1) ^ (value >> 63)) as u64)
     }
 }
 
-#[inline]
-pub const fn encoded_len_varint(value: u64) -> usize {
-    // Based on [VarintSize64][1].
-    // [1]: https://github.com/google/protobuf/blob/3.3.x/src/google/protobuf/io/coded_stream.h#L1301-L1309
-    ((((value | 1).leading_zeros() ^ 63) * 9 + 73) / 64) as usize
+pub mod decode {
+    pub use super::*;
+
+    #[inline]
+    pub const fn decode_zigzag32(n: u32) -> i32 {
+        ((n >> 1) as i32) ^ (-((n & 1) as i32))
+    }
+
+    #[inline]
+    pub const fn decode_zigzag64(n: u64) -> i64 {
+        ((n >> 1) as i64) ^ (-((n & 1) as i64))
+    }
+
+    #[inline]
+    pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let &b = buf.first().ok_or(DecodeError::Truncated)?;
+            *buf = &buf[1..];
+            result |= ((b & 0x7F) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                return Err(DecodeError::Truncated);
+            }
+        }
+    }
+
+    #[inline]
+    pub fn decode_int32(buf: &mut &[u8]) -> Result<i32, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(v as i32)
+    }
+
+    #[inline]
+    pub fn decode_sint32(buf: &mut &[u8]) -> Result<i32, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(decode_zigzag32(v as u32))
+    }
+
+    #[inline]
+    pub fn decode_int64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(v as i64)
+    }
+
+    #[inline]
+    pub fn decode_sint64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(decode_zigzag64(v))
+    }
+
+    #[inline]
+    pub fn decode_uint32(buf: &mut &[u8]) -> Result<u32, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(v as u32)
+    }
+
+    #[inline]
+    pub fn decode_uint64(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+        decode_varint(buf)
+    }
+
+    #[inline]
+    pub fn decode_bool(buf: &mut &[u8]) -> Result<bool, DecodeError> {
+        let v = decode_varint(buf)?;
+        Ok(v != 0)
+    }
+
+    #[inline]
+    pub fn decode_fixed32(buf: &mut &[u8]) -> Result<u32, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = u32::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    #[inline]
+    pub fn decode_sfixed32(buf: &mut &[u8]) -> Result<i32, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = i32::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    #[inline]
+    pub fn decode_float(buf: &mut &[u8]) -> Result<f32, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = f32::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    #[inline]
+    pub fn decode_fixed64(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = u64::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    #[inline]
+    pub fn decode_sfixed64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = i64::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    #[inline]
+    pub fn decode_double(buf: &mut &[u8]) -> Result<f64, DecodeError> {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
+            return Err(DecodeError::Truncated);
+        };
+        let val = f64::from_le_bytes(*val);
+        *buf = rest;
+        Ok(val)
+    }
+
+    /// Decode a length-delimited field, returning a sub-slice of the input.
+    #[inline]
+    pub fn decode_len<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
+        let len = decode_varint(buf)? as usize;
+        if buf.len() < len {
+            return Err(DecodeError::Truncated);
+        }
+        let (data, rest) = buf.split_at(len);
+        *buf = rest;
+        Ok(data)
+    }
+
+    #[inline]
+    pub fn decode_string<'a>(buf: &mut &'a [u8]) -> Result<&'a str, DecodeError> {
+        let bytes = decode_len(buf)?;
+        let s = std::str::from_utf8(bytes)?;
+        Ok(s)
+    }
+
+    #[inline]
+    pub fn decode_bytes<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
+        decode_len(buf)
+    }
 }
 
-#[inline]
-pub const fn encode_zigzag32(n: i32) -> u32 {
-    ((n << 1) ^ (n >> 31)) as u32
-}
-#[inline]
-pub const fn encode_zigzag64(n: i64) -> u64 {
-    ((n << 1) ^ (n >> 63)) as u64
-}
-#[inline]
-pub fn write_double(value: f64, buf: &mut impl BufMut) {
-    buf.put_f64_le(value);
-}
-#[inline]
-pub fn write_float(value: f32, buf: &mut impl BufMut) {
-    buf.put_f32_le(value);
-}
-#[inline]
-pub fn write_int32(value: i32, buf: &mut impl BufMut) {
-    write_varint(value as u64, buf);
-}
-#[inline]
-pub fn write_int64(value: i64, buf: &mut impl BufMut) {
-    write_varint(value as u64, buf);
-}
-#[inline]
-pub fn write_uint32(value: u32, buf: &mut impl BufMut) {
-    write_varint(value as u64, buf);
-}
-#[inline]
-pub fn write_uint64(value: u64, buf: &mut impl BufMut) {
-    write_varint(value, buf);
-}
-#[inline]
-pub fn write_sint32(value: i32, buf: &mut impl BufMut) {
-    write_varint(encode_zigzag32(value) as u64, buf);
-}
-#[inline]
-pub fn write_sint64(value: i64, buf: &mut impl BufMut) {
-    write_varint(encode_zigzag64(value), buf);
-}
-#[inline]
-pub fn write_fixed32(value: u32, buf: &mut impl BufMut) {
-    buf.put_u32_le(value);
-}
-#[inline]
-pub fn write_fixed64(value: u64, buf: &mut impl BufMut) {
-    buf.put_u64_le(value);
-}
-#[inline]
-pub fn write_sfixed32(value: i32, buf: &mut impl BufMut) {
-    buf.put_i32_le(value);
-}
-#[inline]
-pub fn write_sfixed64(value: i64, buf: &mut impl BufMut) {
-    buf.put_i64_le(value);
-}
-#[inline]
-pub fn write_bytes(value: &[u8], buf: &mut impl BufMut) {
-    write_varint(value.len() as u64, buf);
-    buf.put(value);
-}
-#[inline]
-pub fn write_string(value: &str, buf: &mut impl BufMut) {
-    write_bytes(value.as_bytes(), buf);
-}
-#[inline]
-pub fn write_bool(value: bool, buf: &mut impl BufMut) {
-    buf.put_u8(value as u8);
-}
-
-// lengths
-#[inline]
-pub const fn len_of_value<T: Copy>(_: T) -> usize {
-    std::mem::size_of::<T>()
-}
-#[inline]
-pub const fn len_of_string(value: &str) -> usize {
-    encoded_len_varint(value.len() as u64) + value.len()
-}
-#[inline]
-pub const fn len_of_bytes(value: &[u8]) -> usize {
-    encoded_len_varint(value.len() as u64) + value.len()
-}
-#[inline]
-pub const fn len_of_int32(value: i32) -> usize {
-    encoded_len_varint(value as u64)
-}
-#[inline]
-pub const fn len_of_int64(value: i64) -> usize {
-    encoded_len_varint(value as u64)
-}
-#[inline]
-pub const fn len_of_uint32(value: u32) -> usize {
-    encoded_len_varint(value as u64)
-}
-#[inline]
-pub const fn len_of_uint64(value: u64) -> usize {
-    encoded_len_varint(value)
-}
-#[inline]
-pub const fn len_of_sint32(value: i32) -> usize {
-    encoded_len_varint(((value << 1) ^ (value >> 31)) as u64)
-}
-#[inline]
-pub const fn len_of_sint64(value: i64) -> usize {
-    encoded_len_varint(((value << 1) ^ (value >> 63)) as u64)
-}
-
+pub use decode::*;
+pub use encode::*;
+pub use lengths::*;
 /// actions on a scalar.
 /// this is already exhaustively implemented as the types in this module contain all protobuf types.
 /// public only because its needed for the codegen crate.
@@ -181,6 +347,7 @@ pub trait ProtobufScalar {
         Self::write_tag(field_nr, buf);
         Self::write_value(value, buf);
     }
+    fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError>;
     /// len on the wire, tag + value;
     fn len(field_nr: i32, value: Self::RustType<'_>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as i32);
@@ -195,7 +362,7 @@ pub trait ProtobufScalar {
 }
 
 macro_rules! implscalar {
-    ($t:ident, $rt:ty, $wt:expr, $f:expr, $fl:expr) => {
+    ($t:ident, $rt:ty, $wt:expr, $f:expr, $fl:expr, $fr:expr) => {
         impl ProtobufScalar for $t {
             type RustType<'a> = $rt;
             const WIRE_TYPE: WireType = $wt;
@@ -205,34 +372,136 @@ macro_rules! implscalar {
             fn value_len(value: Self::RustType<'_>) -> usize {
                 $fl(value)
             }
+            fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError> {
+                $fr(buf)
+            }
         }
     };
 }
 
-implscalar!(Int32, i32, WireType::VARINT, write_int32, len_of_int32);
-implscalar!(Sint32, i32, WireType::VARINT, write_sint32, len_of_sint32);
-implscalar!(Int64, i64, WireType::VARINT, write_int64, len_of_int64);
-implscalar!(Sint64, i64, WireType::VARINT, write_sint64, len_of_sint64);
-implscalar!(Uint32, u32, WireType::VARINT, write_uint32, len_of_uint32);
-implscalar!(Uint64, u64, WireType::VARINT, write_uint64, len_of_uint64);
-implscalar!(Bool, bool, WireType::VARINT, write_bool, len_of_value);
-implscalar!(Fixed32, u32, WireType::I32, write_fixed32, len_of_value);
-implscalar!(Sfixed32, i32, WireType::I32, write_sfixed32, len_of_value);
-implscalar!(Float, f32, WireType::I32, write_float, len_of_value);
-implscalar!(Fixed64, u64, WireType::I64, write_fixed64, len_of_value);
-implscalar!(Sfixed64, i64, WireType::I64, write_sfixed64, len_of_value);
-implscalar!(Double, f64, WireType::I64, write_double, len_of_value);
+implscalar!(
+    Int32,
+    i32,
+    WireType::VARINT,
+    write_int32,
+    len_of_int32,
+    decode_int32
+);
+implscalar!(
+    Sint32,
+    i32,
+    WireType::VARINT,
+    write_sint32,
+    len_of_sint32,
+    decode_sint32
+);
+implscalar!(
+    Int64,
+    i64,
+    WireType::VARINT,
+    write_int64,
+    len_of_int64,
+    decode_int64
+);
+implscalar!(
+    Sint64,
+    i64,
+    WireType::VARINT,
+    write_sint64,
+    len_of_sint64,
+    decode_sint64
+);
+implscalar!(
+    Uint32,
+    u32,
+    WireType::VARINT,
+    write_uint32,
+    len_of_uint32,
+    decode_uint32
+);
+implscalar!(
+    Uint64,
+    u64,
+    WireType::VARINT,
+    write_uint64,
+    len_of_uint64,
+    decode_uint64
+);
+implscalar!(
+    Bool,
+    bool,
+    WireType::VARINT,
+    write_bool,
+    len_of_value,
+    decode_bool
+);
+implscalar!(
+    Fixed32,
+    u32,
+    WireType::I32,
+    write_fixed32,
+    len_of_value,
+    decode_fixed32
+);
+implscalar!(
+    Sfixed32,
+    i32,
+    WireType::I32,
+    write_sfixed32,
+    len_of_value,
+    decode_sfixed32
+);
+implscalar!(
+    Float,
+    f32,
+    WireType::I32,
+    write_float,
+    len_of_value,
+    decode_float
+);
+implscalar!(
+    Fixed64,
+    u64,
+    WireType::I64,
+    write_fixed64,
+    len_of_value,
+    decode_fixed64
+);
+implscalar!(
+    Sfixed64,
+    i64,
+    WireType::I64,
+    write_sfixed64,
+    len_of_value,
+    decode_sfixed64
+);
+implscalar!(
+    Double,
+    f64,
+    WireType::I64,
+    write_double,
+    len_of_value,
+    decode_double
+);
 implscalar!(
     PbString,
     &'a str,
     WireType::LEN,
     write_string,
-    len_of_string
+    len_of_string,
+    decode_string
 );
-implscalar!(PbBytes, &'a [u8], WireType::LEN, write_bytes, len_of_bytes);
+implscalar!(
+    PbBytes,
+    &'a [u8],
+    WireType::LEN,
+    write_bytes,
+    len_of_bytes,
+    decode_bytes
+);
 
 // https://protobuf.dev/programming-guides/encoding/#structure
-#[repr(usize)]
+#[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WireType {
     VARINT = 0, //	int32, int64, uint32, uint64, sint32, sint64, bool, enum
@@ -241,4 +510,108 @@ pub enum WireType {
     // SGROUP = 3, //	group start (deprecated)
     // EGROUP = 4, //	group end (deprecated)
     I32 = 5, //	fixed32, sfixed32, float
+}
+
+// --- Decode support ---
+
+#[derive(Debug)]
+pub enum DecodeError {
+    Truncated,
+    InvalidWireType(u32),
+    WireTypeMismatch {
+        field: &'static str,
+        expected: WireType,
+        actual: WireType,
+    },
+    InvalidUtf8,
+    InvalidEnumValue {
+        field: &'static str,
+        value: i32,
+    },
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Truncated => f.write_str("unexpected end of input"),
+            DecodeError::InvalidWireType(wt) => write!(f, "invalid wire type: {wt}"),
+            DecodeError::WireTypeMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "wire type mismatch for field \"{field}\": expected {expected:?}, got {actual:?}"
+            ),
+            DecodeError::InvalidUtf8 => f.write_str("invalid UTF-8 in string field"),
+            DecodeError::InvalidEnumValue { field, value } => {
+                write!(f, "invalid enum value {value} for field \"{field}\"")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+impl From<core::str::Utf8Error> for DecodeError {
+    fn from(_: core::str::Utf8Error) -> Self {
+        DecodeError::InvalidUtf8
+    }
+}
+
+#[inline]
+pub fn decode_key(buf: &mut &[u8]) -> Result<(u32, WireType), DecodeError> {
+    let v = decode_varint(buf)?;
+    let tag = (v >> 3) as u32;
+    let wire = (v & 0x07) as u32;
+    let wire_type = match wire {
+        0 => WireType::VARINT,
+        1 => WireType::I64,
+        2 => WireType::LEN,
+        5 => WireType::I32,
+        other => return Err(DecodeError::InvalidWireType(other)),
+    };
+    Ok((tag, wire_type))
+}
+
+#[inline]
+pub fn check_wire_type(
+    actual: WireType,
+    expected: WireType,
+    field: &'static str,
+) -> Result<(), DecodeError> {
+    if actual != expected {
+        return Err(DecodeError::WireTypeMismatch {
+            field,
+            expected,
+            actual,
+        });
+    }
+    Ok(())
+}
+
+/// Skip an unknown field value based on wire type.
+#[inline]
+pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeError> {
+    match wire_type {
+        WireType::VARINT => {
+            decode_varint(buf)?;
+        }
+        WireType::I64 => {
+            if buf.len() < 8 {
+                return Err(DecodeError::Truncated);
+            }
+            *buf = &buf[8..];
+        }
+        WireType::LEN => {
+            decode_len(buf)?;
+        }
+        WireType::I32 => {
+            if buf.len() < 4 {
+                return Err(DecodeError::Truncated);
+            }
+            *buf = &buf[4..];
+        }
+    }
+    Ok(())
 }

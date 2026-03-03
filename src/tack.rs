@@ -110,7 +110,7 @@ mod tests {
             for i in 2..=5 {
                 write_wide_varint(i, 15723, &mut buf);
                 println!("{buf:?}");
-                let dec = prost::encoding::decode_varint(&mut buf.as_slice());
+                let dec = crate::scalars::decode_varint(&mut buf.as_slice());
                 println!("{dec:?}");
                 buf.clear()
             }
