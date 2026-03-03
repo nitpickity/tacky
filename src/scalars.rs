@@ -242,61 +242,61 @@ pub mod decode {
 
     #[inline]
     pub fn decode_fixed32(buf: &mut &[u8]) -> Result<u32, DecodeError> {
-        if buf.len() < 4 {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = u32::from_le_bytes(buf[..4].try_into().unwrap());
-        *buf = &buf[4..];
+        };
+        let val = u32::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
     #[inline]
     pub fn decode_sfixed32(buf: &mut &[u8]) -> Result<i32, DecodeError> {
-        if buf.len() < 4 {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = i32::from_le_bytes(buf[..4].try_into().unwrap());
-        *buf = &buf[4..];
+        };
+        let val = i32::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
     #[inline]
     pub fn decode_float(buf: &mut &[u8]) -> Result<f32, DecodeError> {
-        if buf.len() < 4 {
+        let Some((val, rest)) = buf.split_first_chunk::<4>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = f32::from_le_bytes(buf[..4].try_into().unwrap());
-        *buf = &buf[4..];
+        };
+        let val = f32::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
     #[inline]
     pub fn decode_fixed64(buf: &mut &[u8]) -> Result<u64, DecodeError> {
-        if buf.len() < 8 {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = u64::from_le_bytes(buf[..8].try_into().unwrap());
-        *buf = &buf[8..];
+        };
+        let val = u64::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
     #[inline]
     pub fn decode_sfixed64(buf: &mut &[u8]) -> Result<i64, DecodeError> {
-        if buf.len() < 8 {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = i64::from_le_bytes(buf[..8].try_into().unwrap());
-        *buf = &buf[8..];
+        };
+        let val = i64::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
     #[inline]
     pub fn decode_double(buf: &mut &[u8]) -> Result<f64, DecodeError> {
-        if buf.len() < 8 {
+        let Some((val, rest)) = buf.split_first_chunk::<8>() else {
             return Err(DecodeError::Truncated);
-        }
-        let val = f64::from_le_bytes(buf[..8].try_into().unwrap());
-        *buf = &buf[8..];
+        };
+        let val = f64::from_le_bytes(*val);
+        *buf = rest;
         Ok(val)
     }
 
