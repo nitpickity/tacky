@@ -206,10 +206,13 @@ pub mod packed {
         type Item = Result<T::RustType<'a>, DecodeError>;
 
         fn next(&mut self) -> Option<Self::Item> {
+            if self.buf.is_empty() {
+                return None;
+            }
             let mut buf = self.buf;
-            let out = Some(T::read(&mut buf));
-            self.buf = buf;
-            out
+            let out = T::read(&mut buf);
+            self.buf = if out.is_ok() { buf } else { &[] };
+            Some(out)
         }
     }
 }
