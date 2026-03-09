@@ -81,15 +81,42 @@ impl<'b> Tack<'b> {
         let start = self.start as usize;
         let width = self.width as usize;
         let data_len = self.buffer.len() - start;
-        let mut len_prefix_loc = &mut self.buffer[start - width..start];
-        // write the correct length now
-        if data_len > 0 {
-            write_wide_varint(width, data_len as u64, &mut len_prefix_loc);
-        } else if self.rewind {
-            // no data written, remove the tack
-            let tag_len = encoded_len_varint(tag.get() as u64);
-            self.buffer.truncate(start - (tag_len + width));
+
+        // Data is 0, handle rewind
+        if data_len == 0 {
+            if self.rewind {
+                let tag_len = encoded_len_varint(tag.get() as u64);
+                self.buffer.truncate(start - (tag_len + width));
+            }
+            return;
         }
+
+        let required_width = encoded_len_varint(data_len as u64);
+
+        // Hot path: data fits within the reserved width
+        if required_width <= width {
+            let mut len_prefix_loc = &mut self.buffer[start - width..start];
+            write_wide_varint(width, data_len as u64, &mut len_prefix_loc);
+        } else {
+            // Cold path: data requires larger varint encoding width
+            self.fix_overflow(data_len, required_width);
+        }
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn fix_overflow(&mut self, data_len: usize, required_width: usize) {
+        let start = self.start as usize;
+        let width = self.width as usize;
+        let diff = required_width - width;
+        let old_len = self.buffer.len();
+        // Resize buffer to add `diff` bytes
+        self.buffer.resize(old_len + diff, 0);
+        // Shift data to the right by `diff`
+        self.buffer.copy_within(start..old_len, start + diff);
+        // Write the correct length using standard varint encoding into the expanded prefix
+        let mut len_prefix_loc: &mut [u8] = &mut self.buffer[start - width..start + diff];
+        scalars::write_varint(data_len as u64, &mut len_prefix_loc);
     }
 }
 
@@ -114,6 +141,26 @@ mod tests {
                 println!("{dec:?}");
                 buf.clear()
             }
+        }
+    }
+
+    #[test]
+    fn test_tack_expansion() {
+        let mut buf = Vec::new();
+        {
+            let t = crate::tack::Tack::new_with_width(&mut buf, Some(1), 1);
+            // Write 150 bytes of data (requires 2 bytes for length varint, taking up width=1 and expanding by 1)
+            for _ in 0..150 {
+                t.buffer.push(0xAA);
+            }
+        }
+        // Expected layout: tag (1 byte: field 1, wire type 2 = 0x0A), len (2 bytes: 150 = 0x96 0x01), data (150 bytes of 0xAA)
+        assert_eq!(buf.len(), 1 + 2 + 150);
+        assert_eq!(buf[0], 0x0A);
+        assert_eq!(buf[1], 0x96);
+        assert_eq!(buf[2], 0x01);
+        for i in 0..150 {
+            assert_eq!(buf[3 + i], 0xAA);
         }
     }
 }
