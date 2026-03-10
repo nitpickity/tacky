@@ -11,16 +11,15 @@ mod tests {
     use prost::Message;
     use std::collections::{BTreeMap, HashMap};
 
-    use tacky::MessageSchema;
-
     use crate::prost_proto::{
         self, AnotherEnum as PAnotherEnum, MsgWithEnums as PMsgWithEnums,
         MsgWithMaps as PMsgWithMaps, MsgWithNesting as PMsgWithNesting,
         SimpleMessage as PSimpleMessage,
     };
     use crate::tacky_proto::example::{
-        AnotherEnum, MsgWithEnums, MsgWithEnumsField, MsgWithMaps, MsgWithNesting,
-        MsgWithNestingField, SimpleEnum, SimpleMessage, SimpleMessageField,
+        AnotherEnum, MsgWithEnums, MsgWithEnumsField, MsgWithEnumsFields, MsgWithMaps,
+        MsgWithNesting, MsgWithNestingField, MsgWithNestingFields, SimpleEnum, SimpleMessage,
+        SimpleMessageField, SimpleMessageFields,
     };
 
     #[test]
@@ -41,30 +40,28 @@ mod tests {
 
         let tacky_packed = {
             let mut buf = Vec::new();
-            let mut writer = SimpleMessage::new_writer(&mut buf, None);
-            tacky_macros::write_proto!(
-                writer,
-                SimpleMessage {
-                    normal_int: anumber,
-                    zigzag_int: Some(24),
-                    fixed_int: Some(12),
-                    packed_enum: [SimpleEnum::First, SimpleEnum::Second],
-                    manynumbers,
-                    manynumbers_unpacked: manynumbers,
-                    astring,
-                    manystrings: &manystrings,
-                    abytes: Some(&abytes),
-                    manybytes: &manybytes,
-                    yesno: Some(false),
-                    packed_doubles: &packed_doubles,
-                    packed_floats: &packed_floats,
-                    packed_fixed32: &packed_fixed32,
-                    packed_fixed64: &packed_fixed64,
-                    packed_sfixed32: &packed_sfixed32,
-                    packed_sfixed64: &packed_sfixed64,
-                }
-            );
-            drop(writer);
+            let schema = SimpleMessage::default();
+            SimpleMessage {
+                normal_int: schema.normal_int.write(&mut buf, anumber),
+                zigzag_int: schema.zigzag_int.write(&mut buf, Some(24)),
+                fixed_int: schema.fixed_int.write(&mut buf, Some(12)),
+                manynumbers: schema.manynumbers.write(&mut buf, manynumbers),
+                manynumbers_unpacked: schema.manynumbers_unpacked.write(&mut buf, manynumbers),
+                packed_enum: schema
+                    .packed_enum
+                    .write(&mut buf, &[SimpleEnum::First, SimpleEnum::Second]),
+                astring: schema.astring.write(&mut buf, astring),
+                manystrings: schema.manystrings.write(&mut buf, &manystrings),
+                manybytes: schema.manybytes.write(&mut buf, &manybytes),
+                abytes: schema.abytes.write(&mut buf, Some(abytes.as_slice())),
+                yesno: schema.yesno.write(&mut buf, Some(false)),
+                packed_doubles: schema.packed_doubles.write(&mut buf, &packed_doubles),
+                packed_floats: schema.packed_floats.write(&mut buf, &packed_floats),
+                packed_fixed32: schema.packed_fixed32.write(&mut buf, &packed_fixed32),
+                packed_fixed64: schema.packed_fixed64.write(&mut buf, &packed_fixed64),
+                packed_sfixed32: schema.packed_sfixed32.write(&mut buf, &packed_sfixed32),
+                packed_sfixed64: schema.packed_sfixed64.write(&mut buf, &packed_sfixed64),
+            };
             buf
         };
 
@@ -106,15 +103,11 @@ mod tests {
         let map2: HashMap<i32, f64> = HashMap::from_iter([(1, 1.0), (2, 2.0)]);
         let tacky_packed = {
             let mut buf = Vec::new();
-            let mut writer = MsgWithMaps::new_writer(&mut buf, None);
-            tacky_macros::write_proto!(
-                writer,
-                MsgWithMaps {
-                    map1: &map1,
-                    map2: &map2
-                }
-            );
-            drop(writer);
+            let schema = MsgWithMaps::default();
+            MsgWithMaps {
+                map1: schema.map1.write(&mut buf, &map1),
+                map2: schema.map2.write(&mut buf, &map2),
+            };
             buf
         };
 
@@ -136,15 +129,14 @@ mod tests {
 
         let tacky_packed = {
             let mut buf = Vec::new();
-            let mut writer = MsgWithEnums::new_writer(&mut buf, None);
-            tacky_macros::write_proto!(
-                writer,
-                MsgWithEnums {
-                    enum1: Some(SimpleEnum::First),
-                    enum2: [AnotherEnum::A, AnotherEnum::B],
-                }
-            );
-            drop(writer);
+            let schema = MsgWithEnums::default();
+
+            MsgWithEnums {
+                enum1: schema.enum1.write(&mut buf, Some(SimpleEnum::First)),
+                enum2: schema
+                    .enum2
+                    .write(&mut buf, &[AnotherEnum::A, AnotherEnum::B]),
+            };
             buf
         };
 
@@ -164,54 +156,44 @@ mod tests {
     fn test_with_nested() {
         let tacky_packed = {
             let mut buf = Vec::new();
-            let mut writer = MsgWithNesting::new_writer(&mut buf, None);
-            tacky_macros::write_proto!(
-                writer,
-                MsgWithNesting {
-                    enums: {
-                        writer.enums().write_msg(|mut m| {
-                            tacky_macros::write_proto!(
-                                m,
-                                MsgWithEnums {
-                                    enum1: Some(SimpleEnum::First),
-                                    enum2: [AnotherEnum::A, AnotherEnum::B],
-                                }
-                            );
-                        })
-                    },
-                    nested: {
-                        let mut m = writer.nested();
-                        for i in 0..10 {
-                            m.append_msg_with(|mut n| {
-                                tacky_macros::write_proto!(
-                                    n,
-                                    SimpleMessage {
-                                        normal_int: Some(i),
-                                        zigzag_int: Some(i + 1),
-                                        fixed_int: Some(i + 3),
-                                        manynumbers: [i as i32],
-                                        manynumbers_unpacked: [i as i32],
-                                        astring: None::<&str>,
-                                        manystrings: ["hello"],
-                                        abytes: None::<Vec<_>>,
-                                        packed_enum: [SimpleEnum::First, SimpleEnum::Second],
-                                        manybytes: <Vec<Vec<u8>>>::new(),
-                                        yesno: Some(false),
-                                        packed_doubles: <Vec<f64>>::new(),
-                                        packed_floats: <Vec<f32>>::new(),
-                                        packed_fixed32: <Vec<u32>>::new(),
-                                        packed_fixed64: <Vec<u64>>::new(),
-                                        packed_sfixed32: <Vec<i32>>::new(),
-                                        packed_sfixed64: <Vec<i64>>::new(),
-                                    }
-                                );
-                            });
-                        }
-                        m.close()
+            let msg_schema = MsgWithNesting::default();
+
+            MsgWithNesting {
+                enums: msg_schema.enums.write_msg(&mut buf, |buf, scm| {
+                    scm.enum1.write(buf, Some(SimpleEnum::First));
+                    scm.enum2.write(buf, &[AnotherEnum::A, AnotherEnum::B]);
+                }),
+                nested: {
+                    for i in 0..10 {
+                        msg_schema.nested.write_msg(&mut buf, |buf, scm| {
+                            SimpleMessage {
+                                normal_int: scm.normal_int.write(buf, Some(i)),
+                                zigzag_int: scm.zigzag_int.write(buf, Some(i + 1)),
+                                fixed_int: scm.fixed_int.write(buf, Some(i + 3)),
+                                manynumbers: scm.manynumbers.write(buf, &[i as i32]),
+                                manynumbers_unpacked: scm
+                                    .manynumbers_unpacked
+                                    .write(buf, &[i as i32]),
+                                astring: scm.astring.write(buf, None::<&str>),
+                                manystrings: scm.manystrings.write(buf, &["hello"]),
+                                abytes: scm.abytes.write(buf, None::<&[u8]>),
+                                manybytes: scm.manybytes.write(buf, Vec::<&[u8]>::new()),
+                                packed_enum: scm
+                                    .packed_enum
+                                    .write(buf, &[SimpleEnum::First, SimpleEnum::Second]),
+                                yesno: scm.yesno.write(buf, Some(false)),
+                                packed_doubles: scm.packed_doubles.write(buf, Vec::<f64>::new()),
+                                packed_floats: scm.packed_floats.write(buf, Vec::<f32>::new()),
+                                packed_fixed32: scm.packed_fixed32.write(buf, Vec::<u32>::new()),
+                                packed_fixed64: scm.packed_fixed64.write(buf, Vec::<u64>::new()),
+                                packed_sfixed32: scm.packed_sfixed32.write(buf, Vec::<i32>::new()),
+                                packed_sfixed64: scm.packed_sfixed64.write(buf, Vec::<i64>::new()),
+                            };
+                        });
                     }
-                }
-            );
-            drop(writer);
+                    msg_schema.nested
+                },
+            };
             buf
         };
 
@@ -263,33 +245,32 @@ mod tests {
     fn test_decode_simple_message() {
         // Encode
         let mut buf = Vec::new();
-        let mut writer = SimpleMessage::new_writer(&mut buf, None);
-        tacky_macros::write_proto!(
-            writer,
-            SimpleMessage {
-                normal_int: Some(42i64),
-                zigzag_int: Some(-7i64),
-                fixed_int: Some(999i64),
-                manynumbers: [10i32, 20, 30],
-                manynumbers_unpacked: [100i32, 200],
-                packed_enum: [SimpleEnum::First, SimpleEnum::Second],
-                astring: Some("hello"),
-                manystrings: ["foo", "bar"],
-                abytes: Some(&b"raw"[..]),
-                manybytes: [&b"a"[..], &b"b"[..]],
-                yesno: Some(true),
-                packed_doubles: [1.5, 2.5],
-                packed_floats: [0.5f32],
-                packed_fixed32: [42u32],
-                packed_fixed64: [999u64],
-                packed_sfixed32: [-1i32],
-                packed_sfixed64: [-100i64],
-            }
-        );
-        drop(writer);
+        let schema = SimpleMessage::default();
+        SimpleMessage {
+            normal_int: schema.normal_int.write(&mut buf, Some(42)),
+            zigzag_int: schema.zigzag_int.write(&mut buf, Some(-7)),
+            fixed_int: schema.fixed_int.write(&mut buf, Some(999)),
+            manynumbers: schema.manynumbers.write(&mut buf, &[10, 20, 30]),
+            manynumbers_unpacked: schema.manynumbers_unpacked.write(&mut buf, &[100, 200]),
+            packed_enum: schema
+                .packed_enum
+                .write(&mut buf, &[SimpleEnum::First, SimpleEnum::Second]),
+            astring: schema.astring.write(&mut buf, Some("hello")),
+            manystrings: schema.manystrings.write(&mut buf, &["foo", "bar"]),
+            manybytes: schema
+                .manybytes
+                .write(&mut buf, &[b"a".as_slice(), b"b".as_slice()]),
+            abytes: schema.abytes.write(&mut buf, Some(b"raw".as_slice())),
+            yesno: schema.yesno.write(&mut buf, Some(true)),
+            packed_doubles: schema.packed_doubles.write(&mut buf, &[1.5, 2.5]),
+            packed_floats: schema.packed_floats.write(&mut buf, &[0.5f32]),
+            packed_fixed32: schema.packed_fixed32.write(&mut buf, &[42u32]),
+            packed_fixed64: schema.packed_fixed64.write(&mut buf, &[999u64]),
+            packed_sfixed32: schema.packed_sfixed32.write(&mut buf, &[-1i32]),
+            packed_sfixed64: schema.packed_sfixed64.write(&mut buf, &[-100i64]),
+        };
 
         // Decode with field enum
-        let mut remaining: &[u8] = &buf;
         let mut normal_int = None;
         let mut zigzag_int = None;
         let mut fixed_int = None;
@@ -308,10 +289,8 @@ mod tests {
         let mut sfixed32s: Vec<i32> = Vec::new();
         let mut sfixed64s: Vec<i64> = Vec::new();
 
-        while !remaining.is_empty() {
-            let Some(field) = SimpleMessageField::decode(&mut remaining).unwrap() else {
-                continue;
-            };
+        for field in SimpleMessage::decode(&buf) {
+            let field = field.unwrap();
             match field {
                 SimpleMessageField::NormalInt(v) => normal_int = Some(v),
                 SimpleMessageField::ZigzagInt(v) => zigzag_int = Some(v),
@@ -371,24 +350,18 @@ mod tests {
     #[test]
     fn test_decode_enums() {
         let mut buf = Vec::new();
-        let mut writer = MsgWithEnums::new_writer(&mut buf, None);
-        tacky_macros::write_proto!(
-            writer,
-            MsgWithEnums {
-                enum1: Some(SimpleEnum::Second),
-                enum2: [AnotherEnum::A, AnotherEnum::B],
-            }
-        );
-        drop(writer);
+        let scm = MsgWithEnums::default();
+        MsgWithEnums {
+            enum1: scm.enum1.write(&mut buf, Some(SimpleEnum::Second)),
+            enum2: scm.enum2.write(&mut buf, &[AnotherEnum::A, AnotherEnum::B]),
+        };
 
-        let mut remaining: &[u8] = &buf;
+        let remaining: &[u8] = &buf;
         let mut enum1 = None;
         let mut enum2: Vec<AnotherEnum> = Vec::new();
 
-        while !remaining.is_empty() {
-            let Some(field) = MsgWithEnumsField::decode(&mut remaining).unwrap() else {
-                continue;
-            };
+        for field in MsgWithEnumsFields::new(remaining) {
+            let field = field.unwrap();
             match field {
                 MsgWithEnumsField::Enum1(v) => enum1 = Some(v),
                 MsgWithEnumsField::Enum2(v) => enum2.push(v),
@@ -402,61 +375,40 @@ mod tests {
     #[test]
     fn test_decode_nested() {
         let mut buf = Vec::new();
-        let mut writer = MsgWithNesting::new_writer(&mut buf, None);
-        tacky_macros::write_proto!(
-            writer,
-            MsgWithNesting {
-                enums: {
-                    writer.enums().write_msg(|mut m| {
-                        tacky_macros::write_proto!(
-                            m,
-                            MsgWithEnums {
-                                enum1: Some(SimpleEnum::First),
-                                enum2: [AnotherEnum::B],
-                            }
-                        );
-                    })
-                },
-                nested: {
-                    let mut m = writer.nested();
-                    m.append_msg_with(|mut n| {
-                        tacky_macros::write_proto!(
-                            n,
-                            SimpleMessage {
-                                normal_int: Some(77i64),
-                                zigzag_int: None::<i64>,
-                                fixed_int: None::<i64>,
-                                manynumbers: Vec::<i32>::new(),
-                                manynumbers_unpacked: Vec::<i32>::new(),
-                                packed_enum: Vec::<SimpleEnum>::new(),
-                                astring: Some("nested"),
-                                manystrings: Vec::<&str>::new(),
-                                abytes: None::<&[u8]>,
-                                manybytes: Vec::<&[u8]>::new(),
-                                yesno: None::<bool>,
-                                packed_doubles: <Vec<f64>>::new(),
-                                packed_floats: <Vec<f32>>::new(),
-                                packed_fixed32: <Vec<u32>>::new(),
-                                packed_fixed64: <Vec<u64>>::new(),
-                                packed_sfixed32: <Vec<i32>>::new(),
-                                packed_sfixed64: <Vec<i64>>::new(),
-                            }
-                        );
-                    });
-                    m.close()
-                }
-            }
-        );
-        drop(writer);
+        let schema = MsgWithNesting::default();
+        MsgWithNesting {
+            enums: schema.enums.write_msg(&mut buf, |buf, scm| {
+                scm.enum1.write(buf, Some(SimpleEnum::First));
+                scm.enum2.write(buf, &[AnotherEnum::B]);
+            }),
+            nested: schema.nested.write_msg(&mut buf, |buf, scm| {
+                SimpleMessage {
+                    normal_int: scm.normal_int.write(buf, Some(77)),
+                    zigzag_int: scm.zigzag_int.write(buf, None::<i64>),
+                    fixed_int: scm.fixed_int.write(buf, None::<i64>),
+                    manynumbers: scm.manynumbers.write(buf, Vec::<i32>::new()),
+                    manynumbers_unpacked: scm.manynumbers_unpacked.write(buf, Vec::<i32>::new()),
+                    packed_enum: scm.packed_enum.write(buf, Vec::<SimpleEnum>::new()),
+                    astring: scm.astring.write(buf, Some("nested")),
+                    manystrings: scm.manystrings.write(buf, Vec::<&str>::new()),
+                    manybytes: scm.manybytes.write(buf, Vec::<&[u8]>::new()),
+                    abytes: scm.abytes.write(buf, Some("hello".as_bytes())),
+                    yesno: scm.yesno.write(buf, Some(true)),
+                    packed_doubles: scm.packed_doubles.write(buf, Vec::<f64>::new()),
+                    packed_floats: scm.packed_floats.write(buf, Vec::<f32>::new()),
+                    packed_fixed32: scm.packed_fixed32.write(buf, Vec::<u32>::new()),
+                    packed_fixed64: scm.packed_fixed64.write(buf, Vec::<u64>::new()),
+                    packed_sfixed32: scm.packed_sfixed32.write(buf, Vec::<i32>::new()),
+                    packed_sfixed64: scm.packed_sfixed64.write(buf, Vec::<i64>::new()),
+                };
+            }),
+        };
 
-        let mut remaining: &[u8] = &buf;
         let mut enums_bytes: Option<&[u8]> = None;
         let mut nested_msgs: Vec<&[u8]> = Vec::new();
 
-        while !remaining.is_empty() {
-            let Some(field) = MsgWithNestingField::decode(&mut remaining).unwrap() else {
-                continue;
-            };
+        for field in MsgWithNestingFields::new(&buf) {
+            let field = field.unwrap();
             match field {
                 MsgWithNestingField::Enums(b) => enums_bytes = Some(b),
                 MsgWithNestingField::Nested(b) => nested_msgs.push(b),
@@ -464,13 +416,12 @@ mod tests {
         }
 
         // Decode nested MsgWithEnums
-        let mut sub = enums_bytes.unwrap();
+        let sub = enums_bytes.unwrap();
         let mut inner_enum1 = None;
         let mut inner_enum2 = Vec::new();
-        while !sub.is_empty() {
-            let Some(field) = MsgWithEnumsField::decode(&mut sub).unwrap() else {
-                continue;
-            };
+
+        for field in MsgWithEnumsFields::new(sub) {
+            let field = field.unwrap();
             match field {
                 MsgWithEnumsField::Enum1(v) => inner_enum1 = Some(v),
                 MsgWithEnumsField::Enum2(v) => inner_enum2.push(v),
@@ -481,23 +432,21 @@ mod tests {
 
         // Decode nested SimpleMessage
         assert_eq!(nested_msgs.len(), 1);
-        let mut sub = nested_msgs[0];
+        let sub = nested_msgs[0];
         let mut normal_int = None;
         let mut astring = None;
-        while !sub.is_empty() {
-            let Some(field) = SimpleMessageField::decode(&mut sub).unwrap() else {
-                continue;
-            };
+        for field in SimpleMessageFields::new(sub) {
+            let field = field.unwrap();
             match field {
                 SimpleMessageField::NormalInt(v) => normal_int = Some(v),
                 SimpleMessageField::Astring(s) => astring = Some(s),
                 _ => {}
             }
         }
+
         assert_eq!(normal_int, Some(77));
         assert_eq!(astring, Some("nested"));
     }
-
     #[test]
     fn test_decode_unknown_field_skipping() {
         // Manually construct bytes with an unknown field (tag=99, varint value=42)
@@ -510,20 +459,12 @@ mod tests {
         tacky::write_varint(80, &mut buf);
         tacky::write_varint(1, &mut buf); // true
 
-        let mut remaining: &[u8] = &buf;
-        let mut yesno = None;
-        let mut skipped = 0;
+        let remaining: &[u8] = &buf;
 
-        while !remaining.is_empty() {
-            match SimpleMessageField::decode(&mut remaining).unwrap() {
-                Some(SimpleMessageField::Yesno(v)) => yesno = Some(v),
-                Some(_) => panic!("unexpected known field"),
-                None => skipped += 1,
-            }
-        }
-
-        assert_eq!(skipped, 1);
-        assert_eq!(yesno, Some(true));
+        let mut it = SimpleMessageFields::new(remaining);
+        let known_field = it.next().unwrap().unwrap(); //should have a known field
+        assert!(matches!(known_field, SimpleMessageField::Yesno(true)));
+        assert!(matches!(it.next(), None)); //should be no more fields, the unknown one should have been skipped
     }
 
     #[test]
@@ -535,8 +476,8 @@ mod tests {
         tacky::write_varint(3, &mut buf); // length 3
         buf.extend_from_slice(b"abc"); // some bytes
 
-        let mut remaining: &[u8] = &buf;
-        let result = SimpleMessageField::decode(&mut remaining);
+        let remaining: &[u8] = &buf;
+        let result = SimpleMessageFields::new(remaining).next().unwrap();
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
@@ -556,30 +497,27 @@ mod tests {
 
         // Encode with tacky
         let mut buf = Vec::new();
-        let mut writer = SimpleMessage::new_writer(&mut buf, None);
-        tacky_macros::write_proto!(
-            writer,
-            SimpleMessage {
-                normal_int: None::<i64>,
-                zigzag_int: None::<i64>,
-                fixed_int: None::<i64>,
-                manynumbers: <Vec<i32>>::new(),
-                manynumbers_unpacked: <Vec<i32>>::new(),
-                packed_enum: <Vec<SimpleEnum>>::new(),
-                astring: None::<&str>,
-                manystrings: <Vec<&str>>::new(),
-                abytes: None::<&[u8]>,
-                manybytes: <Vec<&[u8]>>::new(),
-                yesno: None::<bool>,
-                packed_doubles: &doubles,
-                packed_floats: &floats,
-                packed_fixed32: &fixed32,
-                packed_fixed64: &fixed64,
-                packed_sfixed32: &sfixed32,
-                packed_sfixed64: &sfixed64,
-            }
-        );
-        drop(writer);
+        let scm = SimpleMessage::default();
+
+        SimpleMessage {
+            normal_int: scm.normal_int.write(&mut buf, None::<i64>),
+            zigzag_int: scm.zigzag_int.write(&mut buf, None::<i64>),
+            fixed_int: scm.fixed_int.write(&mut buf, None::<i64>),
+            manynumbers: scm.manynumbers.write(&mut buf, &[]),
+            manynumbers_unpacked: scm.manynumbers_unpacked.write(&mut buf, &[]),
+            packed_enum: scm.packed_enum.write(&mut buf, &[]),
+            astring: scm.astring.write(&mut buf, None::<&str>),
+            manystrings: scm.manystrings.write(&mut buf, <Vec<String>>::new()),
+            manybytes: scm.manybytes.write(&mut buf, Vec::<&[u8]>::new()),
+            abytes: scm.abytes.write(&mut buf, None::<&[u8]>),
+            yesno: scm.yesno.write(&mut buf, None::<bool>),
+            packed_doubles: scm.packed_doubles.write(&mut buf, &doubles),
+            packed_floats: scm.packed_floats.write(&mut buf, &floats),
+            packed_fixed32: scm.packed_fixed32.write(&mut buf, &fixed32),
+            packed_fixed64: scm.packed_fixed64.write(&mut buf, &fixed64),
+            packed_sfixed32: scm.packed_sfixed32.write(&mut buf, &sfixed32),
+            packed_sfixed64: scm.packed_sfixed64.write(&mut buf, &sfixed64),
+        };
 
         // Verify prost can decode it
         let prost_msg = PSimpleMessage::decode(&*buf).unwrap();
@@ -591,7 +529,7 @@ mod tests {
         assert_eq!(prost_msg.packed_sfixed64, sfixed64.to_vec());
 
         // Decode with field enum
-        let mut remaining: &[u8] = &buf;
+        let remaining: &[u8] = &buf;
         let mut decoded_doubles = Vec::new();
         let mut decoded_floats = Vec::new();
         let mut decoded_fixed32 = Vec::new();
@@ -599,10 +537,8 @@ mod tests {
         let mut decoded_sfixed32 = Vec::new();
         let mut decoded_sfixed64 = Vec::new();
 
-        while !remaining.is_empty() {
-            let Some(field) = SimpleMessageField::decode(&mut remaining).unwrap() else {
-                continue;
-            };
+        for field in SimpleMessageFields::new(remaining) {
+            let field = field.unwrap();
             match field {
                 SimpleMessageField::PackedDoubles(iter) => {
                     decoded_doubles.extend(iter.map(|r| r.unwrap()));
@@ -638,7 +574,7 @@ mod tests {
     fn test_packed_iter_edge_cases() {
         use tacky::scalars::*;
         // Empty packed field - iterator yields nothing
-        fn iter<T: ProtobufScalar>(data: &[u8]) -> tacky::packed::PackedIter<'_, T> {
+        fn iter<T: Packable>(data: &[u8]) -> tacky::packed::PackedIter<'_, T> {
             tacky::packed::PackedIter::<T>::new(data)
         }
         let empty = iter::<Uint64>(&[]);

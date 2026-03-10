@@ -1,3 +1,5 @@
+use core::panic;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -140,7 +142,7 @@ fn packed_value_expr(field: &Field) -> TokenStream {
             quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
         }
         PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
-        _ => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
+        _ => panic!("Only scalar and enum fields can be packed"),
     }
 }
 
@@ -156,7 +158,7 @@ fn variant_value_expr(field: &Field) -> TokenStream {
     }
 }
 
-pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
+pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
     let enum_name = format_ident!("{name}Field");
 
     let needs_lifetime = fields.iter().any(field_borrows);
@@ -184,54 +186,61 @@ pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
             quote! {
                 #tag => {
-                    tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
+                    Some((
+                        || {
+                         tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
                     #decode
-                    Ok(Some(Self::#variant_name(#value)))
+                    Ok(#enum_name::#variant_name(#value))
+                    })())
+
+
                 }
             }
         })
         .collect();
 
-    if needs_lifetime {
-        quote! {
-            #[derive(Debug, Copy, Clone, PartialEq)]
-            pub enum #enum_name<'a> {
-                #(#variants,)*
-            }
+    let fields_iterator_name = format_ident!("{name}Fields");
 
-            impl<'a> #enum_name<'a> {
-                /// Decode the next field from the buffer.
-                /// Returns `Ok(Some(field))` for known fields, `Ok(None)` for unknown (skipped).
-                pub fn decode(buf: &mut &'a [u8]) -> Result<Option<Self>, tacky::DecodeError> {
-                    let (tag, wire_type) = tacky::decode_key(buf)?;
-                    match tag {
-                        #(#match_arms)*
-                        _ => {
-                            tacky::skip_field(wire_type, buf)?;
-                            Ok(None)
-                        }
-                    }
-                }
+    let (lt_token, lt_name) = if needs_lifetime {
+        (quote! {<'a>}, (quote! {'a}))
+    } else {
+        (quote! {}, quote! {})
+    };
+
+    quote! {
+        #[derive(Debug, Copy, Clone, PartialEq)]
+        pub enum #enum_name #lt_token {
+            #(#variants,)*
+        }
+        pub struct #fields_iterator_name<'a> {
+            buf: &'a [u8],
+        }
+
+        impl<'a> #fields_iterator_name<'a> {
+            pub fn new(buf: &'a [u8]) -> Self {
+                Self { buf }
             }
         }
-    } else {
-        quote! {
-            #[derive(Debug, Copy, Clone, PartialEq)]
-            pub enum #enum_name {
-                #(#variants,)*
-            }
+        impl<'a> Iterator for #fields_iterator_name<'a> {
+            type Item = Result<#enum_name #lt_token, tacky::DecodeError>;
 
-            impl #enum_name {
-                /// Decode the next field from the buffer.
-                /// Returns `Ok(Some(field))` for known fields, `Ok(None)` for unknown (skipped).
-                pub fn decode(buf: &mut &[u8]) -> Result<Option<Self>, tacky::DecodeError> {
-                    let (tag, wire_type) = tacky::decode_key(buf)?;
-                    match tag {
-                        #(#match_arms)*
-                        _ => {
-                            tacky::skip_field(wire_type, buf)?;
-                            Ok(None)
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.buf.is_empty() {
+                    return None;
+                }
+                let buf = &mut self.buf;
+                let (tag, wire_type) = match tacky::decode_key(buf) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(e)),
+                };
+                match tag {
+                    #(#match_arms)*
+                    _ => {
+                        match tacky::skip_field(wire_type, buf) {
+                            Ok(()) => Self::next(self), // recursively call next to find the next known field
+                            Err(e) => Some(Err(e)),
                         }
+
                     }
                 }
             }

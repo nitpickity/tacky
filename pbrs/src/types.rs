@@ -224,7 +224,7 @@ impl Message {
     //         && self.messages.iter().all(|m| m.is_unit())
     // }
 
-    fn sanity_checks(&self, desc: &FileDescriptor) -> Result<()> {
+    fn sanity_checks(&self, _desc: &FileDescriptor) -> Result<()> {
         for f in self.all_fields() {
             // check reserved
             if self
@@ -244,15 +244,11 @@ impl Message {
             }
 
             // check default enums
-            if let Some(var) = f.default.as_ref() {
-                if let FieldType::Enum(ref e) = f.typ {
-                    let e = e.get_enum(desc);
-                    e.fields.iter().find(|&(ref name, _)| name == var)
-                    .ok_or_else(|| Error::InvalidDefaultEnum(format!(
-                                "Error in message {}\n\
-                                Enum field {:?} has a default value '{}' which is not valid for enum index {:?}",
-                                self.name, f, var, e)))?;
-                }
+            if let Some(_) = f.default.as_ref() {
+                return Err(Error::InvalidDefaultEnum(format!(
+                    "Error in message {}\n custom defaults are not supported in tacky",
+                    self.name
+                )));
             }
         }
         Ok(())
@@ -490,7 +486,7 @@ impl FileDescriptor {
                 imported(e.imported)
             );
         }
-        return Ok(());
+        Ok(())
     }
 
     /// Opens a proto file, reads it and returns raw parsed data

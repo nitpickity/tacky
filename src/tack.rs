@@ -2,7 +2,7 @@
 //! upon creation, it writes down the tag of thie field and a (configurable)fixed width length field.
 //! Once this struct Drop's, it goes back and updates the length field with however much was written to the buffer in the mean time.
 //! Since the length field is fixed width (by default 4 bytes, which allows for messages of size 2**28 -1 bits long.) it can in theory overflow.
-//! currently a Tack will panic on drop if that happens. (but the full value will still be written to the buffer).
+//! if that happens, the Tack will reallocate the buffer to make room for a larger length field, and shift the data over to make room for it, before writing the length.
 
 use crate::scalars::{self, encoded_len_varint};
 use bytes::BufMut;
@@ -14,7 +14,7 @@ pub struct Tack<'b> {
     // if the length of data written is 0, controls if the buffer is rewound to before the tag, or keeps the tag and len of 0.
     // default true
     pub rewind: bool,
-    pub tag: Option<NonZeroU32>,
+    pub tag: NonZeroU32,
     start: u32,
     width: u32,
 }
@@ -35,34 +35,18 @@ fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
 impl<'b> Tack<'b> {
     /// creates a new tack, which marks the start of a length-delimited field of TBD length.
     /// takes a buffer, and an optional tag. for top level messages, this will be None, as they dont have a tag or length delimiter of their own.
-    pub fn new(buffer: &'b mut Vec<u8>, field_nr: Option<u32>) -> Self {
-        let tag = field_nr.map(|n| (n << 3) | 2);
-        let tag = tag.and_then(NonZeroU32::new);
-        if let Some(tag) = tag {
-            // writing in a nested context, need to write down the tag, and then len.
-            scalars::write_varint(tag.get() as u64, buffer);
-            // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
-            write_wide_varint(4, 0, buffer)
-        }
-        // now start represents the actual start of the data buffer, excluding the tag/length prefix
-        Tack {
-            start: buffer.len() as u32,
-            buffer,
-            rewind: true,
-            tag,
-            width: 4,
-        }
+    pub fn new(buffer: &'b mut Vec<u8>, field_nr: u32) -> Self {
+        // default to 3 bytes width for the length field, which allows for messages of ~2Mb in size,
+        //which should be enough for most use cases, while keeping the overhead low for small messages.
+        Self::new_with_width(buffer, field_nr, 3)
     }
+    pub fn new_with_width(buffer: &'b mut Vec<u8>, field_nr: u32, width: u32) -> Self {
+        let tag = (field_nr << 3) | 2;
+        let tag = NonZeroU32::new(tag).expect("Protobuf field nr may not be 0");
+        scalars::write_varint(tag.get() as u64, buffer);
+        // since we dont know the length yet, we write a prelim <width> bytes wide varint, and fix it later
+        write_wide_varint(width as usize, 0, buffer);
 
-    pub fn new_with_width(buffer: &'b mut Vec<u8>, field_nr: Option<u32>, width: u32) -> Self {
-        let tag = field_nr.map(|n| (n << 3) | 2);
-        let tag = tag.and_then(NonZeroU32::new);
-        if let Some(tag) = tag {
-            // writing in a nested context, need to write down the tag, and then len.
-            scalars::write_varint(tag.get() as u64, buffer);
-            // since we dont know the length yet, we write a prelim 4 bytes wide varint, and fix it later
-            write_wide_varint(width as usize, 0, buffer)
-        }
         // now start represents the actual start of the data buffer, excluding the tag/length prefix
         Tack {
             start: buffer.len() as u32,
@@ -74,10 +58,6 @@ impl<'b> Tack<'b> {
     }
 
     fn close(&mut self) {
-        // not a nested field, just go back.
-        let Some(tag) = self.tag else {
-            return;
-        };
         let start = self.start as usize;
         let width = self.width as usize;
         let data_len = self.buffer.len() - start;
@@ -85,7 +65,7 @@ impl<'b> Tack<'b> {
         // Data is 0, handle rewind
         if data_len == 0 {
             if self.rewind {
-                let tag_len = encoded_len_varint(tag.get() as u64);
+                let tag_len = encoded_len_varint(self.tag.get() as u64);
                 self.buffer.truncate(start - (tag_len + width));
             }
             return;
@@ -148,7 +128,7 @@ mod tests {
     fn test_tack_expansion() {
         let mut buf = Vec::new();
         {
-            let t = crate::tack::Tack::new_with_width(&mut buf, Some(1), 1);
+            let t = crate::tack::Tack::new_with_width(&mut buf, 1, 1);
             // Write 150 bytes of data (requires 2 bytes for length varint, taking up width=1 and expanding by 1)
             for _ in 0..150 {
                 t.buffer.push(0xAA);
