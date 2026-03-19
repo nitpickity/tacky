@@ -2,6 +2,8 @@
 
 A protobuf serializer and deserializer for Rust that gets out of the way of your domain types.
 
+Note: this is work-in-progress, APIs may change. the basic idea will not.
+
 ## Why this exists
 
 Every protobuf library for Rust works the same way: generate a Rust struct that mirrors your schema, fill it in, serialize it. The problem is that serializing data and representing data in your domain are two different concerns — and this approach couples them together whether you like it or not.
