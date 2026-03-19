@@ -1,16 +1,11 @@
 //! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
 //! and dont i dont to write my own (yet).
 
+use crate::{field_enum::field_enum, field_type::field_type};
 use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::io::Write;
-
-use crate::{
-    field_enum::write_field_enum,
-    simple_typed::get_writer,
-    witness::{field_witness_type, message_def_writer},
-};
 
 pub fn parse_ty(s: &str) -> syn::Type {
     syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
@@ -139,7 +134,7 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
             let vt: PbType = resolve_type(*v, desc);
             match (kt, vt) {
                 (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k, v),
-                (PbType::Scalar(k), v) => PbType::Map(k, Box::new((v).into())),
+                (PbType::Scalar(k), v) => PbType::Map(k, Box::new(v)),
                 _ => panic!("invalid map structure"),
             }
         }
@@ -173,7 +168,7 @@ impl std::fmt::Display for PbType {
             PbType::Scalar(s) => f.write_str(s.as_str()),
             PbType::Enum(e) => f.write_str(&e.0),
             PbType::Message(m) => f.write_str(m),
-            PbType::Map(k, v) => write!(f, "map<{},{}>", k.as_str(), v.to_string()),
+            PbType::Map(k, v) => write!(f, "map<{},{}>", k.as_str(), v),
             PbType::SimpleMap(k, v) => write!(f, "map<{},{}>", k.as_str(), v.as_str()),
         }
     }
@@ -222,41 +217,25 @@ impl From<pb_rs::types::Frequency> for Label {
     }
 }
 
-fn write_writer_api<'a>(fields: impl IntoIterator<Item = &'a Field>) -> TokenStream {
-    let methods = fields.into_iter().map(|f| get_writer(f));
-    quote! {
-        #(#methods)*
-    }
-}
-
-fn write_simple_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
+fn write_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
     let name = &m.name;
     let name_ident = format_ident!("{name}");
-    let writer_name_ident = format_ident!("{name}Writer");
 
     let fields = m
         .all_fields()
         .map(|f| convert_field(f, desc))
         .collect::<Vec<_>>();
 
-    let struct_schema = write_simple_message_schema(name, &fields);
-    let trait_impl = write_trait_impl(name);
-    let writer_def = message_def_writer(name);
-    let writer_api = write_writer_api(&fields);
-    let field_enum = write_field_enum(name, &fields);
+    let struct_schema = message_schema(name, &fields);
+    let field_enum = field_enum(name, &fields);
 
     quote! {
         #struct_schema
-        #trait_impl
-        #writer_def
-        impl<'buf> #writer_name_ident<'buf> {
-            #writer_api
-        }
         #field_enum
     }
 }
 
-fn write_simple_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
+fn write_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
     let name = &m.name;
     let name_ident = format_ident!("{name}");
 
@@ -276,16 +255,10 @@ fn write_simple_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
 
     quote! {
         #[repr(i32)]
-        #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
         pub enum #name_ident {
+            #[default]
             #(#variants,)*
-        }
-
-        impl ProtoEncode<#name_ident> for #name_ident {
-            const WIRE_TYPE: tacky::WireType = tacky::WireType::VARINT;
-            fn encode(buf: &mut Vec<u8>, value: Self) {
-                tacky::Int32::write_value(value as i32, buf)
-            }
         }
 
         impl std::convert::TryFrom<i32> for #name_ident {
@@ -297,31 +270,31 @@ fn write_simple_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
                 }
             }
         }
-    }
-}
-
-fn write_trait_impl(name: &str) -> TokenStream {
-    let name_ident = format_ident!("{name}");
-    let writer_name_ident = format_ident!("{name}Writer");
-
-    quote! {
-        impl MessageSchema for #name_ident {
-            type Writer<'a> = #writer_name_ident<'a>;
-            fn new_writer<'a>(buffer: &'a mut Vec<u8>, tag: Option<i32>) -> Self::Writer<'a> {
-                <Self::Writer<'_>>::new(buffer, tag.map(|t| t as u32))
+        impl std::convert::From<#name_ident> for i32 {
+            fn from(value: #name_ident) -> i32 {
+                value as i32
             }
         }
     }
 }
 
-fn write_simple_message_schema(name: &str, fields: &[Field]) -> TokenStream {
+fn message_schema(name: &str, fields: &[Field]) -> TokenStream {
     let name_ident = format_ident!("{name}");
-    let field_defs = fields.iter().map(|f| field_witness_type(f));
-
+    let field_defs = fields.iter().map(field_type);
+    let k = format_ident!("{name}Fields");
     quote! {
         #[derive(Default, Debug, Copy, Clone)]
         pub struct #name_ident {
             #(#field_defs,)*
+        }
+        impl MessageSchema for #name_ident {}
+        impl #name_ident {
+            pub fn new() -> Self {
+                Self::default()
+            }
+            pub fn decode(buf: &[u8])-> #k<'_> {
+                #k::new(buf)
+            }
         }
     }
 }
@@ -334,11 +307,8 @@ pub fn write_proto(file: &str, output: &str) {
     let messages = test_file
         .messages
         .iter()
-        .map(|m| write_simple_message(m, &test_file));
-    let enums = test_file
-        .enums
-        .iter()
-        .map(|m| write_simple_enum(m, &test_file));
+        .map(|m| write_message(m, &test_file));
+    let enums = test_file.enums.iter().map(|m| write_enum(m, &test_file));
 
     let token_stream = quote! {
         #[allow(unused, dead_code)]

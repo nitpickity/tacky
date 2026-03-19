@@ -1,174 +1,171 @@
-# A slightly sticky protobuf writer
+# Tacky
 
-Tacky is a simple "structless" protobuf serialiser (not deserializer).
-Given a protobuf definition, rather than creating a rust struct to hold the data, `tacky-build` will generate a rust type-level representation of the protobuf schema, and a builder-like API to write your message.
-every function in the builder api just tacks on the relevant field/message to a buffer, abstracting over the protobuf types, field numbers, and wire types. Since the builder doesnt ever need to own data,the write functions accept iterators and borrowed values.
-This is a lower level library that concerns itself with providing functions to work with writing data in a protobuf compatible fashion.
+A protobuf serializer and deserializer for Rust that gets out of the way of your domain types.
 
-# Example
+Note: this is work-in-progress, APIs may change. the basic idea will not.
 
-Assume the following protobuf schema:
+## Why this exists
+
+Every protobuf library for Rust works the same way: generate a Rust struct that mirrors your schema, fill it in, serialize it. The problem is that serializing data and representing data in your domain are two different concerns — and this approach couples them together whether you like it or not.
+
+Prost will tell you a `repeated string` field must be a `Vec<String>`. But your domain type might be a `HashSet<SnakeCase>`, or a database row, or an iterator. Now you're cloning and reallocating just to satisfy a generated struct that exists only to be immediately thrown away. All you actually needed was something that can produce a `&str`.
+
+Tacky keeps these concerns separate. Instead of generating a struct to hold your data, it generates a typed schema you write your existing data through — in whatever form it's already in.
+
+## Basic Usage
+
+Given this proto definition:
 
 ```protobuf
 message SimpleMessage {
     optional string text = 1;
-    optional string text2 = 5;
     repeated int32 numbers = 2;
     repeated bytes blobs = 3;
     map<string,double> map = 4;
 }
 ```
 
-### Strict Schema API
-
-Sometimes as a protobuf producer, you want to make sure all fields in the schema are accounted for, and when updating the protobuf file, the compiler should make sure to check exhaustiveness (if needed).
+`tacky-build` generates this schema:
 
 ```rust
-/// lift the schema into the rust type level. the const integers are the field numbers,
-/// the rest are zero-sized marker types. this makes this whole struct a ZST with no runtime cost.
-/// the advantage of including the field number in the type system is that 2 fields of the same protobuf type cant be accidently interchanged.
 pub struct SimpleMessageSchema {
-    text: Field<1,Optional<PbString>>,
-    numbers: Field<2,Repeated<Int32>>,
-    blobs: Field<3,Repeated<PbBytes>>,
-    map: Field<4,Map<PbString,Double>>
+    text: Field<1, Optional<PbString>>,
+    numbers: Field<2, Repeated<Int32>>,
+    blobs: Field<3, Repeated<PbBytes>>,
+    map: Field<4, Map<PbString, Double>>,
 }
-pub struct SimpleMessageWriter {/*..*/}
-/// Every function here instead returns the field type that it is assigned to. those are ZST markers.
-impl SimpleMessageWriter {
-    fn new(buf: &mut Vec<u8>) -> Self;
-    fn text<T: AsRef<str>>(&mut self, text: Option<T>)->Field<1,Optional<PbString>>;
-    fn text2<T: AsRef<str>>(&mut self, text: Option<T>)->Field<5,Optional<PbString>>;
-    fn numbers(&mut self, numbers: impl IntoIterator<Item = i32>) -> Field<2,Repeated<Int32>>;
-    fn blobs<T: AsRef<[u8]>(&mut self, blobs: impl IntoIterator<Item = T>) -> Field<3,Repeated<PbBytes>>;
-    fn map<T:AsRef<str>>(&mut self, map: impl IntoIterator<Item = (T,f64)>) -> Field<4,Map<PbString,Double>>;
-    fn finish(self);
-}
-fn use_it() {
-    let mut buf = Vec::new();
-    let mut writer = SimpleMessageWriter::new(&mut buf);
-    let blob_set = HashSet::from_iter([b"blob1",b"blob2"]);
-    let force_schema = SimpleMessageSchema {
-        text: writer.text(Some("Hello")),
-        //text2: writer.text(Some("World")), <- wont compile because the wrong writer is used. both are optional strings, but differ in field number.
-        text2: writer.text2(Some("World")),
-        numbers: writer.numbers([1,2,3]),
-        blobs: writer.blobs(&blob_set),
-        // have to at the very least _mention_ the map field or else it wont compile.
-        map: writer.map(&[])
-    };
-    // thats it, buf contains the serialized data, with compiler enforced exhaustiveness checks and some confusion protection.
-}
-
 ```
 
-### Simple Builder API - TODO (restore, existed in previous build)
-
-using `tacky-build` in this mode will generate the following code:
+Which you use like this:
 
 ```rust
-pub struct SimpleMessageWriter {/*..*/}
-impl SimpleMessageWriter {
-    fn new(buf: &mut Vec<u8>) -> Self;
-    fn text<T: AsRef<str>>(mut self, text: Option<T>)-> Self;
-    fn text2<T: AsRef<str>>(mut self, text2: Option<T>)-> Self;
-    fn numbers(mut self, numbers: impl IntoIterator<Item = i32>) -> Self;
-    fn blobs<T: AsRef<[u8]>(mut self, blobs: impl IntoIterator<Item = T>) -> Self;
-    fn map<T:AsRef<str>>(mut self, map: impl IntoIterator<Item = (T,f64)>) -> Self;
-    fn finish(self);
-}
+let mut buffer = Vec::new();
+let schema = SimpleMessageSchema::default();
 
-fn use_it() {
-    let mut buf = Vec::new();
-    let blob_set = HashSet::from_iter([b"blob1",b"blob2"]);
-    SimpleMessageWriter::new(&mut buf)
-        .text(Some("Hello"))
-        .numbers([1,2,3])
-        .blobs(&blob_set)
-        .finish();
-    // thats it, buf contains the serialized data. note the 'map' field was not written
-}
-
+schema.text.write(&mut buffer, Some("hello world"));
+schema.numbers.write(&mut buffer, [1, 2, 3, 4]);
 ```
 
-## Why not Prost/quick-protobuf/rust-protobuf
+`Optional` fields take an `Option`, `Repeated` fields take anything iterable. String fields accept any `AsRef<str>`, so your own string types work without conversion.
 
-The above libs codegen rust structs which are used to hold data before serializing, which means they need to make choices about the appropriate Rust type representation, which can be limiting. for example, Prost requires that the protobuf type `repeated string` be represented as `Vec<String>` in rust, which is not actually needed to serialise that data where a simple iterator over `&str` will do.
-In other words when you have a lot of data that doesnt fit nicely into the structs generated by other protobuf libs, or you want control over how things are written for performance/semantics reasons, this library might do the trick.
+## Exhaustiveness Checking
 
-## Some special considerations.
-
-There are 2 cases where some finess is needed to make an incremental/immidiate writer like Tacky work. Both of those concern length delimited fields of size that isnt known up front.
-
-The first case are packed repeated fields (repeated integer fields in protobuf 3, repeated integer fields in proto2 if the 'packed = true' attribute is set.) those are written as a length delimited field (tag, length, values) as opposed to non-packed "repeated" fields which are multiples of (tag, value).
-the approach used by prost and quick-protobuf (and probably most other impls) is to iterate over the input values, calculate their length, and then iterate again to write them. We dont like that.
-
-Sthe second case is fields in messages that are themselves Message types. those are also length-delimited, and since its up to the caller to decide which fields to write and how, we cant know up front the length of that message.
-
-In both of these cases, what we do here is a slight abuse of the LEB128 (varint) encoding. we allocate a fixed width place-holder length up front. once the message writer drops, it goes back to that place in the buffer and writes the correct length (backpatching, see the Tack module in this lib for detail).
-
-for packed fields this is transparent to users, the generated API takes care of it. encoding packed varints this way is also vastly faster than the iterate-twice approach commontly used (almost twice as fast, for obvious reasons).
-note that currently this limits the length of a single packed field to 16kb. if you need longer, use the lower-level writer API to configure this.
-
-for message-type fields,the generated API is closure based, to make sure the lengths are backfilled correctly on `Drop`.
-This API does not currently explicitly track optional/repeated qualifiers, but instead leaves it up to the user to write the message zero, once, or many times.
-the generated API for example:
-
-```protobuf
-message TopLevel {
-    string text = 1;
-    optional Nested nest = 2;
-}
-
-message Nested {
-    int32 num = 1;
-    repeated Nested rec = 2; //recursive message, for fun.
-}
-```
-
-would generate writers for both messages:
+The usual assumption is that skipping the generated struct means losing safety — forget to write a field and nothing tells you. Tacky sidesteps this with a small trick: every `.write()` call returns the field schema value back. This means you can use the generated schema as a literal to "fill in". and get compile-time exhaustiveness for free:
 
 ```rust
-pub struct TopLevelWriter {..}
-impl TopLevelWriter {
-    pub fn text(&mut self, text: Option<&str>)->Field<1,Plain<PbString>>;
-    pub fn nest(&mut self, write: impl FnMut(NestedWriter)) -> Field<2,Optional<PbMessage>>;
+let mut buffer = Vec::new();
+let schema = SimpleMessageSchema::default();
 
-pub struct NestedWriter {..}
-impl NestedWriter  {
-    pub fn num(&mut self, num: i32) -> Field<1,Plain<Int32>>,
-    pub fn rec(&mut self, rec: impl FnMut(NestedWriter)) -> Field<2, Optional<PbMessage>>;
-}
-}
-fn useage() {
-    let mut buf = Vec::new();
-    let mut writer = TopLevelWriter::new(&mut buf);
-    writer.text(Some("hello"));
-    writer.nest(|mut nested_writer| {
-        nested_writer.num(42);
-        nested_writer.rec(|mut deeper| {..})
-    })
-}
-
+SimpleMessageSchema {
+    text: schema.text.write(&mut buffer, Some("hello world")),
+    numbers: schema.numbers.write(&mut buffer, [1, 2, 3, 4]),
+    blobs: schema.blobs,  // explicitly skipped
+    ..schema              // skip the rest
+};
 ```
 
-## Current limitations
+`SimpleMessageSchema` is zero-sized — nothing is being constructed here. The `.write()` calls are the side effects, filling the buffer. The struct literal is purely a compile-time exhaustiveness check. Add a field to your proto schema and this stops compiling. Same safety as a generated data struct, none of the allocation.
 
-OneOf type fields are not handled, TODO.
+## Nested Messages
 
-imports/includes/nested defs are not handled. that is, all messages must be flat within a file. TODO.
-
-Deserializing isnt really in scope, unless i find a nice way to do it that fits what this library wants to do. use prost maybe, as that what i test against right now.
-
-Would be nice to add a Derive for existing messages to serialize via Tacky, in case all or part of the fields match in name,type and order to a certain schema. something like:
+Nested message fields use a closure API. The closure receives a buffer and the nested schema, and the length is patched in automatically when it returns:
 
 ```rust
-#[derive(ToProto)]
-#[tacky(proto_path = "../data.proto")]
-struct Data {
-    ips: BTreeSet<IpAddr>,
-    paths: BTreeSet<Arc<str>>,
-    timings: Vec<Duration>
+MsgWithNesting {
+    header: schema.header.write_msg(&mut buf, |buf, scm| {
+        scm.title.write(buf, Some("hello"));
+        scm.version.write(buf, Some(1));
+    }),
+    ..schema
+};
+```
+
+For repeated message fields, call `write_msg` multiple times — once per message you want to write. The nested schema works the same way as the outer one, including exhaustiveness checks if you want them:
+
+```rust
+schema.events.write_msg(&mut buf, |buf, scm| {
+    EventSchema {
+        name: scm.name.write(buf, Some("click")),
+        ..scm
+    }
+});
+schema.events.write_msg(&mut buf, |buf, scm| {
+    EventSchema {
+        name: scm.name.write(buf, Some("scroll")),
+        ..scm
+    }
+}
+```
+// ---- OR ----
+```rust
+let events = ["scroll", "click"];
+Message {
+    events: {
+        for e in events {
+            schema.events.write_msg(&mut buf, |buf, scm| {
+            EventSchema {
+                name: scm.name.write(buf, Some(e)),
+                ..scm
+            }}
+        }
+        schema.events //gotta mark this as written explicitly as a for loop returns (), not the written field. 
+        },
+        ..Message::default()
 }
 
 ```
+
+## Performance
+
+Protobuf has two cases where the length of a field must be written before its contents — packed repeated fields and nested messages. The conventional approach is two passes: iterate to calculate the length, write the length, then iterate again to write the data.
+
+Tacky instead writes a placeholder length, writes the data in a single pass, and patches the real length in place when the scope closes. This applies to both packed fields and nested messages. for varints this is much faster. 
+prost wants to allocate a vec for both repeated and packed values, the calculating the length of this vec in the repeat unpacked case where the tag length needs to be calculated as well results in particularly bad performance.
+
+
+| Benchmark Suite | Variant | Tacky Time | Prost Time | Performance Difference |
+| :--- | :--- | :--- | :--- | :--- |
+| **Tiny nested Messages** | Default | ~29 ns | ~26 ns | Prost is ~1.1x faster |
+| **Big Nested Messages** | Default | ~35 ns | ~80 ns | Tacky is ~2.3x faster |
+| **Packed Repeated** | Few (10) | ~36 ns | ~52 ns | Tacky is ~1.4x faster |
+| **Packed Repeated** | Many (100) | ~363 ns | ~565 ns | Tacky is ~1.5x faster |
+| **Packed Repeated** | Hundreds (1000) | ~3.80 µs| ~5.51 µs | Tacky is ~1.4x faster |
+| **Normal Repeated** | Few (10) | ~26 ns | ~62 ns | Tacky is ~2.4x faster |
+| **Normal Repeated** | Many (100) | ~281 ns | ~618 ns | Tacky is ~2.2x faster |
+| **Normal Repeated** | Hundreds (1000) | ~2.57 µs | ~6.58 µs | Tacky is ~2.5x faster |
+| **Mixed Usage** | All fields set | ~121 ns | ~187 ns | Tacky is ~1.5x faster |
+| **Mixed Usage** | Half fields set | ~60 ns | ~87 ns | Tacky is ~1.4x faster |
+| **Mixed Usage** | Few fields set (1-2) | ~1.7 ns | ~12.1 ns | Tacky is ~7.1x faster |
+
+## Deserialization
+
+`tacky-build` generates an enum with a variant per field, and an iterator that yields them one at a time. You match on variants and build your domain object from primitives. you can either exhaustively match all the fields or just select what you care about at this point. unknown fields are skipped by the iterator. if you need to keep unknown fields, let me know.
+
+```rust
+for field in SimpleMessageDecoder::new(&buf) {
+    match field? {
+        SimpleMessageField::Text(s) => { /* s is a &str */ },
+        SimpleMessageField::Numbers(n) => { /* n is an i32 */ },
+        _ => {}
+    }
+}
+```
+
+Fields come back as basic Rust primitives — `&str`, `i32`, `f64`, etc. Mapping those to your domain types is up to you. Only one enum variant lives on the stack at a time, regardless of how many fields the message has. the struct approach prost and co use can lead to just the size on the stack of the message before any data is filled in to be much larger than the message itself, and grows with more fields.
+
+
+## Limitations
+
+**Imports and nested definitions are not yet supported.** 
+All message definitions must be flat within a single file.
+
+**protobuf merge semantics dont work**
+Due to the design of the deserializer as a-field-at-a-time, it doesnt automatically merge repeated instances of a "singular" messages. if that is required for correctness in your case, you can implement it in your code.
+
+**OneOf fields are flattened into the schema.** For a serializer this is fine — the OneOf constraint is more meaningful during deserialization. If you need to enforce OneOf semantics you'll need to do that in your own code.
+
+**The exhaustiveness pattern is verbose.** A message with many fields means a long struct literal with repetitive `field: schema.field.write(&mut buf, data)` lines. This is opt-in — you only pay the verbosity cost if you want the compile-time exhaustiveness check. For partial writes, just call `.write()` on the fields you need.
+
+## How It Works
+
+*TODO: Tack primitive, zero-sized types, const generics, the drop trick.*

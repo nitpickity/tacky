@@ -29,6 +29,12 @@ message MsgWithMaps {
     map<sfixed32,double> map2 = 2;
 }
 
+// nested message maps
+message MapsWithMsg {
+    map<string, SimpleMessage> map1 = 1;
+}
+
+
 message MsgWithEnums {
     optional SimpleEnum enum1 = 1;
     repeated AnotherEnum enum2 = 2;
@@ -47,4 +53,89 @@ enum SimpleEnum {
 enum AnotherEnum {
     A = 0;
     B = 1;
+}
+
+message Level4 {
+    optional string data = 1;
+    optional int32 num = 2;
+}
+
+message Level3 {
+    optional Level4 next = 1;
+    optional int32 num = 2;
+}
+
+message Level2 {
+    optional Level3 next = 1;
+    optional int32 num = 2;
+}
+
+message Level1 {
+    optional Level2 next = 1;
+    optional int32 num = 2;
+}
+
+message BigLevel4 {
+    optional string data1 = 1;
+    optional string data2 = 2;
+    optional int32 num1 = 3;
+    optional int32 num2 = 4;
+    optional bool flag = 5;
+    repeated int32 many_nums = 6;
+}
+
+message BigLevel3 {
+    optional BigLevel4 next = 1;
+    optional string data = 2;
+    optional int32 num = 3;
+    optional bool flag = 4;
+}
+
+message BigLevel2 {
+    optional BigLevel3 next = 1;
+    optional string data = 2;
+    optional int32 num = 3;
+    optional bool flag = 4;
+}
+
+message BigLevel1 {
+    optional BigLevel2 next = 1;
+    optional string data = 2;
+    optional int32 num = 3;
+    optional bool flag = 4;
+}
+
+message MixedSmallMessage {
+    optional string label = 1;
+    optional int32 count = 2;
+    optional bool active = 3;
+}
+
+message MixedLargeMessage {
+    optional string id = 1;
+    optional string name = 2;
+    optional string description = 3;
+    optional int64 timestamp = 4;
+    optional double score = 5;
+    optional bool is_verified = 6;
+    repeated int32 tags = 7 [packed=true];
+    repeated string permissions = 8;
+    optional MixedSmallMessage details = 9;
+    repeated double metrics = 10 [packed=true];
+    repeated bool flags = 11 [packed=true];
+}
+
+message MixedUsageMessage {
+    optional string session_id = 1;
+    optional int32 user_id = 2;
+    optional string client_version = 3;
+    optional MixedSmallMessage small_payload = 4;
+    optional MixedLargeMessage large_payload = 5;
+    repeated MixedSmallMessage history = 6;
+    repeated string related_ids = 7;
+    optional int64 created_at = 8;
+    optional int64 updated_at = 9;
+    optional double priority = 10;
+    optional bool is_test = 11;
+    optional SimpleEnum status = 12;
 }

@@ -1,7 +1,9 @@
+use core::panic;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::parser::{Field, Label, PbType, Scalar};
+use crate::parser::{parse_ty, Field, Label, PbType, Scalar};
 
 /// Whether a field's variant borrows from the input buffer (needs lifetime 'a).
 fn field_borrows(field: &Field) -> bool {
@@ -25,8 +27,27 @@ fn variant_type(field: &Field) -> TokenStream {
                 let ident = format_ident!("{}", name);
                 quote!(#ident)
             }
-            PbType::Message(_) => quote!(&'a [u8]),
-            PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote!(&'a [u8]),
+            PbType::Message(msg_name) => {
+                let m = parse_ty(&format!("{}Fields<'a>", msg_name));
+                quote!(#m)
+            }
+            PbType::Map(k, m) => {
+                let PbType::Message(msg_name) = &**m else {
+                    todo!()
+                };
+                let k = scalar_variant_type(k);
+                let m = parse_ty(&format!("Option<{}Fields<'a>>", msg_name));
+                quote! {
+                    (#k, #m)
+                }
+            }
+            PbType::SimpleMap(k, v) => {
+                let k = scalar_variant_type(k);
+                let v = scalar_variant_type(v);
+                quote! {
+                    (#k, Option<#v>)
+                }
+            }
         },
     }
 }
@@ -113,12 +134,31 @@ fn decode_expr(field: &Field) -> TokenStream {
                     })?;
                 }
             }
-            PbType::Message(_) => quote! {
-                let data = tacky::decode_len(buf)?;
-            },
-            PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote! {
-                let data = tacky::decode_len(buf)?;
-            },
+            PbType::Message(nested) => {
+                let msg_name = format_ident!("{}", nested);
+                quote! {
+                    let data = #msg_name::decode(tacky::decode_len(buf)?);
+                }
+            }
+            PbType::Map(k, m) => {
+                let PbType::Message(msg_name) = &**m else {
+                    panic!("Map value type must be a message");
+                };
+                let k = format_ident!("{}", k.tacky_type());
+                let v = format_ident!("{}", msg_name);
+
+                quote! {
+                    let data = ::tacky::PbMap::<#k, #v>::read_msg(buf, #v::decode)?;
+                }
+            }
+            PbType::SimpleMap(k, v) => {
+                let k = format_ident!("{}", k.tacky_type());
+                let v = format_ident!("{}", v.tacky_type());
+
+                quote! {
+                    let data = ::tacky::PbMap::<#k, #v>::read(buf)?;
+                }
+            }
         },
     }
 }
@@ -140,7 +180,7 @@ fn packed_value_expr(field: &Field) -> TokenStream {
             quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
         }
         PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
-        _ => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
+        _ => panic!("Only scalar and enum fields can be packed"),
     }
 }
 
@@ -156,7 +196,7 @@ fn variant_value_expr(field: &Field) -> TokenStream {
     }
 }
 
-pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
+pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
     let enum_name = format_ident!("{name}Field");
 
     let needs_lifetime = fields.iter().any(field_borrows);
@@ -184,54 +224,62 @@ pub fn write_field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
             quote! {
                 #tag => {
-                    tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
+                    Some((
+                        || {
+                         tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
                     #decode
-                    Ok(Some(Self::#variant_name(#value)))
+                    Ok(#enum_name::#variant_name(#value))
+                    })())
+
+
                 }
             }
         })
         .collect();
 
-    if needs_lifetime {
-        quote! {
-            #[derive(Debug, Copy, Clone, PartialEq)]
-            pub enum #enum_name<'a> {
-                #(#variants,)*
-            }
+    let fields_iterator_name = format_ident!("{name}Fields");
 
-            impl<'a> #enum_name<'a> {
-                /// Decode the next field from the buffer.
-                /// Returns `Ok(Some(field))` for known fields, `Ok(None)` for unknown (skipped).
-                pub fn decode(buf: &mut &'a [u8]) -> Result<Option<Self>, tacky::DecodeError> {
-                    let (tag, wire_type) = tacky::decode_key(buf)?;
-                    match tag {
-                        #(#match_arms)*
-                        _ => {
-                            tacky::skip_field(wire_type, buf)?;
-                            Ok(None)
-                        }
-                    }
-                }
+    let (lt_token, lt_name) = if needs_lifetime {
+        (quote! {<'a>}, (quote! {'a}))
+    } else {
+        (quote! {}, quote! {})
+    };
+
+    quote! {
+        #[derive(Debug, Copy,Clone, PartialEq)]
+        pub enum #enum_name #lt_token {
+            #(#variants,)*
+        }
+        #[derive(Debug, Copy,Clone, PartialEq)]
+        pub struct #fields_iterator_name<'a> {
+            buf: &'a [u8],
+        }
+
+        impl<'a> #fields_iterator_name<'a> {
+            pub fn new(buf: &'a [u8]) -> Self {
+                Self { buf }
             }
         }
-    } else {
-        quote! {
-            #[derive(Debug, Copy, Clone, PartialEq)]
-            pub enum #enum_name {
-                #(#variants,)*
-            }
+        impl<'a> Iterator for #fields_iterator_name<'a> {
+            type Item = Result<#enum_name #lt_token, tacky::DecodeError>;
 
-            impl #enum_name {
-                /// Decode the next field from the buffer.
-                /// Returns `Ok(Some(field))` for known fields, `Ok(None)` for unknown (skipped).
-                pub fn decode(buf: &mut &[u8]) -> Result<Option<Self>, tacky::DecodeError> {
-                    let (tag, wire_type) = tacky::decode_key(buf)?;
-                    match tag {
-                        #(#match_arms)*
-                        _ => {
-                            tacky::skip_field(wire_type, buf)?;
-                            Ok(None)
+            fn next(&mut self) -> Option<Self::Item> {
+                if self.buf.is_empty() {
+                    return None;
+                }
+                let buf = &mut self.buf;
+                let (tag, wire_type) = match tacky::decode_key(buf) {
+                    Ok(t) => t,
+                    Err(e) => return Some(Err(e)),
+                };
+                match tag {
+                    #(#match_arms)*
+                    _ => {
+                        match tacky::skip_field(wire_type, buf) {
+                            Ok(()) => Self::next(self), // recursively call next to find the next known field
+                            Err(e) => Some(Err(e)),
                         }
+
                     }
                 }
             }
