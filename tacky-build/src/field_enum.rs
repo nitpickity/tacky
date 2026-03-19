@@ -27,7 +27,10 @@ fn variant_type(field: &Field) -> TokenStream {
                 let ident = format_ident!("{}", name);
                 quote!(#ident)
             }
-            PbType::Message(_) => quote!(&'a [u8]),
+            PbType::Message(msg_name) => {
+                let m = parse_ty(&format!("{}Fields<'a>", msg_name));
+                quote!(#m)
+            }
             PbType::Map(k, m) => {
                 let PbType::Message(msg_name) = &**m else {
                     todo!()
@@ -131,10 +134,12 @@ fn decode_expr(field: &Field) -> TokenStream {
                     })?;
                 }
             }
-            PbType::Message(nested) => quote! {
-
-                let data = tacky::decode_len(buf)?;
-            },
+            PbType::Message(nested) => {
+                let msg_name = format_ident!("{}", nested);
+                quote! {
+                    let data = #msg_name::decode(tacky::decode_len(buf)?);
+                }
+            }
             PbType::Map(k, m) => {
                 let PbType::Message(msg_name) = &**m else {
                     panic!("Map value type must be a message");

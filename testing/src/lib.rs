@@ -468,38 +468,34 @@ mod tests {
             }),
         };
 
-        let mut enums_bytes: Option<&[u8]> = None;
-        let mut nested_msgs: Vec<&[u8]> = Vec::new();
+        let mut nested_msgs: Vec<SimpleMessageFields<'_>> = Vec::new();
 
         for field in MsgWithNestingFields::new(&buf) {
             let field = field.unwrap();
             match field {
-                MsgWithNestingField::Enums(b) => enums_bytes = Some(b),
+                MsgWithNestingField::Enums(b) => {
+                    let mut inner_enum1 = None;
+                    let mut inner_enum2 = Vec::new();
+                    for field in b {
+                        let field = field.unwrap();
+                        match field {
+                            MsgWithEnumsField::Enum1(v) => inner_enum1 = Some(v),
+                            MsgWithEnumsField::Enum2(v) => inner_enum2.push(v),
+                        }
+                    }
+                    assert_eq!(inner_enum1, Some(SimpleEnum::First));
+                    assert_eq!(inner_enum2, vec![AnotherEnum::B]);
+                }
                 MsgWithNestingField::Nested(b) => nested_msgs.push(b),
             }
         }
-
-        // Decode nested MsgWithEnums
-        let sub = enums_bytes.unwrap();
-        let mut inner_enum1 = None;
-        let mut inner_enum2 = Vec::new();
-
-        for field in MsgWithEnumsFields::new(sub) {
-            let field = field.unwrap();
-            match field {
-                MsgWithEnumsField::Enum1(v) => inner_enum1 = Some(v),
-                MsgWithEnumsField::Enum2(v) => inner_enum2.push(v),
-            }
-        }
-        assert_eq!(inner_enum1, Some(SimpleEnum::First));
-        assert_eq!(inner_enum2, vec![AnotherEnum::B]);
 
         // Decode nested SimpleMessage
         assert_eq!(nested_msgs.len(), 1);
         let sub = nested_msgs[0];
         let mut normal_int = None;
         let mut astring = None;
-        for field in SimpleMessageFields::new(sub) {
+        for field in sub {
             let field = field.unwrap();
             match field {
                 SimpleMessageField::NormalInt(v) => normal_int = Some(v),
