@@ -17,9 +17,9 @@ mod tests {
         SimpleMessage as PSimpleMessage,
     };
     use crate::tacky_proto::example::{
-        AnotherEnum, MsgWithEnums, MsgWithEnumsField, MsgWithEnumsFields, MsgWithMaps,
-        MsgWithNesting, MsgWithNestingField, MsgWithNestingFields, SimpleEnum, SimpleMessage,
-        SimpleMessageField, SimpleMessageFields,
+        AnotherEnum, MapsWithMsg, MapsWithMsgField, MsgWithEnums, MsgWithEnumsField,
+        MsgWithEnumsFields, MsgWithMaps, MsgWithMapsField, MsgWithNesting, MsgWithNestingField,
+        MsgWithNestingFields, SimpleEnum, SimpleMessage, SimpleMessageField, SimpleMessageFields,
     };
 
     #[test]
@@ -371,7 +371,71 @@ mod tests {
         assert_eq!(enum1, Some(SimpleEnum::Second));
         assert_eq!(enum2, vec![AnotherEnum::A, AnotherEnum::B]);
     }
+    #[test]
+    fn test_decode_maps() {
+        let mut buf = Vec::new();
+        let scm = MsgWithMaps::default();
+        MsgWithMaps {
+            map1: scm
+                .map1
+                .write(&mut buf, &BTreeMap::from_iter([("one", 1), ("two", 2)])),
+            map2: scm
+                .map2
+                .write(&mut buf, &HashMap::from([(1, 1.0), (2, 2.0)])),
+        };
 
+        let remaining: &[u8] = &buf;
+        let mut map1 = BTreeMap::new();
+        let mut map2 = HashMap::new();
+
+        for field in MsgWithMaps::decode(remaining) {
+            let field = field.unwrap();
+            match field {
+                MsgWithMapsField::Map1((k, v)) => {
+                    if let Some(v) = v {
+                        map1.insert(k, v);
+                    }
+                }
+                MsgWithMapsField::Map2((k, v)) => {
+                    if let Some(v) = v {
+                        map2.insert(k, v);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(map1, BTreeMap::from_iter([("one", 1), ("two", 2)]));
+        assert_eq!(map2, HashMap::from_iter([(1, 1.0), (2, 2.0)]));
+    }
+
+    #[test]
+    fn test_maps_with_msg_values() {
+        let s = MapsWithMsg::default();
+        let mut buf = Vec::new();
+        s.map1.write_msg(&mut buf, "key", |buf, s| {
+            s.normal_int.write(buf, Some(42));
+            s.astring.write(buf, Some("hello"));
+        });
+
+        let fld = MapsWithMsg::decode(&buf);
+        for f in fld {
+            let MapsWithMsgField::Map1((k, v)) = f.unwrap();
+            assert_eq!(k, "key");
+            let mut normal_int = None;
+            let mut astring = None;
+            let v = v.unwrap();
+            for subfield in v {
+                let subfield = subfield.unwrap();
+                match subfield {
+                    SimpleMessageField::NormalInt(n) => normal_int = Some(n),
+                    SimpleMessageField::Astring(s) => astring = Some(s),
+                    _ => {}
+                }
+            }
+            assert_eq!(normal_int, Some(42));
+            assert_eq!(astring, Some("hello"));
+        }
+    }
     #[test]
     fn test_decode_nested() {
         let mut buf = Vec::new();
@@ -449,24 +513,25 @@ mod tests {
     }
     #[test]
     fn test_decode_unknown_field_skipping() {
+        use tacky::*;
         // Manually construct bytes with an unknown field (tag=99, varint value=42)
         // followed by a known field (tag=10, varint yesno=1)
         let mut buf = Vec::new();
-        // Unknown: tag=99, wire type VARINT => key = (99 << 3) | 0 = 792
-        tacky::write_varint(792, &mut buf);
-        tacky::write_varint(42, &mut buf); // some value
-                                           // Known: tag=10, wire type VARINT => key = (10 << 3) | 0 = 80
-        tacky::write_varint(80, &mut buf);
-        tacky::write_varint(1, &mut buf); // true
+        Field::<99, Plain<Int32>>::new().write(&mut buf, 42);
+        Field::<10, Plain<Bool>>::new().write(&mut buf, true);
+        Field::<420, Plain<PbString>>::new().write(&mut buf, "should be skipped");
 
         let remaining: &[u8] = &buf;
 
-        let mut it = SimpleMessageFields::new(remaining);
-        let known_field = it.next().unwrap().unwrap(); //should have a known field
-        assert!(matches!(known_field, SimpleMessageField::Yesno(true)));
-        assert!(matches!(it.next(), None)); //should be no more fields, the unknown one should have been skipped
+        let it = SimpleMessageFields::new(remaining);
+        for f in it {
+            let f = f.unwrap();
+            assert!(
+                matches!(f, SimpleMessageField::Yesno(true)),
+                "expected to only find the known yesno field, got: {f:?}"
+            );
+        }
     }
-
     #[test]
     fn test_decode_wire_type_mismatch() {
         // Construct bytes with tag=1 (normal_int, expects VARINT) but wire type LEN

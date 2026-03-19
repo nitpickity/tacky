@@ -471,6 +471,7 @@ pub enum DecodeError {
         field: &'static str,
         value: i32,
     },
+    InvalidMapEntry,
 }
 
 impl std::fmt::Display for DecodeError {
@@ -489,6 +490,9 @@ impl std::fmt::Display for DecodeError {
             DecodeError::InvalidUtf8 => f.write_str("invalid UTF-8 in string field"),
             DecodeError::InvalidEnumValue { field, value } => {
                 write!(f, "invalid enum value {value} for field \"{field}\"")
+            }
+            DecodeError::InvalidMapEntry => {
+                write!(f, "invalid map entry, tag isnt 1 or 2")
             }
         }
     }

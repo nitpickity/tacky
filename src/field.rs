@@ -1,5 +1,7 @@
 //! Base module providing tools for working with protobuf scalars and maps where fields are scalars.
 
+use bytes::Buf;
+
 use crate::{scalars::*, tack::Tack};
 use std::marker::PhantomData;
 macro_rules! impl_wrapped {
@@ -192,6 +194,69 @@ impl<K, V> PbMap<K, V> {
     }
 }
 
+impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
+    pub fn read_msg<'a, T>(
+        buf: &mut &'a [u8],
+        decoder: impl Fn(&'a [u8]) -> T,
+    ) -> Result<(K::RustType<'a>, Option<T>), DecodeError> {
+        let mut key = None;
+        let mut val = None;
+        let mut entry_buf = decode_len(buf)?;
+        while entry_buf.has_remaining() {
+            match decode_key(&mut entry_buf)? {
+                (1, wt) => {
+                    check_wire_type(wt, K::WIRE_TYPE, "key")?;
+                    key = Some(K::read(&mut entry_buf)?);
+                }
+                (2, wt) => {
+                    check_wire_type(wt, WireType::LEN, "value")?;
+                    let msg_buf = decode_len(&mut entry_buf)?;
+                    val = Some(decoder(&msg_buf));
+                }
+                _ => {
+                    return Err(DecodeError::InvalidMapEntry);
+                }
+            }
+        }
+        let Some(key) = key else {
+            return Err(DecodeError::InvalidMapEntry);
+        };
+        Ok((key, val))
+    }
+}
+impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
+    pub fn read<'a>(
+        buf: &mut &'a [u8],
+    ) -> Result<(K::RustType<'a>, Option<V::RustType<'a>>), DecodeError> {
+        let mut key = None;
+        let mut val = None;
+        let mut entry_buf = decode_len(buf)?;
+        // we expect exactly two fields, with tags 1 and 2, but protobuf doesnt enforce any order, so we loop until we find both or run out of data.
+        // maps are technically {optional X key = 1; optional Y value = 2}, so we would have to handle the case where they can be missing
+        // the official docs do cover the "key present, value missing" case. the "value present, key missing" case seems to be silently regarded as an error.
+        // in proto3 this would return the defaults. here return with explicit presence, codegen can decide how to handle that.
+        while entry_buf.has_remaining() {
+            match decode_key(&mut entry_buf)? {
+                (1, wt) => {
+                    check_wire_type(wt, K::WIRE_TYPE, "key")?;
+                    key = Some(K::read(&mut entry_buf)?);
+                }
+                (2, wt) => {
+                    check_wire_type(wt, V::WIRE_TYPE, "value")?;
+                    val = Some(V::read(&mut entry_buf)?);
+                }
+                _ => {
+                    return Err(DecodeError::InvalidMapEntry);
+                }
+            }
+        }
+        let Some(key) = key else {
+            return Err(DecodeError::InvalidMapEntry);
+        };
+        Ok((key, val))
+    }
+}
+
 pub mod maps {
     use super::*;
     impl<const N: u32, K: ProtobufScalar, V: ProtobufScalar> Field<N, PbMap<K, V>> {
@@ -201,21 +266,28 @@ pub mod maps {
             values: I,
         ) -> Field<N, PbMap<K, V>> {
             for (k, v) in values {
-                self.insert(buf, k, v);
+                self.write_entry(buf, k, Some(v));
             }
             Field::new()
         }
-        pub fn insert<A: ProtoEncode<K>, B: ProtoEncode<V>>(
+        // writing {key; none} is useful as a way to delete entries in an update message
+        pub fn write_entry<A: ProtoEncode<K>, B: ProtoEncode<V>>(
             &self,
             buf: &mut Vec<u8>,
             key: A,
-            value: B,
+            value: Option<B>,
         ) -> Field<N, PbMap<K, V>> {
-            // wild guess, but in maps with simple scalar keys and values, each entry is probably not very big.
-            // start with a tack of length 1 (127 bytes). if the entry exceeds that, it'll just reallocate and write again.
-            let t = Tack::new_with_width(buf, N, 1);
-            A::encode(t.buffer, 1, &key);
-            B::encode(t.buffer, 2, &value);
+            // the tag and wire type for the map field itself
+            write_varint((N << 3 | 2) as u64, buf);
+            let k = key.as_scalar();
+            let v = value.as_ref().map(|v| v.as_scalar());
+            // len of the entry message, which is 1 (for the key) + len of the key + (0 if value is None else 1 + len of value)
+            let len = K::len(1, k) + v.map(|v| V::len(1, v)).unwrap_or(0);
+            write_varint(len as u64, buf);
+            A::encode(buf, 1, &key);
+            if let Some(value) = value {
+                B::encode(buf, 2, &value);
+            }
             Field::new()
         }
     }
@@ -228,23 +300,11 @@ pub mod maps {
         ) -> Field<N, PbMap<K, M>> {
             let t = Tack::new_with_width(buf, N, 2);
             A::encode(t.buffer, 1, &key);
-            value(t.buffer, M::default());
+            {
+                let tt = Tack::new_with_width(t.buffer, 2, 2);
+                value(tt.buffer, M::default());
+            }
             Field::new()
-        }
-    }
-    pub struct SimpleMapEntry<'a, K: ProtobufScalar, V: ProtobufScalar> {
-        pub key: K::RustType<'a>,
-        pub value: V::RustType<'a>,
-    }
-
-    impl<'a, K: ProtobufScalar, V: ProtobufScalar> SimpleMapEntry<'a, K, V> {
-        pub fn read(buf: &mut &'a [u8]) -> Result<Self, DecodeError> {
-            let mut entry_buf = decode_len(buf)?;
-            decode_key(&mut entry_buf)?; // key tag
-            let key = K::read(&mut entry_buf)?;
-            decode_key(&mut entry_buf)?;
-            let value = V::read(&mut entry_buf)?;
-            Ok(Self { key, value })
         }
     }
 }
@@ -255,12 +315,12 @@ pub trait MessageSchema: Default {}
 /// Trait for allowing a wide array of types to be encoded as protobuf scalars
 /// if you have a custom type that you want to be able to write as a protobuf scalar, implement this trait for it.
 /// if you can implement as_scalar, everything works as expected.
-/// if you cant implement as_scalar, you can still implement encode directly, at the cost of being unable to Packed<your type>
+/// if you cant implement as_scalar, you can still implement encode directly, at the cost of being unable to Packed<your type> fields.
 pub trait ProtoEncode<P: ProtobufScalar> {
     /// this should return the value to be encoded as a protobuf scalar, which will then be passed to the appropriate write_value function for the scalar type.
-    /// if your type can be losslessly converted to the protobuf scalar type, this is straightforward.
+    /// if your type can be converted to the protobuf scalar type, this is straightforward.
     /// if not, you can implement encode directly, but you wont be able to use Packed<your type> fields, since those rely on as_scalar for calculating the length of the packed field.
-    /// in that case, leave this as unimplemented!() to avoid accidentally using it.
+    /// in that case, leave this as unimplemented!()
     fn as_scalar(&self) -> P::RustType<'_>;
     /// checks if a field is equal to its protobuf default value.
     /// used to skip writing default values when using the Plain field modifier.
@@ -268,8 +328,8 @@ pub trait ProtoEncode<P: ProtobufScalar> {
         self.as_scalar() == P::RustType::default()
     }
 
-    /// default implementation of encode, which works for all types that can be losslessly converted to protobuf scalars.
-    /// if your type cant be losslessly converted to the protobuf scalar type, you can implement encode directly.
+    /// default implementation of encode, which works for all types that can be converted to protobuf scalars.
+    /// if your type cant be converted to the protobuf scalar type, you can implement encode directly.
     fn encode(buf: &mut Vec<u8>, field_nr: u32, value: &Self) {
         P::write_tag(field_nr, buf);
         let value = value.as_scalar();
@@ -364,14 +424,10 @@ mod tests {
             let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
             assert_eq!(tag, 1);
             assert_eq!(wire, crate::scalars::WireType::LEN);
-            let entry =
-                crate::field::maps::SimpleMapEntry::<Int32, PbString>::read(&mut slice).unwrap();
-            results.push((entry.key, entry.value.to_string()));
+            let (k, v) = crate::field::PbMap::<Int32, PbString>::read(&mut slice).unwrap();
+            results.push((k, v));
         }
-        assert_eq!(
-            results,
-            vec![(1, "one".to_string()), (2, "two".to_string())]
-        );
+        assert_eq!(results, vec![(1, Some("one")), (2, Some("two"))]);
     }
 
     #[test]
@@ -380,6 +436,7 @@ mod tests {
         let input = [("a", "alpha"), ("b", "beta")];
         let writer = Field::<1, PbMap<PbString, PbString>>::new();
         writer.write(&mut buf, input);
+        writer.write_entry(&mut buf, "c", None::<&str>);
         let mut slice = buf.as_slice();
         let mut results = Vec::new();
         while !slice.is_empty() {
@@ -387,16 +444,12 @@ mod tests {
             assert_eq!(tag, 1);
             assert_eq!(wire, crate::scalars::WireType::LEN);
 
-            let entry =
-                crate::field::maps::SimpleMapEntry::<PbString, PbString>::read(&mut slice).unwrap();
-            results.push((entry.key.to_string(), entry.value.to_string()));
+            let (k, v) = crate::field::PbMap::<PbString, PbString>::read(&mut slice).unwrap();
+            results.push((k, v));
         }
         assert_eq!(
             results,
-            vec![
-                ("a".to_string(), "alpha".to_string()),
-                ("b".to_string(), "beta".to_string())
-            ]
+            vec![("a", Some("alpha")), ("b", Some("beta")), ("c", None)]
         );
     }
 
@@ -412,11 +465,10 @@ mod tests {
             let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
             assert_eq!(tag, 1);
             assert_eq!(wire, crate::scalars::WireType::LEN);
-            let entry =
-                crate::field::maps::SimpleMapEntry::<Int32, Float>::read(&mut slice).unwrap();
-            results.push((entry.key, entry.value));
+            let (k, v) = crate::field::PbMap::<Int32, Float>::read(&mut slice).unwrap();
+            results.push((k, v));
         }
-        assert_eq!(results, vec![(1, 1.5f32), (2, 2.5f32)]);
+        assert_eq!(results, vec![(1, Some(1.5f32)), (2, Some(2.5f32))]);
     }
     #[test]
     fn test_required_string_and_bytes() {

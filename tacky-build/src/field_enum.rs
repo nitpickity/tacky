@@ -3,7 +3,7 @@ use core::panic;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::parser::{Field, Label, PbType, Scalar};
+use crate::parser::{parse_ty, Field, Label, PbType, Scalar};
 
 /// Whether a field's variant borrows from the input buffer (needs lifetime 'a).
 fn field_borrows(field: &Field) -> bool {
@@ -28,7 +28,23 @@ fn variant_type(field: &Field) -> TokenStream {
                 quote!(#ident)
             }
             PbType::Message(_) => quote!(&'a [u8]),
-            PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote!(&'a [u8]),
+            PbType::Map(k, m) => {
+                let PbType::Message(msg_name) = &**m else {
+                    todo!()
+                };
+                let k = scalar_variant_type(k);
+                let m = parse_ty(&format!("Option<{}Fields<'a>>", msg_name));
+                quote! {
+                    (#k, #m)
+                }
+            }
+            PbType::SimpleMap(k, v) => {
+                let k = scalar_variant_type(k);
+                let v = scalar_variant_type(v);
+                quote! {
+                    (#k, Option<#v>)
+                }
+            }
         },
     }
 }
@@ -115,12 +131,29 @@ fn decode_expr(field: &Field) -> TokenStream {
                     })?;
                 }
             }
-            PbType::Message(_) => quote! {
+            PbType::Message(nested) => quote! {
+
                 let data = tacky::decode_len(buf)?;
             },
-            PbType::Map(_, _) | PbType::SimpleMap(_, _) => quote! {
-                let data = tacky::decode_len(buf)?;
-            },
+            PbType::Map(k, m) => {
+                let PbType::Message(msg_name) = &**m else {
+                    panic!("Map value type must be a message");
+                };
+                let k = format_ident!("{}", k.tacky_type());
+                let v = format_ident!("{}", msg_name);
+
+                quote! {
+                    let data = ::tacky::PbMap::<#k, #v>::read_msg(buf, #v::decode)?;
+                }
+            }
+            PbType::SimpleMap(k, v) => {
+                let k = format_ident!("{}", k.tacky_type());
+                let v = format_ident!("{}", v.tacky_type());
+
+                quote! {
+                    let data = ::tacky::PbMap::<#k, #v>::read(buf)?;
+                }
+            }
         },
     }
 }
@@ -208,10 +241,11 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
     };
 
     quote! {
-        #[derive(Debug, Copy, Clone, PartialEq)]
+        #[derive(Debug, Copy,Clone, PartialEq)]
         pub enum #enum_name #lt_token {
             #(#variants,)*
         }
+        #[derive(Debug, Copy,Clone, PartialEq)]
         pub struct #fields_iterator_name<'a> {
             buf: &'a [u8],
         }

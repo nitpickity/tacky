@@ -29,6 +29,12 @@ message MsgWithMaps {
     map<sfixed32,double> map2 = 2;
 }
 
+// nested message maps
+message MapsWithMsg {
+    map<string, SimpleMessage> map1 = 1;
+}
+
+
 message MsgWithEnums {
     optional SimpleEnum enum1 = 1;
     repeated AnotherEnum enum2 = 2;
