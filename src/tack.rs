@@ -21,7 +21,7 @@ pub struct Tack<'b> {
 
 fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
     assert!(width <= 5 && width > 0);
-    assert!(value < 2u64.pow(7 * width as u32) - 1);
+    assert!(value < 2u64.pow(7 * width as u32));
     if width == 1 {
         buf.put_u8(value as u8);
         return;
@@ -29,7 +29,7 @@ fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
     for i in 0..(width - 1) {
         buf.put_u8((((value >> (7 * i)) & 0x7F) | 0x80) as u8)
     }
-    buf.put_u8(((value >> (7 * width)) & 0x7F) as u8)
+    buf.put_u8(((value >> (7 * (width - 1))) & 0x7F) as u8)
 }
 
 impl<'b> Tack<'b> {
@@ -121,6 +121,26 @@ mod tests {
                 println!("{dec:?}");
                 buf.clear()
             }
+        }
+    }
+
+    #[test]
+    fn test_write_wide_varint_roundtrips() {
+        let cases: Vec<(usize, u64)> = vec![
+            (2, 128),       // needs bit 7 — first value that uses the 2nd group
+            (2, 16383),     // max for width 2: 2^14 - 1
+            (3, 16384),     // needs bit 14 — first value that uses the 3rd group
+            (3, 2_097_151), // max for width 3: 2^21 - 1
+            (4, 2_097_152), // first value needing the 4th group
+        ];
+        for (width, value) in cases {
+            let mut buf = Vec::new();
+            write_wide_varint(width, value, &mut buf);
+            let decoded = crate::scalars::decode_varint(&mut buf.as_slice()).unwrap();
+            assert_eq!(
+                decoded, value,
+                "write_wide_varint({width}, {value}) decoded as {decoded}"
+            );
         }
     }
 
