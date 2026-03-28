@@ -224,14 +224,12 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
             quote! {
                 #tag => {
-                    Some((
+                    return Some((
                         || {
                          tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
                     #decode
                     Ok(#enum_name::#variant_name(#value))
                     })())
-
-
                 }
             }
         })
@@ -264,22 +262,23 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
             type Item = Result<#enum_name #lt_token, tacky::DecodeError>;
 
             fn next(&mut self) -> Option<Self::Item> {
-                if self.buf.is_empty() {
-                    return None;
-                }
-                let buf = &mut self.buf;
-                let (tag, wire_type) = match tacky::decode_key(buf) {
-                    Ok(t) => t,
-                    Err(e) => return Some(Err(e)),
-                };
-                match tag {
-                    #(#match_arms)*
-                    _ => {
-                        match tacky::skip_field(wire_type, buf) {
-                            Ok(()) => Self::next(self), // recursively call next to find the next known field
-                            Err(e) => Some(Err(e)),
+                loop {
+                    if self.buf.is_empty() {
+                        return None;
+                    }
+                    let buf = &mut self.buf;
+                    let (tag, wire_type) = match tacky::decode_key(buf) {
+                        Ok(t) => t,
+                        Err(e) => return Some(Err(e)),
+                    };
+                    match tag {
+                        #(#match_arms)*
+                        _ => {
+                            match tacky::skip_field(wire_type, buf) {
+                                Ok(()) => continue,
+                                Err(e) => return Some(Err(e)),
+                            }
                         }
-
                     }
                 }
             }

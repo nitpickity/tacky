@@ -599,7 +599,7 @@ pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
 
 #[inline]
 pub fn skip_varint(buf: &mut &[u8]) -> Result<(), DecodeError> {
-    if buf.len() >= 8 {
+    if buf.len() >= 10 {
         let word = u64::from_le_bytes(buf[..8].try_into().unwrap());
         let msbs = !word & 0x8080808080808080;
         if msbs != 0 {
@@ -623,6 +623,53 @@ pub fn skip_varint(buf: &mut &[u8]) -> Result<(), DecodeError> {
         .ok_or(DecodeError::Truncated)?;
     *buf = &buf[len..];
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skip_varint_panics_on_8_byte_buffer() {
+        // 8 bytes, all with continuation bit set — a truncated varint.
+        // This should return Truncated, not panic on out-of-bounds buf[8].
+        let data = [0x80u8; 8];
+        let mut buf: &[u8] = &data;
+        let result = skip_varint(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skip_varint_panics_on_9_byte_buffer() {
+        // 9 bytes, all with continuation bit set — a truncated varint.
+        // This should return Truncated, not panic on out-of-bounds buf[9].
+        let data = [0x80u8; 9];
+        let mut buf: &[u8] = &data;
+        let result = skip_varint(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skip_varint_9_byte_valid() {
+        // 8 continuation bytes + 1 terminating byte = valid 9-byte varint
+        let mut data = [0x80u8; 9];
+        data[8] = 0x01; // terminating byte
+        let mut buf: &[u8] = &data;
+        let result = skip_varint(&mut buf);
+        assert!(result.is_ok());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn test_skip_varint_10_byte_valid() {
+        // 9 continuation bytes + 1 terminating byte = valid 10-byte varint (max)
+        let mut data = [0x80u8; 10];
+        data[9] = 0x01;
+        let mut buf: &[u8] = &data;
+        let result = skip_varint(&mut buf);
+        assert!(result.is_ok());
+        assert!(buf.is_empty());
+    }
 }
 
 /// Decode a length-delimited field, returning a sub-slice of the input.
