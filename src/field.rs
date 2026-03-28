@@ -23,8 +23,12 @@ impl_wrapped!(Optional, Repeated, Required, Packed, Plain);
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct OneOf<O>(PhantomData<O>);
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
+impl<K, V> Copy for PbMap<K, V> {}
+impl<K, V> Clone for PbMap<K, V> {
+    fn clone(&self) -> Self { *self }
+}
 
 //field labels/modifiers that can be applied to the above (except maps and oneOfs)
 
@@ -39,8 +43,8 @@ impl<const N: u32, P> Field<N, P> {
 
 pub mod optional {
     use super::*;
-    impl<'b, const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
-        pub fn write<V: ProtoEncode<P>>(&self, buf: &'b mut Vec<u8>, value: Option<V>) -> Self {
+    impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
+        pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: Option<V>) -> Self {
             if let Some(value) = value {
                 <V as ProtoEncode<P>>::encode(buf, N, &value);
             }
@@ -48,8 +52,8 @@ pub mod optional {
         }
     }
 
-    impl<'b, const N: u32, M: MessageSchema> Field<N, Optional<M>> {
-        pub fn write_msg(&self, buf: &'b mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
+    impl<const N: u32, M: MessageSchema> Field<N, Optional<M>> {
+        pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
             let t = Tack::new(buf, N); // reserve space for tag and length
             f(t.buffer, M::default());
             Field::new()
@@ -72,14 +76,14 @@ pub mod repeated {
             Field::new()
         }
         #[inline]
-        pub fn write_single<V: ProtoEncode<P>>(&self, buf: &mut Vec<u8>, value: V) -> Self {
+        pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Self {
             <V as ProtoEncode<P>>::encode(buf, N, &value);
             Field::new()
         }
     }
 
-    impl<'b, const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
-        pub fn write_msg(&self, buf: &'b mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
+    impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
+        pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
             let t = Tack::new(buf, N); // reserve space for tag and length
             f(t.buffer, M::default());
             Field::new()
@@ -213,8 +217,8 @@ impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
                     let msg_buf = decode_len(&mut entry_buf)?;
                     val = Some(decoder(&msg_buf));
                 }
-                _ => {
-                    return Err(DecodeError::InvalidMapEntry);
+                (_, wt) => {
+                    skip_field(wt, &mut entry_buf)?;
                 }
             }
         }
@@ -245,8 +249,8 @@ impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
                     check_wire_type(wt, V::WIRE_TYPE, "value")?;
                     val = Some(V::read(&mut entry_buf)?);
                 }
-                _ => {
-                    return Err(DecodeError::InvalidMapEntry);
+                (_, wt) => {
+                    skip_field(wt, &mut entry_buf)?;
                 }
             }
         }
@@ -261,7 +265,7 @@ pub mod maps {
     use super::*;
     impl<const N: u32, K: ProtobufScalar, V: ProtobufScalar> Field<N, PbMap<K, V>> {
         pub fn write<I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
-            &self,
+            self,
             buf: &mut Vec<u8>,
             values: I,
         ) -> Field<N, PbMap<K, V>> {
@@ -272,7 +276,7 @@ pub mod maps {
         }
         // writing {key; none} is useful as a way to delete entries in an update message
         pub fn write_entry<A: ProtoEncode<K>, B: ProtoEncode<V>>(
-            &self,
+            self,
             buf: &mut Vec<u8>,
             key: A,
             value: Option<B>,
@@ -293,7 +297,7 @@ pub mod maps {
     }
     impl<const N: u32, K: ProtobufScalar, M: MessageSchema> Field<N, PbMap<K, M>> {
         pub fn write_msg<A: ProtoEncode<K>>(
-            &self,
+            self,
             buf: &mut Vec<u8>,
             key: A,
             mut value: impl FnMut(&mut Vec<u8>, M),
