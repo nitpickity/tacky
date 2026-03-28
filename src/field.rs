@@ -4,6 +4,7 @@ use bytes::Buf;
 
 use crate::{scalars::*, tack::Tack};
 use std::marker::PhantomData;
+
 macro_rules! impl_wrapped {
     ($($t:ident),*) => {
         $(
@@ -27,7 +28,9 @@ pub struct OneOf<O>(PhantomData<O>);
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
 impl<K, V> Copy for PbMap<K, V> {}
 impl<K, V> Clone for PbMap<K, V> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 //field labels/modifiers that can be applied to the above (except maps and oneOfs)
@@ -46,7 +49,9 @@ pub mod optional {
     impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
         pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: Option<V>) -> Self {
             if let Some(value) = value {
-                <V as ProtoEncode<P>>::encode(buf, N, &value);
+                let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
+                t.write(buf);
+                P::write_value(value.as_scalar(), buf);
             }
             Field::new()
         }
@@ -54,7 +59,9 @@ pub mod optional {
 
     impl<const N: u32, M: MessageSchema> Field<N, Optional<M>> {
         pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
-            let t = Tack::new(buf, N); // reserve space for tag and length
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new(buf);
             f(t.buffer, M::default());
             Field::new()
         }
@@ -70,21 +77,27 @@ pub mod repeated {
             buf: &mut Vec<u8>,
             values: impl IntoIterator<Item = V>,
         ) -> Field<N, Repeated<P>> {
+            let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             for value in values {
-                <V as ProtoEncode<P>>::encode(buf, N, &value);
+                t.write(buf);
+                P::write_value(value.as_scalar(), buf);
             }
             Field::new()
         }
         #[inline]
         pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Self {
-            <V as ProtoEncode<P>>::encode(buf, N, &value);
+            let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
+            t.write(buf);
+            P::write_value(value.as_scalar(), buf);
             Field::new()
         }
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
         pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
-            let t = Tack::new(buf, N); // reserve space for tag and length
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new(buf);
             f(t.buffer, M::default());
             Field::new()
         }
@@ -100,12 +113,46 @@ pub mod packed {
             buf: &mut Vec<u8>,
             values: impl IntoIterator<Item = V>,
         ) -> Field<N, Packed<P>> {
-            let it = values.into_iter();
-            // room for 16k bytes. if the packed field exceeds that, it'll just reallocate and write again.
-            let t = Tack::new_with_width(buf, N, 2);
-            for value in it {
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new_with_width(buf, 2);
+            for value in values {
                 let value = value.as_scalar();
                 P::write_value(value, t.buffer);
+            }
+            Field::new()
+        }
+
+        /// Like `write`, but requires an ExactSizeIterator. For fixed-size types (float, double,
+        /// fixed32, fixed64, sfixed32, sfixed64), this bypasses the Tack and writes the length
+        /// prefix directly, which is significantly faster.
+        #[inline]
+        pub fn write_exact<I>(self, buf: &mut Vec<u8>, values: I) -> Field<N, Packed<P>>
+        where
+            I: IntoIterator<Item: ProtoEncode<P>>,
+            I::IntoIter: ExactSizeIterator,
+        {
+            let it = values.into_iter();
+            if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
+                let count = it.len();
+                if count == 0 {
+                    return Field::new();
+                }
+                let data_len = count * fixed_size;
+                let tag = const { EncodedTag::new(N, WireType::LEN) };
+                tag.write(buf);
+                write_varint(data_len as u64, buf);
+                for value in it {
+                    P::write_value(value.as_scalar(), buf);
+                }
+                return Field::new();
+            }
+            // Varint types: still need Tack since encoded size depends on values
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new_with_width(buf, 2);
+            for value in it {
+                P::write_value(value.as_scalar(), t.buffer);
             }
             Field::new()
         }
@@ -149,7 +196,9 @@ pub mod required {
             buf: &mut Vec<u8>,
             value: V,
         ) -> Field<N, Required<P>> {
-            <V as ProtoEncode<P>>::encode(buf, N, &value);
+            let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
+            t.write(buf);
+            P::write_value(value.as_scalar(), buf);
             Field::new()
         }
     }
@@ -160,7 +209,9 @@ pub mod required {
             buf: &mut Vec<u8>,
             mut func: impl FnMut(&mut Vec<u8>, M),
         ) -> Field<N, Required<M>> {
-            let t = Tack::new(buf, N);
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new(buf);
             func(t.buffer, M::default());
             Field::new()
         }
@@ -175,7 +226,9 @@ pub mod plain {
             if value.is_default() {
                 return Field::new();
             }
-            <V as ProtoEncode<P>>::encode(buf, N, &value);
+            let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
+            t.write(buf);
+            P::write_value(value.as_scalar(), buf);
             Field::new()
         }
     }
@@ -185,7 +238,9 @@ pub mod plain {
             buf: &mut Vec<u8>,
             mut func: impl FnMut(&mut Vec<u8>, M),
         ) -> Field<N, Plain<M>> {
-            let t = Tack::new(buf, N);
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+            let t = Tack::new(buf);
             func(t.buffer, M::default());
             Field::new()
         }
@@ -282,15 +337,22 @@ pub mod maps {
             value: Option<B>,
         ) -> Field<N, PbMap<K, V>> {
             // the tag and wire type for the map field itself
-            write_varint((N << 3 | 2) as u64, buf);
+            let t = const { EncodedTag::new(N, WireType::LEN) };
+            t.write(buf);
+
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
             // len of the entry message, which is 1 (for the key) + len of the key + (0 if value is None else 1 + len of value)
             let len = K::len(1, k) + v.map(|v| V::len(1, v)).unwrap_or(0);
             write_varint(len as u64, buf);
-            A::encode(buf, 1, &key);
+            let t = const { EncodedTag::new(1, K::WIRE_TYPE) };
+            t.write(buf);
+
+            A::encode(buf, &key);
             if let Some(value) = value {
-                B::encode(buf, 2, &value);
+                let t = const { EncodedTag::new(2, V::WIRE_TYPE) };
+                t.write(buf);
+                B::encode(buf, &value);
             }
             Field::new()
         }
@@ -302,10 +364,16 @@ pub mod maps {
             key: A,
             mut value: impl FnMut(&mut Vec<u8>, M),
         ) -> Field<N, PbMap<K, M>> {
-            let t = Tack::new_with_width(buf, N, 2);
-            A::encode(t.buffer, 1, &key);
+            let tag = const { EncodedTag::new(N, WireType::LEN) };
+            tag.write(buf);
+            let t = Tack::new_with_width(buf, 2);
+            let tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
+            tag.write(t.buffer);
+            A::encode(t.buffer, &key);
             {
-                let tt = Tack::new_with_width(t.buffer, 2, 2);
+                let tag = const { EncodedTag::new(2, WireType::LEN) };
+                tag.write(t.buffer);
+                let tt = Tack::new_with_width(t.buffer, 2);
                 value(tt.buffer, M::default());
             }
             Field::new()
@@ -331,11 +399,9 @@ pub trait ProtoEncode<P: ProtobufScalar> {
     fn is_default(&self) -> bool {
         self.as_scalar() == P::RustType::default()
     }
-
     /// default implementation of encode, which works for all types that can be converted to protobuf scalars.
     /// if your type cant be converted to the protobuf scalar type, you can implement encode directly.
-    fn encode(buf: &mut Vec<u8>, field_nr: u32, value: &Self) {
-        P::write_tag(field_nr, buf);
+    fn encode(buf: &mut Vec<u8>, value: &Self) {
         let value = value.as_scalar();
         P::write_value(value, buf);
     }

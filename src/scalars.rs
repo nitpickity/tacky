@@ -38,6 +38,8 @@ pub struct PbEnum<T>(PhantomData<T>);
 pub trait ProtobufScalar {
     type RustType<'a>: Copy + Default + PartialEq;
     const WIRE_TYPE: WireType;
+    /// For fixed-size wire types, the encoded size per element. None for varints.
+    const FIXED_WIRE_SIZE: Option<usize> = None;
     /// how to write the value itself.
     /// can also be used to write the value without tag.
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut);
@@ -233,6 +235,7 @@ impl ProtobufScalar for Bool {
 impl ProtobufScalar for Fixed32 {
     type RustType<'a> = u32;
     const WIRE_TYPE: WireType = WireType::I32;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -258,6 +261,7 @@ impl ProtobufScalar for Fixed32 {
 impl ProtobufScalar for Sfixed32 {
     type RustType<'a> = i32;
     const WIRE_TYPE: WireType = WireType::I32;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -283,6 +287,7 @@ impl ProtobufScalar for Sfixed32 {
 impl ProtobufScalar for Float {
     type RustType<'a> = f32;
     const WIRE_TYPE: WireType = WireType::I32;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -308,6 +313,7 @@ impl ProtobufScalar for Float {
 impl ProtobufScalar for Fixed64 {
     type RustType<'a> = u64;
     const WIRE_TYPE: WireType = WireType::I64;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -333,6 +339,7 @@ impl ProtobufScalar for Fixed64 {
 impl ProtobufScalar for Sfixed64 {
     type RustType<'a> = i64;
     const WIRE_TYPE: WireType = WireType::I64;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -358,6 +365,7 @@ impl ProtobufScalar for Sfixed64 {
 impl ProtobufScalar for Double {
     type RustType<'a> = f64;
     const WIRE_TYPE: WireType = WireType::I64;
+    const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
@@ -669,6 +677,42 @@ mod tests {
         let result = skip_varint(&mut buf);
         assert!(result.is_ok());
         assert!(buf.is_empty());
+    }
+}
+
+/// Precomputed varint-encoded tag (field number + wire type).
+/// Since field numbers are typically small (1-2 bytes encoded), this avoids
+/// running the varint encoding loop on every element in a repeated field.
+pub struct EncodedTag {
+    pub bytes: [u8; 5], // max 5 bytes for a 32-bit tag varint
+    pub len: u8,
+}
+
+impl EncodedTag {
+    #[inline]
+    pub const fn new(field_nr: u32, wire_type: WireType) -> Self {
+        let mut tag = (field_nr << 3) | (wire_type as u32);
+        let mut bytes = [0u8; 5];
+        let mut i = 0;
+        loop {
+            if tag < 0x80 {
+                bytes[i] = tag as u8;
+                i += 1;
+                break;
+            }
+            bytes[i] = ((tag & 0x7F) | 0x80) as u8;
+            tag >>= 7;
+            i += 1;
+        }
+        EncodedTag {
+            bytes,
+            len: i as u8,
+        }
+    }
+
+    #[inline]
+    pub fn write(&self, buf: &mut impl BufMut) {
+        buf.put_slice(&self.bytes[..self.len as usize]);
     }
 }
 

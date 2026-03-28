@@ -20,6 +20,8 @@ message SimpleMessage {
     repeated fixed64 packed_fixed64 = 15 [packed=true];
     repeated sfixed32 packed_sfixed32 = 16 [packed=true];
     repeated sfixed64 packed_sfixed64 = 17 [packed=true];
+    repeated int32 repeated_ints = 18;
+    repeated float repeated_floats = 19;
 }
 
 

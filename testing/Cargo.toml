@@ -7,9 +7,9 @@ edition = "2021"
 
 [dependencies]
 tacky = { path = "../" }
-prost = "0.12"
+prost = "0.14"
 [build-dependencies]
-prost-build = "0.12"
+prost-build = "0.14"
 tacky-build = { path = "../tacky-build" }
 
 [dev-dependencies]
@@ -17,4 +17,8 @@ criterion = "0.5"
 
 [[bench]]
 name = "benchmark"
+harness = false
+
+[[bench]]
+name = "microbench"
 harness = false

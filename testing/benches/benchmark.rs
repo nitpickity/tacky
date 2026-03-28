@@ -63,6 +63,8 @@ fn bench_packed_repeated(c: &mut Criterion) {
                 packed_fixed64: vec![],
                 packed_sfixed32: vec![],
                 packed_sfixed64: vec![],
+                repeated_ints: vec![],
+                repeated_floats: vec![],
             };
             let mut buf = Vec::with_capacity(1024 * 10);
             b.iter(|| {
@@ -115,6 +117,8 @@ fn bench_normal_repeated(c: &mut Criterion) {
                 packed_fixed64: vec![],
                 packed_sfixed32: vec![],
                 packed_sfixed64: vec![],
+                repeated_ints: vec![],
+                repeated_floats: vec![],
             };
             let mut buf = Vec::with_capacity(1024 * 10);
             b.iter(|| {
