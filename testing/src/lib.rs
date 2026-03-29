@@ -61,6 +61,8 @@ mod tests {
                 packed_fixed64: schema.packed_fixed64.write(&mut buf, &packed_fixed64),
                 packed_sfixed32: schema.packed_sfixed32.write(&mut buf, &packed_sfixed32),
                 packed_sfixed64: schema.packed_sfixed64.write(&mut buf, &packed_sfixed64),
+                repeated_ints: schema.repeated_ints.write(&mut buf, Vec::<i32>::new()),
+                repeated_floats: schema.repeated_floats.write(&mut buf, Vec::<f32>::new()),
             };
             buf
         };
@@ -88,6 +90,8 @@ mod tests {
                 packed_fixed64: packed_fixed64.to_vec(),
                 packed_sfixed32: packed_sfixed32.to_vec(),
                 packed_sfixed64: packed_sfixed64.to_vec(),
+                repeated_ints: vec![],
+                repeated_floats: vec![],
             }
         };
 
@@ -188,6 +192,8 @@ mod tests {
                                 packed_fixed64: scm.packed_fixed64.write(buf, Vec::<u64>::new()),
                                 packed_sfixed32: scm.packed_sfixed32.write(buf, Vec::<i32>::new()),
                                 packed_sfixed64: scm.packed_sfixed64.write(buf, Vec::<i64>::new()),
+                                repeated_ints: scm.repeated_ints.write(buf, Vec::<i32>::new()),
+                                repeated_floats: scm.repeated_floats.write(buf, Vec::<f32>::new()),
                             };
                         });
                     }
@@ -227,6 +233,8 @@ mod tests {
                             packed_fixed64: vec![],
                             packed_sfixed32: vec![],
                             packed_sfixed64: vec![],
+                            repeated_ints: vec![],
+                            repeated_floats: vec![],
                         })
                     }
                     v
@@ -268,6 +276,8 @@ mod tests {
             packed_fixed64: schema.packed_fixed64.write(&mut buf, &[999u64]),
             packed_sfixed32: schema.packed_sfixed32.write(&mut buf, &[-1i32]),
             packed_sfixed64: schema.packed_sfixed64.write(&mut buf, &[-100i64]),
+            repeated_ints: schema.repeated_ints.write(&mut buf, Vec::<i32>::new()),
+            repeated_floats: schema.repeated_floats.write(&mut buf, Vec::<f32>::new()),
         };
 
         // Decode with field enum
@@ -325,6 +335,8 @@ mod tests {
                 SimpleMessageField::PackedSfixed64(iter) => {
                     sfixed64s.extend(iter.map(|r| r.unwrap()));
                 }
+                SimpleMessageField::RepeatedInts(_) => {}
+                SimpleMessageField::RepeatedFloats(_) => {}
             }
         }
 
@@ -464,6 +476,8 @@ mod tests {
                     packed_fixed64: scm.packed_fixed64.write(buf, Vec::<u64>::new()),
                     packed_sfixed32: scm.packed_sfixed32.write(buf, Vec::<i32>::new()),
                     packed_sfixed64: scm.packed_sfixed64.write(buf, Vec::<i64>::new()),
+                    repeated_ints: scm.repeated_ints.write(buf, Vec::<i32>::new()),
+                    repeated_floats: scm.repeated_floats.write(buf, Vec::<f32>::new()),
                 };
             }),
         };
@@ -578,6 +592,8 @@ mod tests {
             packed_fixed64: scm.packed_fixed64.write(&mut buf, &fixed64),
             packed_sfixed32: scm.packed_sfixed32.write(&mut buf, &sfixed32),
             packed_sfixed64: scm.packed_sfixed64.write(&mut buf, &sfixed64),
+            repeated_ints: scm.repeated_ints.write(&mut buf, Vec::<i32>::new()),
+            repeated_floats: scm.repeated_floats.write(&mut buf, Vec::<f32>::new()),
         };
 
         // Verify prost can decode it
