@@ -86,7 +86,6 @@ impl<'b> Drop for Tack<'b> {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::tack::write_wide_varint;

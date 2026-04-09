@@ -1,0 +1,11 @@
+syntax = "proto2";
+
+package importing;
+
+import "simple_message.proto";
+
+message Wrapper {
+    optional example.SimpleMessage msg = 1;
+    optional example.SimpleEnum status = 2;
+    optional string label = 3;
+}

@@ -7,12 +7,41 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::io::Write;
 
+/// Recursively collect all messages (including nested) with their qualified names.
+fn collect_all_messages<'a>(messages: &'a [Message], prefix: &str) -> Vec<(&'a Message, String)> {
+    let mut result = Vec::new();
+    for m in messages {
+        let qname = format!("{}{}", prefix, m.name);
+        result.push((m, qname.clone()));
+        result.extend(collect_all_messages(&m.messages, &qname));
+    }
+    result
+}
+
+/// Recursively collect all enums (top-level and nested inside messages) with their qualified names.
+fn collect_all_enums<'a>(
+    messages: &'a [Message],
+    enums: &'a [Enumerator],
+    prefix: &str,
+) -> Vec<(&'a Enumerator, String)> {
+    let mut result = Vec::new();
+    for e in enums {
+        let qname = format!("{}{}", prefix, e.name);
+        result.push((e, qname));
+    }
+    for m in messages {
+        let mprefix = format!("{}{}", prefix, m.name);
+        result.extend(collect_all_enums(&m.messages, &m.enums, &mprefix));
+    }
+    result
+}
+
 pub fn parse_ty(s: &str) -> syn::Type {
     syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
 }
 
-fn read_proto_file(file: &str, includes: &str) -> Vec<FileDescriptor> {
-    let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, &[includes]).unwrap();
+fn read_proto_file(file: &str, includes: &[&str]) -> Vec<FileDescriptor> {
+    let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, includes).unwrap();
     let cfg = cfg.build();
     let mut out = Vec::new();
     for cfg in cfg {
@@ -139,13 +168,13 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
             }
         }
         FieldType::Message(m) => {
-            let name = &m.get_message(desc).name;
-            PbType::Message(name.clone())
+            let name = m.qualified_name(desc);
+            PbType::Message(name)
         }
         FieldType::Enum(e) => {
-            let e = e.get_enum(desc);
-            let name = e.name.clone();
-            let values = e.fields.iter().map(|(_, v)| *v).collect();
+            let name = e.qualified_name(desc);
+            let enum_data = e.get_enum(desc);
+            let values = enum_data.fields.iter().map(|(_, v)| *v).collect();
             PbType::Enum((name, values))
         }
         FieldType::MessageOrEnum(s) => unreachable!(),
@@ -217,17 +246,14 @@ impl From<pb_rs::types::Frequency> for Label {
     }
 }
 
-fn write_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
-    let name = &m.name;
-    let name_ident = format_ident!("{name}");
-
+fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> TokenStream {
     let fields = m
         .all_fields()
         .map(|f| convert_field(f, desc))
         .collect::<Vec<_>>();
 
-    let struct_schema = message_schema(name, &fields);
-    let field_enum = field_enum(name, &fields);
+    let struct_schema = message_schema(qualified_name, &fields);
+    let field_enum = field_enum(qualified_name, &fields);
 
     quote! {
         #struct_schema
@@ -235,9 +261,8 @@ fn write_message(m: &Message, desc: &FileDescriptor) -> TokenStream {
     }
 }
 
-fn write_enum(m: &Enumerator, desc: &FileDescriptor) -> TokenStream {
-    let name = &m.name;
-    let name_ident = format_ident!("{name}");
+fn write_enum(m: &Enumerator, qualified_name: &str, _desc: &FileDescriptor) -> TokenStream {
+    let name_ident = format_ident!("{qualified_name}");
 
     let variants = m.fields.iter().map(|(field, number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
@@ -300,15 +325,23 @@ fn message_schema(name: &str, fields: &[Field]) -> TokenStream {
 }
 
 pub fn write_proto(file: &str, output: &str) {
-    let mut files = read_proto_file(file, ".");
+    write_proto_with_includes(file, output, &["."])
+}
+
+pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
+    let mut files = read_proto_file(file, includes);
     let test_file = files.pop().unwrap();
     let mod_name = format_ident!("{}", test_file.package);
 
-    let messages = test_file
-        .messages
+    let all_messages = collect_all_messages(&test_file.messages, "");
+    let all_enums = collect_all_enums(&test_file.messages, &test_file.enums, "");
+
+    let messages = all_messages
         .iter()
-        .map(|m| write_message(m, &test_file));
-    let enums = test_file.enums.iter().map(|m| write_enum(m, &test_file));
+        .map(|(m, qname)| write_message(m, qname, &test_file));
+    let enums = all_enums
+        .iter()
+        .map(|(e, qname)| write_enum(e, qname, &test_file));
 
     let token_stream = quote! {
         #[allow(unused, dead_code)]
