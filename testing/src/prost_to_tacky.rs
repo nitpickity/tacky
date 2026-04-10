@@ -115,7 +115,10 @@ mod tests {
         assert_eq!(abytes, Some([0xFF, 0x00, 0xAB].as_slice()));
         assert_eq!(yesno, Some(true));
         assert_eq!(
-            packed_enums.into_iter().map(SimpleEnum::from).collect::<Vec<_>>(),
+            packed_enums
+                .into_iter()
+                .map(SimpleEnum::from)
+                .collect::<Vec<_>>(),
             vec![SimpleEnum::First, SimpleEnum::Second]
         );
         assert_eq!(doubles, vec![1.5, -2.5, 3.14159]);
@@ -191,7 +194,10 @@ mod tests {
             }
         }
 
-        assert_eq!(map1, HashMap::from([("alpha".into(), 1), ("beta".into(), 2)]));
+        assert_eq!(
+            map1,
+            HashMap::from([("alpha".into(), 1), ("beta".into(), 2)])
+        );
         assert_eq!(map2, HashMap::from([(10, 1.5), (20, 2.5)]));
     }
 
@@ -264,9 +270,7 @@ mod tests {
                     for f in iter {
                         match f.unwrap() {
                             SimpleMessageField::NormalInt(v) => nested_ints.push(v),
-                            SimpleMessageField::Astring(s) => {
-                                nested_strings.push(s.to_string())
-                            }
+                            SimpleMessageField::Astring(s) => nested_strings.push(s.to_string()),
                             _ => {}
                         }
                     }

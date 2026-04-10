@@ -20,7 +20,6 @@ macro_rules! impl_wrapped {
 }
 impl_wrapped!(Optional, Repeated, Required, Packed, Plain);
 
-
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
 impl<K, V> Copy for PbMap<K, V> {}

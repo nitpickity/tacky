@@ -155,7 +155,10 @@ mod tests {
             a_bytes: s.a_bytes.write(&mut buf, [].as_slice()),
         };
 
-        assert!(buf.is_empty(), "default values should not be written in proto3");
+        assert!(
+            buf.is_empty(),
+            "default values should not be written in proto3"
+        );
     }
 
     // --- Optional (explicit presence) ---
@@ -233,7 +236,9 @@ mod tests {
             bools: s.bools.write(&mut buf, &[true, false, true]),
             snums: s.snums.write(&mut buf, &[-10, 10]),
             unums: s.unums.write(&mut buf, &[u64::MAX, 0]),
-            byte_arrays: s.byte_arrays.write(&mut buf, &[b"x".as_slice(), b"y".as_slice()]),
+            byte_arrays: s
+                .byte_arrays
+                .write(&mut buf, &[b"x".as_slice(), b"y".as_slice()]),
         };
 
         let decoded = prost_proto3::RepeatedMessage::decode(&*buf).unwrap();
@@ -332,7 +337,10 @@ mod tests {
             byte_arrays: s.byte_arrays.write(&mut buf, Vec::<&[u8]>::new()),
         };
 
-        assert!(buf.is_empty(), "empty repeated fields should not be written");
+        assert!(
+            buf.is_empty(),
+            "empty repeated fields should not be written"
+        );
         let decoded = prost_proto3::RepeatedMessage::decode(&*buf).unwrap();
         assert_eq!(decoded, prost_proto3::RepeatedMessage::default());
     }
@@ -345,7 +353,10 @@ mod tests {
         let s = WithEnum::default();
         WithEnum {
             status: s.status.write(&mut buf, Status::Active),
-            history: s.history.write(&mut buf, &[Status::Active, Status::Inactive, Status::Unknown]),
+            history: s.history.write(
+                &mut buf,
+                &[Status::Active, Status::Inactive, Status::Unknown],
+            ),
         };
 
         let decoded = prost_proto3::WithEnum::decode(&*buf).unwrap();
@@ -433,12 +444,10 @@ mod tests {
                 label: "inner".into(),
                 value: 99,
             }),
-            many: vec![
-                prost_proto3::Nested {
-                    label: "x".into(),
-                    value: 10,
-                },
-            ],
+            many: vec![prost_proto3::Nested {
+                label: "x".into(),
+                value: 10,
+            }],
             name: "outer".into(),
         };
 

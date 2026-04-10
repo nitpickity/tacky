@@ -253,11 +253,7 @@ impl From<pb_rs::types::Frequency> for Label {
 
 fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> TokenStream {
     // Regular (non-oneof) fields
-    let regular_fields: Vec<Field> = m
-        .fields
-        .iter()
-        .map(|f| convert_field(f, desc))
-        .collect();
+    let regular_fields: Vec<Field> = m.fields.iter().map(|f| convert_field(f, desc)).collect();
 
     // Oneof groups
     let oneof_groups: Vec<OneOfGroup> = m
@@ -270,10 +266,7 @@ fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> To
         .collect();
 
     // All fields flattened (for the decode enum)
-    let all_fields: Vec<Field> = m
-        .all_fields()
-        .map(|f| convert_field(f, desc))
-        .collect();
+    let all_fields: Vec<Field> = m.all_fields().map(|f| convert_field(f, desc)).collect();
 
     let struct_schema = message_schema(qualified_name, &regular_fields, &oneof_groups);
     let field_enum = field_enum(qualified_name, &all_fields);
@@ -345,11 +338,7 @@ fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenS
     let field_defs = fields.iter().map(field_type);
     let oneof_defs = oneofs.iter().map(|o| {
         let field_name = format_ident!("{}", o.name);
-        let marker_name = format_ident!(
-            "{}{}",
-            name,
-            heck::AsUpperCamelCase(&o.name).to_string()
-        );
+        let marker_name = format_ident!("{}{}", name, heck::AsUpperCamelCase(&o.name).to_string());
         quote!(pub #field_name: #marker_name)
     });
     let k = format_ident!("{name}Fields");

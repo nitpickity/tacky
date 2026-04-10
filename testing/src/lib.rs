@@ -931,7 +931,9 @@ mod tests {
             match field.unwrap() {
                 ApiResponseField::RequestId(v) => request_id = Some(v),
                 ApiResponseField::Cached(v) => cached = Some(v),
-                ApiResponseField::Error(_) | ApiResponseField::Code(_) | ApiResponseField::Data(_) => {
+                ApiResponseField::Error(_)
+                | ApiResponseField::Code(_)
+                | ApiResponseField::Data(_) => {
                     got_oneof = true;
                 }
             }
