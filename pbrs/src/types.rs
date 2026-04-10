@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use crate::errors::{Error, Result};
 use crate::parser::file_descriptor;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Syntax {
     Proto2,
     Proto3,
+    Edition(String),
 }
 
 impl Default for Syntax {
@@ -51,6 +52,18 @@ impl MessageIndex {
             .expect("Message index not found")
     }
 
+    /// Compute a flattened qualified name (e.g. `OuterInner`) by walking the index path.
+    pub fn qualified_name(&self, desc: &FileDescriptor) -> String {
+        let mut name = String::new();
+        let mut current_messages = &desc.messages;
+        for &idx in &self.indexes {
+            let msg = &current_messages[idx];
+            name.push_str(&msg.name);
+            current_messages = &msg.messages;
+        }
+        name
+    }
+
     // fn get_message_mut<'a>(&self, desc: &'a mut FileDescriptor) -> &'a mut Message {
     //     let first_message = self
     //         .indexes
@@ -88,6 +101,16 @@ impl EnumIndex {
             &self.msg_index.get_message(desc).enums
         };
         enums.get(self.index).expect("Enum index not found")
+    }
+
+    /// Compute a flattened qualified name (e.g. `OuterStatus`) by walking the parent path.
+    pub fn qualified_name(&self, desc: &FileDescriptor) -> String {
+        let enum_name = &self.get_enum(desc).name;
+        if self.msg_index.indexes.is_empty() {
+            enum_name.clone()
+        } else {
+            format!("{}{}", self.msg_index.qualified_name(desc), enum_name)
+        }
     }
 }
 
@@ -528,6 +551,63 @@ impl FileDescriptor {
         Ok(())
     }
 
+    /// Reset all resolved field types (Message/Enum indices) back to unresolved
+    /// MessageOrEnum strings. This must be called on imported descriptors before
+    /// merging, because MessageIndex/EnumIndex values are local to each descriptor
+    /// and become stale after merging.
+    fn unresolve_types(&mut self) {
+        let (fwd_msgs, fwd_enums) = self.get_full_names();
+        let msg_names: HashMap<MessageIndex, String> =
+            fwd_msgs.into_iter().map(|(k, v)| (v, k)).collect();
+        let enum_names: HashMap<EnumIndex, String> =
+            fwd_enums.into_iter().map(|(k, v)| (v, k)).collect();
+
+        fn unresolve_field_type(
+            typ: &mut FieldType,
+            msg_names: &HashMap<MessageIndex, String>,
+            enum_names: &HashMap<EnumIndex, String>,
+        ) {
+            match typ {
+                FieldType::Message(idx) => {
+                    if let Some(name) = msg_names.get(idx) {
+                        *typ = FieldType::MessageOrEnum(name.clone());
+                    }
+                }
+                FieldType::Enum(idx) => {
+                    if let Some(name) = enum_names.get(idx) {
+                        *typ = FieldType::MessageOrEnum(name.clone());
+                    }
+                }
+                FieldType::Map(ref mut k, ref mut v) => {
+                    unresolve_field_type(k, msg_names, enum_names);
+                    unresolve_field_type(v, msg_names, enum_names);
+                }
+                _ => {}
+            }
+        }
+
+        fn unresolve_message(
+            m: &mut Message,
+            msg_names: &HashMap<MessageIndex, String>,
+            enum_names: &HashMap<EnumIndex, String>,
+        ) {
+            for f in m
+                .fields
+                .iter_mut()
+                .chain(m.oneofs.iter_mut().flat_map(|o| o.fields.iter_mut()))
+            {
+                unresolve_field_type(&mut f.typ, msg_names, enum_names);
+            }
+            for nested in m.messages.iter_mut() {
+                unresolve_message(nested, msg_names, enum_names);
+            }
+        }
+
+        for m in &mut self.messages {
+            unresolve_message(m, &msg_names, &enum_names);
+        }
+    }
+
     /// Get messages and enums from imports
     fn fetch_imports(&mut self, in_file: &Path, import_search_path: &[PathBuf]) -> Result<()> {
         for m in &mut self.messages {
@@ -563,6 +643,10 @@ impl FileDescriptor {
             }
             let proto_file = matching_file.unwrap();
             let mut f = FileDescriptor::read_proto(&proto_file, import_search_path)?;
+
+            // Reset resolved indices before merging — they reference the imported
+            // file's local descriptor and would be stale in the combined one.
+            f.unresolve_types();
 
             // if the proto has a packge then the names will be prefixed
             let package = f.package.clone();

@@ -5,6 +5,10 @@ mod prost_proto {
 mod tacky_proto {
     include!(concat!(env!("OUT_DIR"), "/simple.rs"));
 }
+#[allow(dead_code)]
+mod tacky_importing {
+    include!(concat!(env!("OUT_DIR"), "/importing.rs"));
+}
 
 #[cfg(test)]
 mod tests {
@@ -693,5 +697,119 @@ mod tests {
         let results: Vec<_> = truncated.collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].is_err());
+    }
+
+    // --- Nested definition tests ---
+
+    #[test]
+    fn test_nested_definitions_encode_decode() {
+        use crate::tacky_proto::example::{
+            Outer, OuterField, OuterFields, OuterInnerField, OuterStatus,
+        };
+
+        // Encode a message with nested enum and nested message fields
+        let mut buf = Vec::new();
+        let schema = Outer::default();
+        Outer {
+            status: schema.status.write(&mut buf, Some(OuterStatus::Active)),
+            inner: schema.inner.write_msg(&mut buf, |buf, scm| {
+                scm.value.write(buf, Some("nested_value"));
+                scm.num.write(buf, Some(42));
+            }),
+            name: schema.name.write(&mut buf, Some("outer_name")),
+        };
+
+        // Decode and verify
+        let mut status = None;
+        let mut inner_value = None;
+        let mut inner_num = None;
+        let mut name = None;
+
+        for field in OuterFields::new(&buf) {
+            let field = field.unwrap();
+            match field {
+                OuterField::Status(v) => status = Some(v),
+                OuterField::Inner(fields) => {
+                    for f in fields {
+                        let f = f.unwrap();
+                        match f {
+                            OuterInnerField::Value(v) => inner_value = Some(v),
+                            OuterInnerField::Num(v) => inner_num = Some(v),
+                        }
+                    }
+                }
+                OuterField::Name(v) => name = Some(v),
+            }
+        }
+
+        assert_eq!(status, Some(OuterStatus::Active));
+        assert_eq!(inner_value, Some("nested_value"));
+        assert_eq!(inner_num, Some(42));
+        assert_eq!(name, Some("outer_name"));
+
+        // Also verify prost can decode it (cross-compat)
+        use crate::prost_proto::outer;
+        let prost_decoded = crate::prost_proto::Outer::decode(&*buf).unwrap();
+        assert_eq!(prost_decoded.status, Some(outer::Status::Active.into()));
+        assert_eq!(
+            prost_decoded.inner,
+            Some(outer::Inner {
+                value: Some("nested_value".to_string()),
+                num: Some(42),
+            })
+        );
+        assert_eq!(prost_decoded.name, Some("outer_name".to_string()));
+    }
+
+    // --- Import tests ---
+
+    #[test]
+    fn test_imported_types() {
+        use crate::tacky_importing::importing::{SimpleEnum, Wrapper, WrapperField, WrapperFields};
+
+        // Encode a Wrapper message that uses imported types
+        let mut buf = Vec::new();
+        let schema = Wrapper::default();
+        Wrapper {
+            msg: schema.msg.write_msg(&mut buf, |buf, scm| {
+                scm.normal_int.write(buf, Some(99));
+                scm.astring.write(buf, Some("from_import"));
+            }),
+            status: schema.status.write(&mut buf, Some(SimpleEnum::Second)),
+            label: schema.label.write(&mut buf, Some("wrapper_label")),
+        };
+
+        // Decode and verify
+        let mut normal_int = None;
+        let mut astring = None;
+        let mut status = None;
+        let mut label = None;
+
+        for field in WrapperFields::new(&buf) {
+            let field = field.unwrap();
+            match field {
+                WrapperField::Msg(fields) => {
+                    for f in fields {
+                        let f = f.unwrap();
+                        match f {
+                            crate::tacky_importing::importing::SimpleMessageField::NormalInt(v) => {
+                                normal_int = Some(v)
+                            }
+                            crate::tacky_importing::importing::SimpleMessageField::Astring(v) => {
+                                astring = Some(v)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                WrapperField::Status(v) => status = Some(v),
+                WrapperField::Label(v) => label = Some(v),
+            }
+        }
+
+        assert_eq!(normal_int, Some(99));
+        assert_eq!(astring, Some("from_import"));
+        assert_eq!(status, Some(SimpleEnum::Second));
+        assert_eq!(label, Some("wrapper_label"));
     }
 }

@@ -128,9 +128,24 @@ fn syntax(input: &str) -> IResult<&str, Syntax> {
     )(input)
 }
 
+fn edition(input: &str) -> IResult<&str, Syntax> {
+    delimited(
+        tuple((tag("edition"), many0(br), tag("="), many0(br))),
+        map(string, |year| Syntax::Edition(year)),
+        pair(many0(br), tag(";")),
+    )(input)
+}
+
 fn import(input: &str) -> IResult<&str, PathBuf> {
     delimited(
-        pair(tag("import"), many1(br)),
+        tuple((
+            tag("import"),
+            many1(br),
+            opt(pair(
+                alt((tag("option"), tag("public"), tag("weak"))),
+                many1(br),
+            )),
+        )),
         map(string, PathBuf::from),
         pair(many0(br), tag(";")),
     )(input)
@@ -191,16 +206,26 @@ fn reserved_nums(input: &str) -> IResult<&str, Vec<i32>> {
 fn reserved_names(input: &str) -> IResult<&str, Vec<String>> {
     delimited(
         pair(tag("reserved"), many1(br)),
-        separated_list1(tuple((many0(br), tag(","), many0(br))), string),
+        separated_list1(tuple((many0(br), tag(","), many0(br))), alt((string, word))),
         pair(many0(br), tag(";")),
     )(input)
+}
+
+fn option_key(input: &str) -> IResult<&str, &str> {
+    recognize(separated_list1(
+        tag("."),
+        alt((
+            recognize(tuple((tag("("), take_until(")"), tag(")")))),
+            word_ref,
+        )),
+    ))(input)
 }
 
 fn key_val(input: &str) -> IResult<&str, (&str, &str)> {
     delimited(
         pair(tag("["), many0(br)),
         separated_pair(
-            word_ref,
+            option_key,
             delimited(many0(br), tag("="), many0(br)),
             map(take_until("]"), |v: &str| v.trim()),
         ),
@@ -214,6 +239,10 @@ fn frequency(input: &str) -> IResult<&str, ParsingStageFrequencyToken> {
         value(ParsingStageFrequencyToken::Repeated, tag("repeated")),
         value(ParsingStageFrequencyToken::Required, tag("required")),
     ))(input)
+}
+
+fn edition_frequency(input: &str) -> IResult<&str, ParsingStageFrequencyToken> {
+    value(ParsingStageFrequencyToken::Repeated, tag("repeated"))(input)
 }
 
 fn field_type(input: &str) -> IResult<&str, FieldType> {
@@ -270,6 +299,7 @@ fn default_check<'a>(
                 }
                 (Syntax::Proto2, _) => Ok(Some(v.to_owned())),
                 (Syntax::Proto3, _) => Ok(Some(v.to_owned())),
+                (Syntax::Edition(_), _) => Ok(Some(v.to_owned())),
             };
         }
     }
@@ -308,53 +338,102 @@ fn frequencies(
         }
         (Syntax::Proto3, _, Some(ParsingStageFrequencyToken::Repeated)) => Some(Frequency::Packed),
         (Syntax::Proto3, _, None) => Some(Frequency::Plain),
+
+        // Edition defaults: EXPLICIT presence (Optional), PACKED repeated
+        (Syntax::Edition(_), _, Some(ParsingStageFrequencyToken::Repeated)) => {
+            Some(Frequency::Packed)
+        }
+        (Syntax::Edition(_), _, Some(ParsingStageFrequencyToken::Optional)) => {
+            Some(Frequency::Optional)
+        }
+        (Syntax::Edition(_), _, Some(ParsingStageFrequencyToken::Required)) => {
+            panic!("Edition fields cannot have a 'required' label")
+        }
+        (Syntax::Edition(_), _, None) => Some(Frequency::Optional),
     }
 }
 
 fn field_generic(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Field> {
+    let is_edition = matches!(syntax, Syntax::Edition(_));
     move |input| -> IResult<&str, Field> {
-        map_res(
-            tuple((
-                opt(terminated(frequency, many1(br))),
-                terminated(field_type, many1(br)),
-                separated_pair(
-                    word,
-                    delimited(many0(br), tag("="), many0(br)),
-                    alt((integer, hex_integer)),
-                ),
-                delimited(many0(br), many0(key_val), pair(many0(br), tag(";"))),
-            )),
-            |(freq, typ, (name, number), key_vals)| {
-                let packed = key_vals
+        // Parse frequency label — editions only allow `repeated`
+        let (input, freq) = if is_edition {
+            opt(terminated(edition_frequency, many1(br)))(input)?
+        } else {
+            opt(terminated(frequency, many1(br)))(input)?
+        };
+        let (input, typ) = terminated(field_type, many1(br))(input)?;
+        let (input, (name, number)) = separated_pair(
+            word,
+            delimited(many0(br), tag("="), many0(br)),
+            alt((integer, hex_integer)),
+        )(input)?;
+        let (input, key_vals) =
+            delimited(many0(br), many0(key_val), pair(many0(br), tag(";")))(input)?;
+
+        let packed = key_vals
+            .iter()
+            .find_map(|&(k, v)| {
+                if k == "packed" {
+                    Some(v.parse().expect("Cannot parse Packed value"))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
+        let mut frequency = frequencies(syntax.clone(), typ.clone(), freq.clone(), packed);
+
+        // Apply field-level feature overrides for editions
+        if is_edition {
+            for &(k, v) in &key_vals {
+                match k {
+                    "features.field_presence" => {
+                        frequency = match v.trim() {
+                            "IMPLICIT" => Some(Frequency::Plain),
+                            "EXPLICIT" => Some(Frequency::Optional),
+                            "LEGACY_REQUIRED" => Some(Frequency::Required),
+                            _ => frequency,
+                        };
+                    }
+                    "features.repeated_field_encoding" => {
+                        if freq.is_some() {
+                            frequency = match v.trim() {
+                                "PACKED" => Some(Frequency::Packed),
+                                "EXPANDED" => Some(Frequency::Repeated),
+                                _ => frequency,
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let default = default_check(syntax.clone(), typ.clone(), &key_vals).map_err(|e| {
+            nom::Err::Failure(nom::error::Error::new(e, nom::error::ErrorKind::Verify))
+        })?;
+
+        Ok((
+            input,
+            Field {
+                name,
+                frequency,
+                number,
+                default,
+                typ,
+                deprecated: key_vals
                     .iter()
                     .find_map(|&(k, v)| {
-                        if k == "packed" {
-                            Some(v.parse().expect("Cannot parse Packed value"))
+                        if k == "deprecated" {
+                            Some(v.parse().expect("Cannot parse Deprecated value"))
                         } else {
                             None
                         }
                     })
-                    .unwrap_or_default();
-
-                Ok::<Field, &str>(Field {
-                    name,
-                    frequency: frequencies(syntax, typ.clone(), freq, packed),
-                    number,
-                    default: default_check(syntax, typ.clone(), &key_vals)?,
-                    typ,
-                    deprecated: key_vals
-                        .iter()
-                        .find_map(|&(k, v)| {
-                            if k == "deprecated" {
-                                Some(v.parse().expect("Cannot parse Deprecated value"))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(false),
-                })
+                    .unwrap_or(false),
             },
-        )(input)
+        ))
     }
 }
 
@@ -373,14 +452,20 @@ fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
                 preceded(pair(tag("oneof"), many1(br)), word),
                 delimited(
                     pair(many0(br), tag("{")),
-                    many1(delimited(many0(br), oneof_message_field(syntax), many0(br))),
+                    many1(delimited(
+                        many0(br),
+                        oneof_message_field(syntax.clone()),
+                        many0(br),
+                    )),
                     tag("}"),
                 ),
             ),
             |(name, mut fields)| {
                 for field in &mut fields {
                     match syntax {
-                        Syntax::Proto2 => field.frequency = Some(Frequency::Optional),
+                        Syntax::Proto2 | Syntax::Edition(_) => {
+                            field.frequency = Some(Frequency::Optional)
+                        }
                         Syntax::Proto3 => field.frequency = Some(Frequency::Plain),
                     }
                 }
@@ -447,10 +532,22 @@ fn message_event(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, MessageEve
         alt((
             map(reserved_nums, MessageEvent::ReservedNums),
             map(reserved_names, MessageEvent::ReservedNames),
-            map(message_field(syntax), MessageEvent::Field),
-            map(message(syntax), MessageEvent::Message),
-            map(enumerator, MessageEvent::Enumerator),
-            map(one_of(syntax), MessageEvent::OneOf),
+            map(message_field(syntax.clone()), MessageEvent::Field),
+            map(
+                preceded(
+                    opt(pair(alt((tag("export"), tag("local"))), many1(br))),
+                    message(syntax.clone()),
+                ),
+                MessageEvent::Message,
+            ),
+            map(
+                preceded(
+                    opt(pair(alt((tag("export"), tag("local"))), many1(br))),
+                    enumerator,
+                ),
+                MessageEvent::Enumerator,
+            ),
+            map(one_of(syntax.clone()), MessageEvent::OneOf),
             map(extensions, MessageEvent::Extensions),
             value(MessageEvent::Ignore, option_ignore),
             value(MessageEvent::Ignore, br),
@@ -464,7 +561,7 @@ fn message(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Message> {
             terminated(
                 pair(
                     delimited(pair(tag("message"), many1(br)), word, many0(br)),
-                    delimited(tag("{"), many0(message_event(syntax)), tag("}")),
+                    delimited(tag("{"), many0(message_event(syntax.clone())), tag("}")),
                 ),
                 opt(pair(many0(br), tag(";"))),
             ),
@@ -570,7 +667,11 @@ fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Extend> {
                     delimited(pair(tag("extend"), many1(br)), qualifiable_name, many0(br)),
                     delimited(
                         tag("{"),
-                        many1(delimited(many0(br), message_field(syntax), many0(br))),
+                        many1(delimited(
+                            many0(br),
+                            message_field(syntax.clone()),
+                            many0(br),
+                        )),
                         tag("}"),
                     ),
                 ),
@@ -582,9 +683,16 @@ fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Extend> {
 }
 
 fn scan_syntax(input: &str) -> IResult<&str, Syntax> {
-    map_res(separated_list0(many0(anychar), syntax), |v| {
-        Ok::<Syntax, &str>(if v.is_empty() { Syntax::Proto2 } else { v[0] })
-    })(input)
+    map_res(
+        separated_list0(many0(anychar), alt((syntax, edition))),
+        |v| {
+            Ok::<Syntax, &str>(if v.is_empty() {
+                Syntax::Proto2
+            } else {
+                v[0].clone()
+            })
+        },
+    )(input)
 }
 
 pub fn file_descriptor<'a>(
@@ -597,10 +705,23 @@ pub fn file_descriptor<'a>(
             map(
                 many0(alt((
                     map(syntax, Event::Syntax),
+                    map(edition, Event::Syntax),
                     map(import, Event::Import),
                     map(package, Event::Package),
-                    map(message(got_syntax), Event::Message),
-                    map(enumerator, Event::Enum),
+                    map(
+                        preceded(
+                            opt(pair(alt((tag("export"), tag("local"))), many1(br))),
+                            message(got_syntax.clone()),
+                        ),
+                        Event::Message,
+                    ),
+                    map(
+                        preceded(
+                            opt(pair(alt((tag("export"), tag("local"))), many1(br))),
+                            enumerator,
+                        ),
+                        Event::Enum,
+                    ),
                     map(rpc_service, Event::RpcService),
                     map(extend(got_syntax), Event::Extend),
                     value(Event::Ignore, option_ignore),
@@ -1153,7 +1274,7 @@ mod test {
         fn test_missing_tokens_message(syntax: Syntax) -> Result<(), &'static str> {
             /* Check that base case is actually correct before we start deleting tokens */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message A {
                     optional int32 a = 1;
                 }"#,
@@ -1164,7 +1285,7 @@ mod test {
 
             /* Empty message name */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message {
                     optional int32 a = 1;
                 }"#,
@@ -1175,7 +1296,7 @@ mod test {
 
             /* Empty message field name */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message A {
                     optional int32 = 1;
                 }"#,
@@ -1186,7 +1307,7 @@ mod test {
 
             /* Empty message field type */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message A {
                     optional a = 1;
                 }"#,
@@ -1260,7 +1381,7 @@ mod test {
         fn test_missing_tokens_one_of(syntax: Syntax) -> Result<(), &'static str> {
             /* Check that base case is actually correct before we start deleting tokens */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof a {
                     int32 field_a = 0;
                 }"#,
@@ -1271,7 +1392,7 @@ mod test {
 
             /* Empty oneof name */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof {
                     int32 field_a = 0;
                 }"#,
@@ -1282,7 +1403,7 @@ mod test {
 
             /* Empty oneof field name */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof a {
                     int32 = 0;
                 }"#,
@@ -1292,7 +1413,7 @@ mod test {
             )?;
             /* Empty oneof field type */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof a {
                     field_a = 0;
                 }"#,
@@ -1316,7 +1437,7 @@ mod test {
 
         // remember to actually call the test functions!
         test_syntaxes(move |syntax: Syntax| -> Result<(), &str> {
-            test_missing_tokens_message(syntax)?;
+            test_missing_tokens_message(syntax.clone())?;
             test_missing_tokens_enum()?;
             test_missing_tokens_one_of(syntax)?;
 
@@ -1393,7 +1514,7 @@ mod test {
         fn test_which_names_can_be_qualified_message(syntax: Syntax) -> Result<(), &'static str> {
             /* Check that base case is actually correct before we start qualifying names */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message A {
                     optional int32 a = 1;
                 }"#,
@@ -1404,7 +1525,7 @@ mod test {
 
             /* Message field types CAN be qualified */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message A {
                     optional Qualified.Name a = 1;
                 }"#,
@@ -1415,7 +1536,7 @@ mod test {
 
             /* Message names CANNOT be qualified */
             result_assert(
-                message(syntax)(
+                message(syntax.clone())(
                     r#"message Qualified.Name {
                     optional int32 a = 1;
                 }"#,
@@ -1478,7 +1599,7 @@ mod test {
         fn test_which_names_can_be_qualified_oneof(syntax: Syntax) -> Result<(), &'static str> {
             /* Check that base case is actually correct before we start qualifying names */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof a {
                     int32 field_name = 1;
                 }"#,
@@ -1489,7 +1610,7 @@ mod test {
 
             /* Oneof field types CAN be qualified */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof a {
                     Qualified.Name field_name = 1;
                 }"#,
@@ -1500,7 +1621,7 @@ mod test {
 
             /* Oneof names CANNOT be qualified */
             result_assert(
-                one_of(syntax)(
+                one_of(syntax.clone())(
                     r#"oneof qualified.name {
                     int32 field_name = 1;
                 }"#,
@@ -1525,7 +1646,7 @@ mod test {
 
         // remember to actually call the test functions!
         test_syntaxes(move |syntax: Syntax| -> Result<(), &str> {
-            test_which_names_can_be_qualified_message(syntax)?;
+            test_which_names_can_be_qualified_message(syntax.clone())?;
             test_which_names_can_be_qualified_enum()?;
             test_which_names_can_be_qualified_oneof(syntax)?;
 
@@ -1567,5 +1688,301 @@ mod test {
             }"#,
         );
         assert!(e.is_ok());
+    }
+
+    // ── Edition tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_edition_parser() {
+        let (rem, syn) = edition(r#"edition = "2023";"#).unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(syn, Syntax::Edition("2023".to_string()));
+
+        let (rem, syn) = edition(r#"edition = "2024";"#).unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(syn, Syntax::Edition("2024".to_string()));
+    }
+
+    #[test]
+    fn test_edition_2023_basic_file() {
+        let msg = r#"edition = "2023";
+        package test;
+        message Foo {
+            int32 bar = 1;
+            repeated int32 baz = 2;
+            string name = 3;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(desc.syntax, Syntax::Edition("2023".to_string()));
+        assert_eq!("test", desc.package);
+        assert_eq!(1, desc.messages.len());
+        let foo = &desc.messages[0];
+        assert_eq!(3, foo.fields.len());
+        // bare field -> EXPLICIT presence -> Optional
+        assert_eq!(foo.fields[0].frequency, Some(Frequency::Optional));
+        // repeated -> PACKED by default
+        assert_eq!(foo.fields[1].frequency, Some(Frequency::Packed));
+        // bare string field -> Optional
+        assert_eq!(foo.fields[2].frequency, Some(Frequency::Optional));
+    }
+
+    #[test]
+    fn test_edition_2024_basic_file() {
+        let msg = r#"edition = "2024";
+        message Bar {
+            int32 x = 1;
+            repeated int32 y = 2;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(desc.syntax, Syntax::Edition("2024".to_string()));
+        assert_eq!(1, desc.messages.len());
+        assert_eq!(
+            desc.messages[0].fields[0].frequency,
+            Some(Frequency::Optional)
+        );
+        assert_eq!(
+            desc.messages[0].fields[1].frequency,
+            Some(Frequency::Packed)
+        );
+    }
+
+    #[test]
+    fn test_edition_oneof() {
+        let msg = r#"edition = "2023";
+        message Foo {
+            oneof choice {
+                string a = 1;
+                int32 b = 2;
+            }
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let foo = &desc.messages[0];
+        assert_eq!(1, foo.oneofs.len());
+        assert_eq!(2, foo.oneofs[0].fields.len());
+        // oneof fields in editions -> Optional (EXPLICIT presence)
+        assert_eq!(foo.oneofs[0].fields[0].frequency, Some(Frequency::Optional));
+        assert_eq!(foo.oneofs[0].fields[1].frequency, Some(Frequency::Optional));
+    }
+
+    #[test]
+    fn test_edition_field_presence_overrides() {
+        let msg = r#"edition = "2023";
+        message Foo {
+            int32 explicit_field = 1;
+            int32 implicit_field = 2 [features.field_presence = IMPLICIT];
+            int32 required_field = 3 [features.field_presence = LEGACY_REQUIRED];
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let foo = &desc.messages[0];
+        assert_eq!(foo.fields[0].frequency, Some(Frequency::Optional));
+        assert_eq!(foo.fields[1].frequency, Some(Frequency::Plain));
+        assert_eq!(foo.fields[2].frequency, Some(Frequency::Required));
+    }
+
+    #[test]
+    fn test_edition_repeated_field_encoding_override() {
+        let msg = r#"edition = "2023";
+        message Foo {
+            repeated int32 packed_field = 1;
+            repeated int32 expanded_field = 2 [features.repeated_field_encoding = EXPANDED];
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let foo = &desc.messages[0];
+        assert_eq!(foo.fields[0].frequency, Some(Frequency::Packed));
+        assert_eq!(foo.fields[1].frequency, Some(Frequency::Repeated));
+    }
+
+    #[test]
+    fn test_edition_key_val_dotted() {
+        let (rem, (k, v)) = key_val("[features.field_presence = IMPLICIT]").unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(k, "features.field_presence");
+        assert_eq!(v, "IMPLICIT");
+    }
+
+    #[test]
+    fn test_edition_key_val_parenthesized() {
+        let (rem, (k, v)) = key_val("[features.(pb.cpp).string_type = STRING]").unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(k, "features.(pb.cpp).string_type");
+        assert_eq!(v, "STRING");
+    }
+
+    #[test]
+    fn test_edition_reserved_unquoted() {
+        let msg = r#"edition = "2023";
+        message Foo {
+            reserved foo, bar;
+            int32 baz = 1;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let foo = &desc.messages[0];
+        assert_eq!(
+            foo.reserved_names,
+            Some(vec!["foo".to_string(), "bar".to_string()])
+        );
+        assert_eq!(1, foo.fields.len());
+    }
+
+    #[test]
+    fn test_edition_export_local_keywords() {
+        let msg = r#"edition = "2024";
+        export message Foo {
+            int32 a = 1;
+        }
+        local message Bar {
+            int32 b = 1;
+        }
+        message Plain {
+            int32 c = 1;
+            export enum Status {
+                UNKNOWN = 0;
+                ACTIVE = 1;
+            }
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(3, desc.messages.len());
+        assert_eq!("Foo", desc.messages[0].name);
+        assert_eq!("Bar", desc.messages[1].name);
+        assert_eq!("Plain", desc.messages[2].name);
+        assert_eq!(1, desc.messages[2].enums.len());
+    }
+
+    #[test]
+    fn test_edition_import_option() {
+        let (rem, path) = import(r#"import option "some/features.proto";"#).unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(path, PathBuf::from("some/features.proto"));
+    }
+
+    #[test]
+    fn test_edition_import_public() {
+        let (rem, path) = import(r#"import public "other.proto";"#).unwrap();
+        assert_eq!(rem, "");
+        assert_eq!(path, PathBuf::from("other.proto"));
+    }
+
+    #[test]
+    fn test_edition_rejects_optional_keyword() {
+        // In editions, 'optional' is not a valid field label.
+        // The parser should not consume it as a frequency token,
+        // so 'optional' would be parsed as a type name instead,
+        // causing the overall field parse to likely fail or produce
+        // unexpected results.
+        let ed = Syntax::Edition("2023".to_string());
+        let result = message(ed)(
+            r#"message A {
+                optional int32 a = 1;
+            }"#,
+        );
+        // 'optional' is parsed as a type (MessageOrEnum), 'int32' as name,
+        // then 'a' can't match '=', so the field fails -> message has 0 fields
+        // OR the entire parse fails. Either way, we should NOT get a valid
+        // field with frequency Optional from the keyword.
+        if let Ok((_, msg)) = result {
+            // If it somehow parsed, the field should not have gotten
+            // Optional frequency from the 'optional' keyword
+            if !msg.fields.is_empty() {
+                assert_ne!(
+                    msg.fields[0].name, "a",
+                    "editions should not parse 'optional' as a frequency label"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_edition_nested_messages() {
+        let msg = r#"edition = "2023";
+        message Outer {
+            int32 id = 1;
+            message Inner {
+                string name = 1;
+                repeated int32 values = 2;
+            }
+            Inner inner = 2;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(1, desc.messages.len());
+        let outer = &desc.messages[0];
+        assert_eq!(2, outer.fields.len());
+        assert_eq!(1, outer.messages.len());
+        let inner = &outer.messages[0];
+        assert_eq!(2, inner.fields.len());
+        assert_eq!(inner.fields[0].frequency, Some(Frequency::Optional));
+        assert_eq!(inner.fields[1].frequency, Some(Frequency::Packed));
+    }
+
+    #[test]
+    fn test_edition_enum() {
+        let msg = r#"edition = "2023";
+        enum Status {
+            STATUS_UNSPECIFIED = 0;
+            STATUS_ACTIVE = 1;
+            STATUS_INACTIVE = 2;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(1, desc.enums.len());
+        assert_eq!(3, desc.enums[0].fields.len());
+    }
+
+    #[test]
+    fn test_edition_map_field() {
+        let msg = r#"edition = "2023";
+        message Foo {
+            map<string, int32> counts = 1;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let foo = &desc.messages[0];
+        assert_eq!(1, foo.fields.len());
+        assert!(matches!(foo.fields[0].typ, FieldType::Map(_, _)));
+        assert_eq!(foo.fields[0].frequency, None);
+    }
+
+    #[test]
+    fn test_edition_rpc_service() {
+        let msg = r#"edition = "2023";
+        service MyService {
+            rpc GetFoo(FooRequest) returns (FooResponse);
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(1, desc.rpc_services.len());
+        assert_eq!("MyService", desc.rpc_services[0].service_name);
+    }
+
+    #[test]
+    fn test_edition_file_level_options_ignored() {
+        let msg = r#"edition = "2023";
+        option features.field_presence = IMPLICIT;
+        option features.enum_type = CLOSED;
+        option features.utf8_validation = NONE;
+        message Foo {
+            int32 bar = 1;
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        assert_eq!(1, desc.messages.len());
+        // File-level options are silently ignored (v1 limitation);
+        // field still gets edition default (Optional/EXPLICIT)
+        assert_eq!(
+            desc.messages[0].fields[0].frequency,
+            Some(Frequency::Optional)
+        );
+    }
+
+    #[test]
+    fn test_edition_prototiller_output() {
+        // Simulates typical prototiller output from a proto2 file
+        let msg = r#"edition = "2024";
+        package com.example;
+        message Player {
+            string name = 1;
+            int32 id = 2 [features.field_presence = LEGACY_REQUIRED];
+            repeated int32 scores = 3 [features.repeated_field_encoding = EXPANDED];
+        }"#;
+        let desc = assert_desc(msg).unwrap();
+        let player = &desc.messages[0];
+        assert_eq!(player.fields[0].frequency, Some(Frequency::Optional));
+        assert_eq!(player.fields[1].frequency, Some(Frequency::Required));
+        assert_eq!(player.fields[2].frequency, Some(Frequency::Repeated));
     }
 }

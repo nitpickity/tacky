@@ -141,3 +141,19 @@ message MixedUsageMessage {
     optional bool is_test = 11;
     optional SimpleEnum status = 12;
 }
+
+// Test nested definitions
+message Outer {
+    enum Status {
+        UNKNOWN = 0;
+        ACTIVE = 1;
+        INACTIVE = 2;
+    }
+    message Inner {
+        optional string value = 1;
+        optional int32 num = 2;
+    }
+    optional Status status = 1;
+    optional Inner inner = 2;
+    optional string name = 3;
+}
