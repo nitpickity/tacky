@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package proto3test;
+
+message ScalarMessage {
+    int32 a_int32 = 1;
+    int64 a_int64 = 2;
+    uint32 a_uint32 = 3;
+    uint64 a_uint64 = 4;
+    sint32 a_sint32 = 5;
+    sint64 a_sint64 = 6;
+    bool a_bool = 7;
+    fixed32 a_fixed32 = 8;
+    fixed64 a_fixed64 = 9;
+    sfixed32 a_sfixed32 = 10;
+    sfixed64 a_sfixed64 = 11;
+    float a_float = 12;
+    double a_double = 13;
+    string a_string = 14;
+    bytes a_bytes = 15;
+}
+
+message OptionalMessage {
+    optional int32 opt_int = 1;
+    optional string opt_string = 2;
+    optional bool opt_bool = 3;
+    optional double opt_double = 4;
+    optional bytes opt_bytes = 5;
+}
+
+message RepeatedMessage {
+    repeated int32 nums = 1;
+    repeated string strings = 2;
+    repeated float floats = 3;
+    repeated double doubles = 4;
+    repeated fixed32 fix32s = 5;
+    repeated fixed64 fix64s = 6;
+    repeated sfixed32 sfix32s = 7;
+    repeated sfixed64 sfix64s = 8;
+    repeated bool bools = 9;
+    repeated sint32 snums = 10;
+    repeated uint64 unums = 11;
+    repeated bytes byte_arrays = 12;
+}
+
+enum Status {
+    UNKNOWN = 0;
+    ACTIVE = 1;
+    INACTIVE = 2;
+}
+
+message WithEnum {
+    Status status = 1;
+    repeated Status history = 2;
+}
+
+message Nested {
+    string label = 1;
+    int32 value = 2;
+}
+
+message WithNesting {
+    Nested single = 1;
+    repeated Nested many = 2;
+    string name = 3;
+}
+
+message WithMaps {
+    map<string, int32> str_int = 1;
+    map<int32, string> int_str = 2;
+    map<string, Nested> str_msg = 3;
+}
+
+message WithOneof {
+    string id = 1;
+    oneof payload {
+        string text = 2;
+        int32 number = 3;
+        Nested nested = 4;
+    }
+}

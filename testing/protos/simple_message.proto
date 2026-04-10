@@ -157,3 +157,13 @@ message Outer {
     optional Inner inner = 2;
     optional string name = 3;
 }
+
+message ApiResponse {
+    optional string request_id = 1;
+    oneof result {
+        string error = 2;
+        int32 code = 3;
+        SimpleMessage data = 4;
+    }
+    optional bool cached = 5;
+}
