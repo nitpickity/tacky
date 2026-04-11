@@ -218,6 +218,11 @@ pub struct Field {
     pub label: Label,
 }
 
+pub struct OneOfGroup {
+    pub name: String,
+    pub fields: Vec<Field>,
+}
+
 fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
     let pb_rs::types::Field {
         name,
@@ -247,70 +252,101 @@ impl From<pb_rs::types::Frequency> for Label {
 }
 
 fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> TokenStream {
-    let fields = m
-        .all_fields()
-        .map(|f| convert_field(f, desc))
-        .collect::<Vec<_>>();
+    // Regular (non-oneof) fields
+    let regular_fields: Vec<Field> = m.fields.iter().map(|f| convert_field(f, desc)).collect();
 
-    let struct_schema = message_schema(qualified_name, &fields);
-    let field_enum = field_enum(qualified_name, &fields);
+    // Oneof groups
+    let oneof_groups: Vec<OneOfGroup> = m
+        .oneofs
+        .iter()
+        .map(|o| OneOfGroup {
+            name: o.name.clone(),
+            fields: o.fields.iter().map(|f| convert_field(f, desc)).collect(),
+        })
+        .collect();
+
+    // All fields flattened (for the decode enum)
+    let all_fields: Vec<Field> = m.all_fields().map(|f| convert_field(f, desc)).collect();
+
+    let struct_schema = message_schema(qualified_name, &regular_fields, &oneof_groups);
+    let field_enum = field_enum(qualified_name, &all_fields);
+    let oneof_impls: Vec<TokenStream> = oneof_groups
+        .iter()
+        .map(|g| write_oneof(qualified_name, g))
+        .collect();
 
     quote! {
         #struct_schema
         #field_enum
+        #(#oneof_impls)*
     }
 }
 
 fn write_enum(m: &Enumerator, qualified_name: &str, _desc: &FileDescriptor) -> TokenStream {
     let name_ident = format_ident!("{qualified_name}");
 
-    let variants = m.fields.iter().map(|(field, number)| {
+    let variants = m.fields.iter().map(|(field, _number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
         quote! {
-             #field_ident = #number
+             #field_ident
         }
     });
 
-    let from_matches = m.fields.iter().map(|(field, number)| {
+    let from_i32_matches = m.fields.iter().map(|(field, number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
         quote! {
-            #number => Ok(#name_ident::#field_ident)
+            #number => #name_ident::#field_ident
+        }
+    });
+
+    let into_i32_matches = m.fields.iter().map(|(field, number)| {
+        let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
+        quote! {
+            #name_ident::#field_ident => #number
         }
     });
 
     quote! {
-        #[repr(i32)]
         #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
         pub enum #name_ident {
             #[default]
             #(#variants,)*
+            __Unrecognized(i32),
         }
 
-        impl std::convert::TryFrom<i32> for #name_ident {
-            type Error = ();
-            fn try_from(value: i32) -> Result<Self, Self::Error> {
+        impl std::convert::From<i32> for #name_ident {
+            fn from(value: i32) -> Self {
                 match value {
-                    #(#from_matches,)*
-                    _ => Err(()),
+                    #(#from_i32_matches,)*
+                    v => #name_ident::__Unrecognized(v),
                 }
             }
         }
         impl std::convert::From<#name_ident> for i32 {
             fn from(value: #name_ident) -> i32 {
-                value as i32
+                match value {
+                    #(#into_i32_matches,)*
+                    #name_ident::__Unrecognized(v) => v,
+                }
             }
         }
     }
 }
 
-fn message_schema(name: &str, fields: &[Field]) -> TokenStream {
+fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenStream {
     let name_ident = format_ident!("{name}");
     let field_defs = fields.iter().map(field_type);
+    let oneof_defs = oneofs.iter().map(|o| {
+        let field_name = format_ident!("{}", o.name);
+        let marker_name = format_ident!("{}{}", name, heck::AsUpperCamelCase(&o.name).to_string());
+        quote!(pub #field_name: #marker_name)
+    });
     let k = format_ident!("{name}Fields");
     quote! {
         #[derive(Default, Debug, Copy, Clone)]
         pub struct #name_ident {
             #(#field_defs,)*
+            #(#oneof_defs,)*
         }
         impl MessageSchema for #name_ident {}
         impl #name_ident {
@@ -320,6 +356,71 @@ fn message_schema(name: &str, fields: &[Field]) -> TokenStream {
             pub fn decode(buf: &[u8])-> #k<'_> {
                 #k::new(buf)
             }
+        }
+    }
+}
+
+fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
+    let marker_name = format_ident!(
+        "{}{}",
+        msg_name,
+        heck::AsUpperCamelCase(&group.name).to_string()
+    );
+
+    let write_methods: Vec<TokenStream> = group
+        .fields
+        .iter()
+        .map(|f| {
+            let method_name = format_ident!("write_{}", f.name);
+            let number = f.number as u32;
+
+            match &f.ty {
+                PbType::Scalar(s) => {
+                    let tacky_ty = parse_ty(s.tacky_type());
+                    quote! {
+                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<#tacky_ty>) -> Self {
+                            let t = const { EncodedTag::new(#number, <#tacky_ty as ProtobufScalar>::WIRE_TYPE) };
+                            t.write(buf);
+                            <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            Self
+                        }
+                    }
+                }
+                PbType::Enum((name, _)) => {
+                    let enum_ident = format_ident!("{}", name);
+                    quote! {
+                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
+                            let t = const { EncodedTag::new(#number, WireType::VARINT) };
+                            t.write(buf);
+                            <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            Self
+                        }
+                    }
+                }
+                PbType::Message(msg) => {
+                    let msg_ident = parse_ty(msg);
+                    let method_name = format_ident!("write_{}_msg", f.name);
+                    quote! {
+                        pub fn #method_name(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, #msg_ident)) -> Self {
+                            let t = const { EncodedTag::new(#number, WireType::LEN) };
+                            t.write(buf);
+                            let t = tack::Tack::new(buf);
+                            f(t.buffer, #msg_ident::default());
+                            Self
+                        }
+                    }
+                }
+                _ => panic!("oneof fields cannot be maps or repeated"),
+            }
+        })
+        .collect();
+
+    quote! {
+        #[derive(Default, Debug, Copy, Clone)]
+        pub struct #marker_name;
+
+        impl #marker_name {
+            #(#write_methods)*
         }
     }
 }

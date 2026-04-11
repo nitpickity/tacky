@@ -59,8 +59,11 @@ fn packed_variant_type(field: &Field) -> TokenStream {
             let ty_ident = format_ident!("{t}");
             quote!(tacky::packed::PackedIter::<'a, #ty_ident>)
         }
-        PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>),
-        _ => quote!(tacky::packed::PackedIter::<'a, Int32>),
+        PbType::Enum((name, _)) => {
+            let ident = format_ident!("{}", name);
+            quote!(tacky::packed::PackedIter::<'a, PbEnum<#ident>>)
+        }
+        _ => panic!("Only scalar and enum fields can be packed"),
     }
 }
 
@@ -125,13 +128,9 @@ fn decode_expr(field: &Field) -> TokenStream {
             PbType::Scalar(s) => scalar_decode_expr(s),
             PbType::Enum((name, _)) => {
                 let ident = format_ident!("{}", name);
-                let field_name_str = &field.name;
                 quote! {
-                    let raw = <Int32 as tacky::ProtobufScalar>::read(buf)?; // enums are always varint-encoded
-                    let val = #ident::try_from(raw).map_err(|_| tacky::DecodeError::InvalidEnumValue {
-                        field: #field_name_str,
-                        value: raw,
-                    })?;
+                    let raw = <Int32 as tacky::ProtobufScalar>::read(buf)?;
+                    let val = #ident::from(raw);
                 }
             }
             PbType::Message(nested) => {
@@ -179,7 +178,41 @@ fn packed_value_expr(field: &Field) -> TokenStream {
             let ty_ident = format_ident!("{t}");
             quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
         }
-        PbType::Enum(_) => quote!(tacky::packed::PackedIter::<'a, Int32>::new(data)),
+        PbType::Enum((name, _)) => {
+            let ident = format_ident!("{}", name);
+            quote!(tacky::packed::PackedIter::<PbEnum<#ident>>::new(data))
+        }
+        _ => panic!("Only scalar and enum fields can be packed"),
+    }
+}
+
+/// Returns (wire_type_token, scalar_type_token) for a packed field's underlying scalar.
+fn packed_scalar_info(field: &Field) -> (TokenStream, TokenStream) {
+    match &field.ty {
+        PbType::Scalar(s) => {
+            let ty_ident = format_ident!("{}", s.tacky_type());
+            (scalar_wire_type_token(s), quote!(#ty_ident))
+        }
+        PbType::Enum((name, _)) => {
+            let ident = format_ident!("{}", name);
+            (quote!(tacky::WireType::VARINT), quote!(PbEnum<#ident>))
+        }
+        _ => panic!("Only scalar and enum fields can be packed"),
+    }
+}
+
+/// PackedIter construction for the unpacked-single-element fallback path.
+/// Uses `data` as the slice name (set by caller to the consumed bytes).
+fn packed_unpacked_value_expr(field: &Field) -> TokenStream {
+    match &field.ty {
+        PbType::Scalar(s) => {
+            let ty_ident = format_ident!("{}", s.tacky_type());
+            quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
+        }
+        PbType::Enum((name, _)) => {
+            let ident = format_ident!("{}", name);
+            quote!(tacky::packed::PackedIter::<PbEnum<#ident>>::new(data))
+        }
         _ => panic!("Only scalar and enum fields can be packed"),
     }
 }
@@ -218,18 +251,44 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
             let tag = f.number as u32;
             let variant_name = format_ident!("{}", heck::AsUpperCamelCase(&f.name).to_string());
             let field_name_str = &f.name;
-            let wt = wire_type_token(f);
-            let decode = decode_expr(f);
-            let value = variant_value_expr(f);
 
-            quote! {
-                #tag => {
-                    return Some((
-                        || {
-                         tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
-                    #decode
-                    Ok(#enum_name::#variant_name(#value))
-                    })())
+            if matches!(f.label, Label::Packed) {
+                // Packed fields must accept both LEN (packed) and the scalar's
+                // native wire type (unpacked) per the protobuf spec.
+                let packed_value = packed_value_expr(f);
+                let (scalar_wt, scalar_ty) = packed_scalar_info(f);
+                let unpacked_value = packed_unpacked_value_expr(f);
+
+                quote! {
+                    #tag => {
+                        return Some((|| {
+                            if wire_type == tacky::WireType::LEN {
+                                let data = tacky::decode_len(buf)?;
+                                Ok(#enum_name::#variant_name(#packed_value))
+                            } else {
+                                tacky::check_wire_type(wire_type, #scalar_wt, #field_name_str)?;
+                                let start = *buf;
+                                <#scalar_ty as tacky::ProtobufScalar>::read(buf)?;
+                                let data = &start[..start.len() - buf.len()];
+                                Ok(#enum_name::#variant_name(#unpacked_value))
+                            }
+                        })())
+                    }
+                }
+            } else {
+                let wt = wire_type_token(f);
+                let decode = decode_expr(f);
+                let value = variant_value_expr(f);
+
+                quote! {
+                    #tag => {
+                        return Some((
+                            || {
+                             tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
+                        #decode
+                        Ok(#enum_name::#variant_name(#value))
+                        })())
+                    }
                 }
             }
         })

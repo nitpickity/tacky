@@ -20,10 +20,6 @@ macro_rules! impl_wrapped {
 }
 impl_wrapped!(Optional, Repeated, Required, Packed, Plain);
 
-/// currently Oneof fields just get flattened into the main schema, so this is unused.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub struct OneOf<O>(PhantomData<O>);
-
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
 impl<K, V> Copy for PbMap<K, V> {}
@@ -113,12 +109,16 @@ pub mod packed {
             buf: &mut Vec<u8>,
             values: impl IntoIterator<Item = V>,
         ) -> Field<N, Packed<P>> {
+            let mut iter = values.into_iter();
+            let Some(first) = iter.next() else {
+                return Field::new();
+            };
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new_with_width(buf, 2);
-            for value in values {
-                let value = value.as_scalar();
-                P::write_value(value, t.buffer);
+            P::write_value(first.as_scalar(), t.buffer);
+            for value in iter {
+                P::write_value(value.as_scalar(), t.buffer);
             }
             Field::new()
         }
@@ -133,12 +133,11 @@ pub mod packed {
             I::IntoIter: ExactSizeIterator,
         {
             let it = values.into_iter();
+            if it.len() == 0 {
+                return Field::new();
+            }
             if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
-                let count = it.len();
-                if count == 0 {
-                    return Field::new();
-                }
-                let data_len = count * fixed_size;
+                let data_len = it.len() * fixed_size;
                 let tag = const { EncodedTag::new(N, WireType::LEN) };
                 tag.write(buf);
                 write_varint(data_len as u64, buf);
@@ -343,7 +342,7 @@ pub mod maps {
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
             // len of the entry message, which is 1 (for the key) + len of the key + (0 if value is None else 1 + len of value)
-            let len = K::len(1, k) + v.map(|v| V::len(1, v)).unwrap_or(0);
+            let len = K::len(1, k) + v.map(|v| V::len(2, v)).unwrap_or(0);
             write_varint(len as u64, buf);
             let t = const { EncodedTag::new(1, K::WIRE_TYPE) };
             t.write(buf);
@@ -407,14 +406,14 @@ pub trait ProtoEncode<P: ProtobufScalar> {
     }
 }
 
-impl<T: Copy + Into<i32> + TryFrom<i32> + Default + PartialEq> ProtoEncode<PbEnum<T>> for T {
+impl<T: PbEnumType> ProtoEncode<PbEnum<T>> for T {
     #[inline]
     fn as_scalar(&self) -> <PbEnum<T> as ProtobufScalar>::RustType<'_> {
         *self
     }
 }
 
-impl<T: Copy + Into<i32> + TryFrom<i32> + Default + PartialEq> ProtoEncode<PbEnum<T>> for &T {
+impl<T: PbEnumType> ProtoEncode<PbEnum<T>> for &T {
     #[inline]
     fn as_scalar(&self) -> <PbEnum<T> as ProtobufScalar>::RustType<'_> {
         **self

@@ -1,6 +1,6 @@
 //! Protobuf scalar types (as zero-sized marker types) and their encoding/decoding logic.
 
-use std::{any::type_name, marker::PhantomData};
+use std::marker::PhantomData;
 
 use bytes::BufMut;
 
@@ -30,6 +30,9 @@ protobuf_types!(
     PbString
     PbBytes
 );
+
+pub trait PbEnumType: Copy + Into<i32> + From<i32> + Default + PartialEq {}
+impl<T: Copy + Into<i32> + From<i32> + Default + PartialEq> PbEnumType for T {}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbEnum<T>(PhantomData<T>);
@@ -83,7 +86,7 @@ impl Packable for Fixed64 {}
 impl Packable for Sfixed64 {}
 impl Packable for Double {}
 // enums are really i32s in disguise, so they can be packed too.
-impl<T: Into<i32> + TryFrom<i32> + Copy + Default + PartialEq> Packable for PbEnum<T> {}
+impl<T: PbEnumType> Packable for PbEnum<T> {}
 
 // --- impls for the scalar types ---
 impl ProtobufScalar for Int32 {
@@ -432,7 +435,7 @@ impl ProtobufScalar for PbBytes {
     }
 }
 
-impl<T: Copy + Into<i32> + TryFrom<i32> + Default + PartialEq> ProtobufScalar for PbEnum<T> {
+impl<T: PbEnumType> ProtobufScalar for PbEnum<T> {
     type RustType<'a> = T;
 
     const WIRE_TYPE: WireType = WireType::VARINT;
@@ -447,10 +450,7 @@ impl<T: Copy + Into<i32> + TryFrom<i32> + Default + PartialEq> ProtobufScalar fo
 
     fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError> {
         let n = decode_varint(buf)? as i32;
-        T::try_from(n).map_err(|_| DecodeError::InvalidEnumValue {
-            field: type_name::<T>(),
-            value: n,
-        })
+        Ok(T::from(n))
     }
 }
 // https://protobuf.dev/programming-guides/encoding/#structure
@@ -475,10 +475,6 @@ pub enum DecodeError {
         actual: WireType,
     },
     InvalidUtf8,
-    InvalidEnumValue {
-        field: &'static str,
-        value: i32,
-    },
     InvalidMapEntry,
 }
 
@@ -496,9 +492,6 @@ impl std::fmt::Display for DecodeError {
                 "wire type mismatch for field \"{field}\": expected {expected:?}, got {actual:?}"
             ),
             DecodeError::InvalidUtf8 => f.write_str("invalid UTF-8 in string field"),
-            DecodeError::InvalidEnumValue { field, value } => {
-                write!(f, "invalid enum value {value} for field \"{field}\"")
-            }
             DecodeError::InvalidMapEntry => {
                 write!(f, "invalid map entry, tag isnt 1 or 2")
             }

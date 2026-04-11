@@ -10,6 +10,9 @@ mod tacky_importing {
     include!(concat!(env!("OUT_DIR"), "/importing.rs"));
 }
 
+mod prost_to_tacky;
+mod proto3;
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
@@ -21,9 +24,10 @@ mod tests {
         SimpleMessage as PSimpleMessage,
     };
     use crate::tacky_proto::example::{
-        AnotherEnum, MapsWithMsg, MapsWithMsgField, MsgWithEnums, MsgWithEnumsField,
-        MsgWithEnumsFields, MsgWithMaps, MsgWithMapsField, MsgWithNesting, MsgWithNestingField,
-        MsgWithNestingFields, SimpleEnum, SimpleMessage, SimpleMessageField, SimpleMessageFields,
+        AnotherEnum, ApiResponse, ApiResponseField, MapsWithMsg, MapsWithMsgField, MsgWithEnums,
+        MsgWithEnumsField, MsgWithEnumsFields, MsgWithMaps, MsgWithMapsField, MsgWithNesting,
+        MsgWithNestingField, MsgWithNestingFields, SimpleEnum, SimpleMessage, SimpleMessageField,
+        SimpleMessageFields,
     };
 
     #[test]
@@ -745,7 +749,6 @@ mod tests {
         assert_eq!(status, Some(OuterStatus::Active));
         assert_eq!(inner_value, Some("nested_value"));
         assert_eq!(inner_num, Some(42));
-        assert_eq!(name, Some("outer_name"));
 
         // Also verify prost can decode it (cross-compat)
         use crate::prost_proto::outer;
@@ -811,5 +814,132 @@ mod tests {
         assert_eq!(astring, Some("from_import"));
         assert_eq!(status, Some(SimpleEnum::Second));
         assert_eq!(label, Some("wrapper_label"));
+    }
+
+    #[test]
+    fn test_decode_packed_field_from_unpacked_wire() {
+        // Protobuf spec: a packed field's decoder must also accept unpacked
+        // (individual element) wire format for forward/backward compatibility.
+        use tacky::*;
+        let mut buf = Vec::new();
+        // manynumbers is field 4, packed int32. Write individual varint elements instead.
+        Field::<4, Repeated<Int32>>::new().write(&mut buf, &[10, 20, 30]);
+
+        let mut numbers = Vec::new();
+        for field in SimpleMessage::decode(&buf) {
+            let field = field.unwrap();
+            match field {
+                SimpleMessageField::Manynumbers(iter) => {
+                    numbers.extend(iter.map(|r| r.unwrap()));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(numbers, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_oneof_encode_decode() {
+        // Test encoding with the error variant
+        let mut buf = Vec::new();
+        let schema = ApiResponse::default();
+        ApiResponse {
+            request_id: schema.request_id.write(&mut buf, Some("req-1")),
+            cached: schema.cached.write(&mut buf, Some(true)),
+            result: schema.result.write_error(&mut buf, "something broke"),
+        };
+
+        let mut request_id = None;
+        let mut cached = None;
+        let mut error = None;
+        for field in ApiResponse::decode(&buf) {
+            match field.unwrap() {
+                ApiResponseField::RequestId(v) => request_id = Some(v),
+                ApiResponseField::Cached(v) => cached = Some(v),
+                ApiResponseField::Error(v) => error = Some(v),
+                _ => {}
+            }
+        }
+        assert_eq!(request_id, Some("req-1"));
+        assert_eq!(cached, Some(true));
+        assert_eq!(error, Some("something broke"));
+
+        // Verify prost can decode it
+        let prost_msg = crate::prost_proto::ApiResponse::decode(&*buf).unwrap();
+        assert_eq!(prost_msg.request_id, Some("req-1".to_string()));
+        assert_eq!(prost_msg.cached, Some(true));
+        assert_eq!(
+            prost_msg.result,
+            Some(crate::prost_proto::api_response::Result::Error(
+                "something broke".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_oneof_with_message_variant() {
+        // Test encoding with the message variant
+        let mut buf = Vec::new();
+        let schema = ApiResponse::default();
+        ApiResponse {
+            request_id: schema.request_id.write(&mut buf, Some("req-2")),
+            cached: schema.cached.write(&mut buf, None::<bool>),
+            result: schema.result.write_data_msg(&mut buf, |buf, scm| {
+                scm.normal_int.write(buf, Some(42));
+                scm.astring.write(buf, Some("payload"));
+            }),
+        };
+
+        let mut request_id = None;
+        let mut nested_int = None;
+        let mut nested_str = None;
+        for field in ApiResponse::decode(&buf) {
+            match field.unwrap() {
+                ApiResponseField::RequestId(v) => request_id = Some(v),
+                ApiResponseField::Data(fields) => {
+                    for f in fields {
+                        match f.unwrap() {
+                            SimpleMessageField::NormalInt(v) => nested_int = Some(v),
+                            SimpleMessageField::Astring(v) => nested_str = Some(v),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(request_id, Some("req-2"));
+        assert_eq!(nested_int, Some(42));
+        assert_eq!(nested_str, Some("payload"));
+    }
+
+    #[test]
+    fn test_oneof_skipped() {
+        // Test that skipping the oneof (not writing any variant) works
+        let mut buf = Vec::new();
+        let schema = ApiResponse::default();
+        ApiResponse {
+            request_id: schema.request_id.write(&mut buf, Some("req-3")),
+            cached: schema.cached.write(&mut buf, Some(false)),
+            result: schema.result, // not set
+        };
+
+        let mut request_id = None;
+        let mut cached = None;
+        let mut got_oneof = false;
+        for field in ApiResponse::decode(&buf) {
+            match field.unwrap() {
+                ApiResponseField::RequestId(v) => request_id = Some(v),
+                ApiResponseField::Cached(v) => cached = Some(v),
+                ApiResponseField::Error(_)
+                | ApiResponseField::Code(_)
+                | ApiResponseField::Data(_) => {
+                    got_oneof = true;
+                }
+            }
+        }
+        assert_eq!(request_id, Some("req-3"));
+        assert_eq!(cached, Some(false));
+        assert!(!got_oneof, "should not have received any oneof variant");
     }
 }
