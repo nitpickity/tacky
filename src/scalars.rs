@@ -1,10 +1,14 @@
-//! Protobuf scalar types (as zero-sized marker types) and their encoding/decoding logic.
+//! Zero-sized marker types for protobuf scalars, plus wire format encoding and decoding.
+//!
+//! Each protobuf scalar type (int32, string, etc.) is represented by a ZST marker struct.
+//! These carry no data — they exist so that [`Field`](`crate::Field`) can be generic over
+//! the protobuf type and dispatch to the correct encoding at compile time via
+//! the [`ProtobufScalar`] trait.
 
 use std::marker::PhantomData;
 
 use bytes::BufMut;
 
-// The protobuf types, as ZST markers.
 macro_rules! protobuf_types {
     ($($name:ident)*) => {
         $(
@@ -31,46 +35,60 @@ protobuf_types!(
     PbBytes
 );
 
+/// Constraint for types that can be used as protobuf enums.
+/// Protobuf enums are i32 on the wire, so this requires bidirectional i32 conversion.
+/// Generated enum types implement this automatically.
 pub trait PbEnumType: Copy + Into<i32> + From<i32> + Default + PartialEq {}
 impl<T: Copy + Into<i32> + From<i32> + Default + PartialEq> PbEnumType for T {}
 
+/// ZST marker for protobuf enum fields, generic over the generated Rust enum type.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub struct PbEnum<T>(PhantomData<T>);
 
-/// encode/decode on a scalar.
+/// Defines how a protobuf scalar type is encoded and decoded on the wire.
+///
+/// Each scalar marker ([`Int32`], [`PbString`], etc.) implements this trait,
+/// mapping it to a Rust type, a wire type, and the encoding/decoding logic.
+/// This is the trait that [`Field`](`crate::Field`) dispatches on — adding a new
+/// scalar type to tacky means implementing `ProtobufScalar` for a new ZST.
 pub trait ProtobufScalar {
+    /// The Rust type this scalar maps to. Lifetime-parameterized so that
+    /// borrowed types like `&str` and `&[u8]` can be returned during decoding.
     type RustType<'a>: Copy + Default + PartialEq;
     const WIRE_TYPE: WireType;
-    /// For fixed-size wire types, the encoded size per element. None for varints.
+    /// Encoded size per element for fixed-width wire types (f32, f64, fixed32, etc.).
+    /// `None` for varints whose encoded size depends on the value.
+    /// Used by packed field `write_exact` to bypass the Tack when the total
+    /// length can be computed upfront as `count * fixed_size`.
     const FIXED_WIRE_SIZE: Option<usize> = None;
-    /// how to write the value itself.
-    /// can also be used to write the value without tag.
+    /// Writes just the value bytes (no tag). Used by [`Field`](`crate::Field`) after
+    /// writing the tag separately.
     fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut);
-
-    /// length of the value being written, exluding tag.
+    /// Encoded length of the value bytes, excluding tag.
     fn value_len(value: Self::RustType<'_>) -> usize;
-
-    /// writes the full field, tag + value
+    /// Writes a complete field (tag + value). Convenience method used by map entry encoding
+    /// where the tag isn't precomputed via [`EncodedTag`].
     fn write(field_nr: u32, value: Self::RustType<'_>, buf: &mut impl BufMut) {
         Self::write_tag(field_nr, buf);
         Self::write_value(value, buf);
     }
+    /// Reads one value from the buffer, advancing the cursor past it.
     fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError>;
-
-    /// len on the wire, tag + value;
+    /// Total wire length of a field (tag + value). Used for map entries
+    /// where the entry length must be known before writing.
     fn len(field_nr: u32, value: Self::RustType<'_>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
     }
-
-    /// writes just tag (field nr and wiretype combo)
     fn write_tag(field_nr: u32, buf: &mut impl BufMut) {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
         write_varint(tag as u64, buf)
     }
 }
 
-// Marker trait for scalars that can be packed in packed repeated fields.
+/// Marker for scalars that can appear in `packed` repeated fields.
+/// All numeric types and enums are packable. Strings and bytes are not —
+/// protobuf's wire format doesn't support packing length-delimited types.
 pub trait Packable: ProtobufScalar {}
 impl Packable for Int32 {}
 impl Packable for Sint32 {}
@@ -85,10 +103,8 @@ impl Packable for Float {}
 impl Packable for Fixed64 {}
 impl Packable for Sfixed64 {}
 impl Packable for Double {}
-// enums are really i32s in disguise, so they can be packed too.
 impl<T: PbEnumType> Packable for PbEnum<T> {}
 
-// --- impls for the scalar types ---
 impl ProtobufScalar for Int32 {
     type RustType<'a> = i32;
     const WIRE_TYPE: WireType = WireType::VARINT;
@@ -453,7 +469,11 @@ impl<T: PbEnumType> ProtobufScalar for PbEnum<T> {
         Ok(T::from(n))
     }
 }
-// https://protobuf.dev/programming-guides/encoding/#structure
+/// Protobuf wire types. The wire type tells the decoder how many bytes a field
+/// value occupies, allowing unknown fields to be skipped without understanding
+/// their schema.
+///
+/// See <https://protobuf.dev/programming-guides/encoding/#structure>.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum WireType {
@@ -507,6 +527,8 @@ impl From<core::str::Utf8Error> for DecodeError {
     }
 }
 
+/// Decodes a field key into its field number and wire type.
+/// Every protobuf field on the wire starts with this key.
 #[inline]
 pub fn decode_key(buf: &mut &[u8]) -> Result<(u32, WireType), DecodeError> {
     let v = decode_varint(buf)?;
@@ -538,7 +560,9 @@ pub fn check_wire_type(
     Ok(())
 }
 
-/// Skip an unknown field value based on wire type.
+/// Advances the cursor past an unknown field value based on its wire type.
+/// Used by generated deserializers to skip fields not recognized by the schema,
+/// enabling forward compatibility.
 #[cold]
 pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeError> {
     match wire_type {
@@ -673,12 +697,15 @@ mod tests {
     }
 }
 
-/// Precomputed varint-encoded tag (field number + wire type).
-/// Since field numbers are typically small (1-2 bytes encoded), this avoids
-/// running the varint encoding loop on every element in a repeated field.
+/// A field tag (field number + wire type) pre-encoded as varint bytes.
+///
+/// Used via `const { EncodedTag::new(N, P::WIRE_TYPE) }` in generated code so
+/// the varint encoding happens at compile time. At runtime, writing a tag is
+/// just a memcpy of 1-2 bytes. This matters in tight loops over repeated fields
+/// where the tag is written once per element.
 pub struct EncodedTag {
-    pub bytes: [u8; 5], // max 5 bytes for a 32-bit tag varint
-    pub len: u8,
+    bytes: [u8; 5],
+    len: u8,
 }
 
 impl EncodedTag {
@@ -709,7 +736,9 @@ impl EncodedTag {
     }
 }
 
-/// Decode a length-delimited field, returning a sub-slice of the input.
+/// Reads a length prefix and returns that many bytes as a sub-slice, advancing the cursor.
+/// This is the building block for decoding strings, bytes, nested messages, packed fields,
+/// and map entries — anything with wire type LEN.
 #[inline]
 pub fn decode_len<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
     let len = decode_varint(buf)? as usize;

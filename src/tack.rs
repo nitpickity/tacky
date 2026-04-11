@@ -1,20 +1,40 @@
-//! A Tack marks the start of a as-of-yet unknown length delimited quantity.
-//! upon creation, it writes a (configurable) fixed width length field.
-//! Once this struct Drop's, it goes back and updates the length field with however much was written to the buffer in the mean time.
-//! Since the length field is fixed width (by default 3 bytes, which allows for messages of size ~2Mb.) it can in theory overflow.
-//! if that happens, the Tack will reallocate the buffer to make room for a larger length field, and shift the data over to make room for it, before writing the length.
-//! The caller is responsible for writing the tag before creating the Tack.
+//! Single-pass length encoding for protobuf's length-delimited fields.
+//!
+//! Protobuf requires the byte length of nested messages and packed repeated fields
+//! to appear *before* their contents. The standard approach is two passes: iterate
+//! to compute the length, then iterate again to write. Tack avoids this by writing
+//! a fixed-width placeholder varint, letting the caller write data past it, then
+//! patching the real length on [`Drop`].
 
 use crate::scalars::{self, encoded_len_varint};
 use bytes::BufMut;
-/// A Tack marks the start of a as-of-yet unknown length delimited quantity.
+
+/// Marks the start of a length-delimited section whose size isn't known yet.
+///
+/// On creation, writes a fixed-width placeholder varint (default 3 bytes, ~2MB max).
+/// The caller writes data into [`Tack::buffer`]. On drop, the placeholder is overwritten
+/// with the actual length. If the data exceeds the placeholder's capacity, the buffer
+/// is expanded and data shifted — correct but slow, and marked `#[cold]`.
+///
+/// The caller is responsible for writing the field tag before creating the Tack.
 #[must_use]
 pub struct Tack<'b> {
+    /// The buffer being written to. Exposed so callers (like `write_msg` closures)
+    /// can write nested data through the Tack's borrow, which also prevents
+    /// accidental writes to the outer buffer while the Tack is active.
     pub buffer: &'b mut Vec<u8>,
+    /// Byte position in the buffer immediately after the placeholder.
+    /// `buffer.len() - start` gives the data length when closing.
     start: u32,
+    /// Number of bytes reserved for the length varint.
+    /// 2 bytes = ~16KB, 3 bytes = ~2MB.
     width: u32,
 }
 
+/// Writes a varint padded to exactly `width` bytes using continuation bits.
+/// This produces a valid varint that decodes to `value`, but always occupies
+/// the specified number of bytes — needed so the placeholder can be overwritten
+/// in-place without shifting data.
 pub fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
     assert!(width <= 5 && width > 0);
     assert!(value < 2u64.pow(7 * width as u32));
@@ -29,14 +49,14 @@ pub fn write_wide_varint(width: usize, value: u64, buf: &mut impl BufMut) {
 }
 
 impl<'b> Tack<'b> {
-    /// Creates a new tack, which marks the start of a length-delimited section of TBD length.
-    /// The caller must write the tag before creating the Tack.
-    /// Defaults to 3 bytes width for the length field (~2Mb max).
+    /// Creates a new Tack with a 3-byte placeholder (~2MB max).
+    /// Used for nested messages. The caller must write the field tag first.
     pub fn new(buffer: &'b mut Vec<u8>) -> Self {
         Self::new_with_width(buffer, 3)
     }
+    /// Creates a new Tack with a custom placeholder width.
+    /// Used for packed fields and map entries (width=2, ~16KB max).
     pub fn new_with_width(buffer: &'b mut Vec<u8>, width: u32) -> Self {
-        // since we dont know the length yet, we write a prelim <width> bytes wide varint, and fix it later
         write_wide_varint(width as usize, 0, buffer);
 
         Tack {

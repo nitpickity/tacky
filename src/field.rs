@@ -1,4 +1,12 @@
-//! Base module providing tools for working with protobuf scalars and maps where fields are scalars.
+//! Field schema types and their serialization/deserialization logic.
+//!
+//! A protobuf field is represented as `Field<N, Label<Scalar>>` where:
+//! - `N` is the field number (const generic, known at compile time)
+//! - `Label` is one of [`Optional`], [`Repeated`], [`Packed`], [`Required`], [`Plain`], or [`PbMap`]
+//! - `Scalar` is a marker type from [`scalars`](`crate::scalars`) or a [`MessageSchema`] implementor
+//!
+//! All of these are zero-sized. A generated message schema struct composed entirely
+//! of `Field` types has `size_of::<T>() == 0`.
 
 use bytes::Buf;
 
@@ -18,10 +26,24 @@ macro_rules! impl_wrapped {
         )*
     };
 }
+
+// Field label types — all zero-sized wrappers over PhantomData.
+//
+// - Optional<P>: present or absent. Takes Option<V>, skips the field if None.
+//   Used for proto2 `optional` and proto3 explicit `optional`.
+// - Repeated<P>: unpacked repeated field. Takes IntoIterator<Item=V>, writes each
+//   element with its own tag. Used for length-delimited types that can't be packed.
+// - Required<P>: always written. Takes a bare value. Proto2 `required` fields.
+// - Packed<P>: packed repeated field. Writes all elements under a single
+//   length-delimited tag. More compact for numeric types.
+// - Plain<P>: implicit presence (proto3 default). Skips the field if the value
+//   equals the type's default (0, false, empty string, etc.).
 impl_wrapped!(Optional, Repeated, Required, Packed, Plain);
 
+/// Map field type, generic over key and value scalar types.
+/// On the wire, each map entry is a length-delimited message with field 1 = key, field 2 = value.
 #[derive(Debug, PartialEq, Eq, Default)]
-pub struct PbMap<K, V>(PhantomData<(K, V)>); // Map<PbString,Int32>
+pub struct PbMap<K, V>(PhantomData<(K, V)>);
 impl<K, V> Copy for PbMap<K, V> {}
 impl<K, V> Clone for PbMap<K, V> {
     fn clone(&self) -> Self {
@@ -29,9 +51,14 @@ impl<K, V> Clone for PbMap<K, V> {
     }
 }
 
-//field labels/modifiers that can be applied to the above (except maps and oneOfs)
-
-/// a complete field in a message, field number and type
+/// A single field in a protobuf message schema.
+///
+/// `N` is the field number and `P` is the field type (label + scalar, e.g. `Optional<Int32>`).
+/// Both are compile-time information — `Field` is zero-sized and carries no runtime data.
+///
+/// `.write()` consumes and returns `self`, which enables the exhaustiveness pattern:
+/// the return value can be assigned back into a struct literal for compile-time
+/// completeness checking, while the actual serialization happens as a side effect.
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct Field<const N: u32, P>(PhantomData<P>);
 impl<const N: u32, P> Field<N, P> {
@@ -43,6 +70,7 @@ impl<const N: u32, P> Field<N, P> {
 pub mod optional {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
+        /// Writes the field if `value` is `Some`, skips it if `None`.
         pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: Option<V>) -> Self {
             if let Some(value) = value {
                 let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
@@ -54,6 +82,9 @@ pub mod optional {
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Optional<M>> {
+        /// Writes a nested message field. The closure receives the buffer (through the
+        /// Tack's borrow) and a default schema instance for the nested message.
+        /// The length prefix is patched automatically when the closure returns.
         pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
@@ -67,6 +98,7 @@ pub mod optional {
 pub mod repeated {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Repeated<P>> {
+        /// Writes each element with its own tag. For non-packed repeated fields.
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
@@ -80,6 +112,8 @@ pub mod repeated {
             }
             Field::new()
         }
+        /// Writes a single element to a repeated field. Convenience for appending
+        /// one value without wrapping it in an iterator.
         #[inline]
         pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
@@ -90,6 +124,8 @@ pub mod repeated {
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
+        /// Writes one nested message to a repeated message field. Call multiple times
+        /// to write multiple messages — each call produces one entry.
         pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
@@ -103,6 +139,9 @@ pub mod repeated {
 pub mod packed {
     use super::*;
     impl<const N: u32, P: Packable> Field<N, Packed<P>> {
+        /// Writes all elements under a single length-delimited tag.
+        /// Uses a [`Tack`] with width 2 (~16KB) to avoid a two-pass length calculation.
+        /// Skips the field entirely if the iterator is empty.
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
@@ -123,9 +162,10 @@ pub mod packed {
             Field::new()
         }
 
-        /// Like `write`, but requires an ExactSizeIterator. For fixed-size types (float, double,
-        /// fixed32, fixed64, sfixed32, sfixed64), this bypasses the Tack and writes the length
-        /// prefix directly, which is significantly faster.
+        /// Like `write`, but requires an `ExactSizeIterator`. For fixed-size types (float, double,
+        /// fixed32, etc.), this bypasses the Tack entirely and writes the length prefix
+        /// directly since `count * fixed_size` gives the exact byte length upfront.
+        /// For varint types, falls back to the Tack since encoded size depends on values.
         #[inline]
         pub fn write_exact<I>(self, buf: &mut Vec<u8>, values: I) -> Field<N, Packed<P>>
         where
@@ -156,6 +196,9 @@ pub mod packed {
             Field::new()
         }
     }
+    /// Iterator over values in a packed repeated field during deserialization.
+    /// Yields one decoded scalar per call to `next()`. Borrows the packed
+    /// byte slice — no allocation needed.
     #[derive(Debug, Copy, Clone, PartialEq)]
     pub struct PackedIter<'a, T: Packable> {
         buf: &'a [u8],
@@ -221,6 +264,8 @@ pub mod plain {
     use super::*;
 
     impl<const N: u32, P: ProtobufScalar> Field<N, Plain<P>> {
+        /// Writes the field only if the value differs from the protobuf default
+        /// (0, false, empty string, etc.). This is proto3's implicit presence behavior.
         pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Field<N, Plain<P>> {
             if value.is_default() {
                 return Field::new();
@@ -253,6 +298,8 @@ impl<K, V> PbMap<K, V> {
 }
 
 impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
+    /// Decodes a map entry where the value is a nested message.
+    /// The decoder closure receives the raw message bytes and returns the parsed result.
     pub fn read_msg<'a, T>(
         buf: &mut &'a [u8],
         decoder: impl Fn(&'a [u8]) -> T,
@@ -283,16 +330,17 @@ impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
     }
 }
 impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
+    /// Decodes a single map entry into `(key, Option<value>)`.
+    ///
+    /// The value is `Option` because protobuf allows entries with a key but no value
+    /// (proto3 treats this as the default value; tacky surfaces the absence explicitly).
+    /// A missing key is an error since there's no meaningful default for map keys.
     pub fn read<'a>(
         buf: &mut &'a [u8],
     ) -> Result<(K::RustType<'a>, Option<V::RustType<'a>>), DecodeError> {
         let mut key = None;
         let mut val = None;
         let mut entry_buf = decode_len(buf)?;
-        // we expect exactly two fields, with tags 1 and 2, but protobuf doesnt enforce any order, so we loop until we find both or run out of data.
-        // maps are technically {optional X key = 1; optional Y value = 2}, so we would have to handle the case where they can be missing
-        // the official docs do cover the "key present, value missing" case. the "value present, key missing" case seems to be silently regarded as an error.
-        // in proto3 this would return the defaults. here return with explicit presence, codegen can decide how to handle that.
         while entry_buf.has_remaining() {
             match decode_key(&mut entry_buf)? {
                 (1, wt) => {
@@ -318,6 +366,8 @@ impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
 pub mod maps {
     use super::*;
     impl<const N: u32, K: ProtobufScalar, V: ProtobufScalar> Field<N, PbMap<K, V>> {
+        /// Writes all key-value pairs from an iterator. Accepts anything that yields
+        /// pairs of encodable types — `HashMap`, `BTreeMap`, arrays of tuples, etc.
         pub fn write<I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
             buf: &mut Vec<u8>,
@@ -328,7 +378,8 @@ pub mod maps {
             }
             Field::new()
         }
-        // writing {key; none} is useful as a way to delete entries in an update message
+        /// Writes a single map entry. The value is `Option` so that key-only entries
+        /// can represent deletions in update messages.
         pub fn write_entry<A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
             buf: &mut Vec<u8>,
@@ -357,6 +408,7 @@ pub mod maps {
         }
     }
     impl<const N: u32, K: ProtobufScalar, M: MessageSchema> Field<N, PbMap<K, M>> {
+        /// Writes a map entry where the value is a nested message, written via closure.
         pub fn write_msg<A: ProtoEncode<K>>(
             self,
             buf: &mut Vec<u8>,
@@ -380,26 +432,32 @@ pub mod maps {
     }
 }
 
-// Marker trait for a protobuf schema generated by tacky-build
+/// Marker trait for generated message schema types. Implemented by `tacky-build`
+/// on every generated schema struct. Used as a bound on `Field`'s `write_msg`
+/// methods to distinguish nested message fields from scalar fields.
 pub trait MessageSchema: Default {}
 
-/// Trait for allowing a wide array of types to be encoded as protobuf scalars
-/// if you have a custom type that you want to be able to write as a protobuf scalar, implement this trait for it.
-/// if you can implement as_scalar, everything works as expected.
-/// if you cant implement as_scalar, you can still implement encode directly, at the cost of being unable to Packed<your type> fields.
+/// Bridges domain types to protobuf scalars for serialization.
+///
+/// Implement this for your own types to make them directly writable through tacky.
+/// For example, a `UserId(u64)` could implement `ProtoEncode<Uint64>` by returning
+/// the inner value from `as_scalar()`.
+///
+/// The default implementations cover the standard Rust primitives: `i32` encodes as
+/// `Int32`/`Sint32`/`Sfixed32`, anything `AsRef<str>` encodes as `PbString`, etc.
 pub trait ProtoEncode<P: ProtobufScalar> {
-    /// this should return the value to be encoded as a protobuf scalar, which will then be passed to the appropriate write_value function for the scalar type.
-    /// if your type can be converted to the protobuf scalar type, this is straightforward.
-    /// if not, you can implement encode directly, but you wont be able to use Packed<your type> fields, since those rely on as_scalar for calculating the length of the packed field.
-    /// in that case, leave this as unimplemented!()
+    /// Returns the value as the protobuf scalar's Rust type for encoding.
+    /// Must be implemented. Packed fields rely on this to compute element sizes.
     fn as_scalar(&self) -> P::RustType<'_>;
-    /// checks if a field is equal to its protobuf default value.
-    /// used to skip writing default values when using the Plain field modifier.
+    /// Returns true if this value equals the protobuf default.
+    /// Used by [`Plain`] fields to skip writing default values (proto3 semantics).
     fn is_default(&self) -> bool {
         self.as_scalar() == P::RustType::default()
     }
-    /// default implementation of encode, which works for all types that can be converted to protobuf scalars.
-    /// if your type cant be converted to the protobuf scalar type, you can implement encode directly.
+    /// Writes the encoded value to the buffer. The default implementation calls
+    /// `as_scalar()` and delegates to `P::write_value`. Override this directly
+    /// if your type can't cheaply produce the scalar's Rust type — but note that
+    /// packed fields won't work without `as_scalar()`.
     fn encode(buf: &mut Vec<u8>, value: &Self) {
         let value = value.as_scalar();
         P::write_value(value, buf);
