@@ -662,9 +662,6 @@ dependencies = [
 [[package]]
 name = "tacky"
 version = "0.3.0"
-dependencies = [
- "bytes",
-]
 
 [[package]]
 name = "tacky-build"
