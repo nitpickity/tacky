@@ -9,6 +9,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
       - name: Run benchmarks
         run: cargo bench -p testing 2>&1 | tee bench_output.txt
       - uses: actions/upload-artifact@v4
