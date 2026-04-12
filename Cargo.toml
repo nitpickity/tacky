@@ -9,5 +9,8 @@ edition = "2021"
 members = ["tacky-build", "testing", "pbrs"]
 
 
+[features]
+default = ["alloc"]
+alloc = []
+
 [dependencies]
-bytes = "1"

@@ -5,9 +5,9 @@
 //! the protobuf type and dispatch to the correct encoding at compile time via
 //! the [`ProtobufScalar`] trait.
 
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
-use bytes::BufMut;
+use crate::WriteBuf;
 
 macro_rules! protobuf_types {
     ($($name:ident)*) => {
@@ -63,12 +63,12 @@ pub trait ProtobufScalar {
     const FIXED_WIRE_SIZE: Option<usize> = None;
     /// Writes just the value bytes (no tag). Used by [`Field`](`crate::Field`) after
     /// writing the tag separately.
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut);
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf);
     /// Encoded length of the value bytes, excluding tag.
     fn value_len(value: Self::RustType<'_>) -> usize;
     /// Writes a complete field (tag + value). Convenience method used by map entry encoding
     /// where the tag isn't precomputed via [`EncodedTag`].
-    fn write(field_nr: u32, value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write(field_nr: u32, value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         Self::write_tag(field_nr, buf);
         Self::write_value(value, buf);
     }
@@ -80,7 +80,7 @@ pub trait ProtobufScalar {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
     }
-    fn write_tag(field_nr: u32, buf: &mut impl BufMut) {
+    fn write_tag(field_nr: u32, buf: &mut impl WriteBuf) {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
         write_varint(tag as u64, buf)
     }
@@ -110,7 +110,7 @@ impl ProtobufScalar for Int32 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value as u64, buf);
     }
 
@@ -131,7 +131,7 @@ impl ProtobufScalar for Sint32 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(((value << 1) ^ (value >> 31)) as u32 as u64, buf);
     }
 
@@ -152,7 +152,7 @@ impl ProtobufScalar for Int64 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value as u64, buf);
     }
 
@@ -173,7 +173,7 @@ impl ProtobufScalar for Sint64 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(((value << 1) ^ (value >> 63)) as u64, buf);
     }
 
@@ -194,7 +194,7 @@ impl ProtobufScalar for Uint32 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value as u64, buf);
     }
 
@@ -215,7 +215,7 @@ impl ProtobufScalar for Uint64 {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value, buf);
     }
 
@@ -235,7 +235,7 @@ impl ProtobufScalar for Bool {
     const WIRE_TYPE: WireType = WireType::VARINT;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_u8(value as u8);
     }
 
@@ -257,7 +257,7 @@ impl ProtobufScalar for Fixed32 {
     const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_u32_le(value);
     }
 
@@ -283,7 +283,7 @@ impl ProtobufScalar for Sfixed32 {
     const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_i32_le(value);
     }
 
@@ -309,7 +309,7 @@ impl ProtobufScalar for Float {
     const FIXED_WIRE_SIZE: Option<usize> = Some(4);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_f32_le(value);
     }
 
@@ -335,7 +335,7 @@ impl ProtobufScalar for Fixed64 {
     const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_u64_le(value);
     }
 
@@ -361,7 +361,7 @@ impl ProtobufScalar for Sfixed64 {
     const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_i64_le(value);
     }
 
@@ -387,7 +387,7 @@ impl ProtobufScalar for Double {
     const FIXED_WIRE_SIZE: Option<usize> = Some(8);
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         buf.put_f64_le(value);
     }
 
@@ -412,9 +412,9 @@ impl ProtobufScalar for PbString {
     const WIRE_TYPE: WireType = WireType::LEN;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value.len() as u64, buf);
-        buf.put(value.as_bytes());
+        buf.put_slice(value.as_bytes());
     }
 
     #[inline]
@@ -425,7 +425,7 @@ impl ProtobufScalar for PbString {
     #[inline]
     fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError> {
         let bytes = decode_len(buf)?;
-        let s = std::str::from_utf8(bytes)?;
+        let s = core::str::from_utf8(bytes)?;
         Ok(s)
     }
 }
@@ -435,9 +435,9 @@ impl ProtobufScalar for PbBytes {
     const WIRE_TYPE: WireType = WireType::LEN;
 
     #[inline]
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value.len() as u64, buf);
-        buf.put(value);
+        buf.put_slice(value);
     }
 
     #[inline]
@@ -456,7 +456,7 @@ impl<T: PbEnumType> ProtobufScalar for PbEnum<T> {
 
     const WIRE_TYPE: WireType = WireType::VARINT;
 
-    fn write_value(value: Self::RustType<'_>, buf: &mut impl BufMut) {
+    fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
         write_varint(value.into() as u64, buf);
     }
 
@@ -498,8 +498,8 @@ pub enum DecodeError {
     InvalidMapEntry,
 }
 
-impl std::fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             DecodeError::Truncated => f.write_str("unexpected end of input"),
             DecodeError::InvalidWireType(wt) => write!(f, "invalid wire type: {wt}"),
@@ -519,7 +519,7 @@ impl std::fmt::Display for DecodeError {
     }
 }
 
-impl std::error::Error for DecodeError {}
+impl core::error::Error for DecodeError {}
 
 impl From<core::str::Utf8Error> for DecodeError {
     fn from(_: core::str::Utf8Error) -> Self {
@@ -587,7 +587,7 @@ pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeErro
 }
 
 #[inline]
-pub fn write_varint(mut value: u64, buf: &mut impl BufMut) {
+pub fn write_varint(mut value: u64, buf: &mut impl WriteBuf) {
     loop {
         if value < 0x80 {
             buf.put_u8(value as u8);
@@ -595,6 +595,23 @@ pub fn write_varint(mut value: u64, buf: &mut impl BufMut) {
         } else {
             buf.put_u8(((value & 0x7F) | 0x80) as u8);
             value >>= 7;
+        }
+    }
+}
+
+/// Write a varint into a mutable slice. Used by Tack's overflow path to patch
+/// the length prefix in-place.
+#[inline]
+pub fn write_varint_slice(mut value: u64, buf: &mut [u8]) {
+    let mut i = 0;
+    loop {
+        if value < 0x80 {
+            buf[i] = value as u8;
+            break;
+        } else {
+            buf[i] = ((value & 0x7F) | 0x80) as u8;
+            value >>= 7;
+            i += 1;
         }
     }
 }
@@ -731,7 +748,7 @@ impl EncodedTag {
     }
 
     #[inline]
-    pub fn write(&self, buf: &mut impl BufMut) {
+    pub fn write(&self, buf: &mut impl WriteBuf) {
         buf.put_slice(&self.bytes[..self.len as usize]);
     }
 }

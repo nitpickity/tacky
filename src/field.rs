@@ -8,10 +8,9 @@
 //! All of these are zero-sized. A generated message schema struct composed entirely
 //! of `Field` types has `size_of::<T>() == 0`.
 
-use bytes::Buf;
-
+use crate::buf::WriteBuf;
 use crate::{scalars::*, tack::Tack};
-use std::marker::PhantomData;
+use core::marker::PhantomData;
 
 macro_rules! impl_wrapped {
     ($($t:ident),*) => {
@@ -71,7 +70,7 @@ pub mod optional {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
         /// Writes the field if `value` is `Some`, skips it if `None`.
-        pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: Option<V>) -> Self {
+        pub fn write<V: ProtoEncode<P>>(self, buf: &mut impl WriteBuf, value: Option<V>) -> Self {
             if let Some(value) = value {
                 let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
                 t.write(buf);
@@ -85,7 +84,7 @@ pub mod optional {
         /// Writes a nested message field. The closure receives the buffer (through the
         /// Tack's borrow) and a default schema instance for the nested message.
         /// The length prefix is patched automatically when the closure returns.
-        pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
+        pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
@@ -102,7 +101,7 @@ pub mod repeated {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut impl WriteBuf,
             values: impl IntoIterator<Item = V>,
         ) -> Field<N, Repeated<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
@@ -115,7 +114,7 @@ pub mod repeated {
         /// Writes a single element to a repeated field. Convenience for appending
         /// one value without wrapping it in an iterator.
         #[inline]
-        pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Self {
+        pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut impl WriteBuf, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             t.write(buf);
             P::write_value(value.as_scalar(), buf);
@@ -126,7 +125,7 @@ pub mod repeated {
     impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
         /// Writes one nested message to a repeated message field. Call multiple times
         /// to write multiple messages — each call produces one entry.
-        pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) -> Self {
+        pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
@@ -145,7 +144,7 @@ pub mod packed {
         #[inline]
         pub fn write<V: ProtoEncode<P>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut impl WriteBuf,
             values: impl IntoIterator<Item = V>,
         ) -> Field<N, Packed<P>> {
             let mut iter = values.into_iter();
@@ -167,7 +166,7 @@ pub mod packed {
         /// directly since `count * fixed_size` gives the exact byte length upfront.
         /// For varint types, falls back to the Tack since encoded size depends on values.
         #[inline]
-        pub fn write_exact<I>(self, buf: &mut Vec<u8>, values: I) -> Field<N, Packed<P>>
+        pub fn write_exact<I>(self, buf: &mut impl WriteBuf, values: I) -> Field<N, Packed<P>>
         where
             I: IntoIterator<Item: ProtoEncode<P>>,
             I::IntoIter: ExactSizeIterator,
@@ -235,7 +234,7 @@ pub mod required {
     impl<const N: u32, P: ProtobufScalar> Field<N, Required<P>> {
         pub fn write<V: ProtoEncode<P>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut impl WriteBuf,
             value: V,
         ) -> Field<N, Required<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
@@ -246,10 +245,10 @@ pub mod required {
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Required<M>> {
-        pub fn write_msg(
+        pub fn write_msg<B: WriteBuf>(
             self,
-            buf: &mut Vec<u8>,
-            mut func: impl FnMut(&mut Vec<u8>, M),
+            buf: &mut B,
+            mut func: impl FnMut(&mut B, M),
         ) -> Field<N, Required<M>> {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
@@ -266,7 +265,11 @@ pub mod plain {
     impl<const N: u32, P: ProtobufScalar> Field<N, Plain<P>> {
         /// Writes the field only if the value differs from the protobuf default
         /// (0, false, empty string, etc.). This is proto3's implicit presence behavior.
-        pub fn write<V: ProtoEncode<P>>(self, buf: &mut Vec<u8>, value: V) -> Field<N, Plain<P>> {
+        pub fn write<V: ProtoEncode<P>>(
+            self,
+            buf: &mut impl WriteBuf,
+            value: V,
+        ) -> Field<N, Plain<P>> {
             if value.is_default() {
                 return Field::new();
             }
@@ -277,10 +280,10 @@ pub mod plain {
         }
     }
     impl<const N: u32, M: MessageSchema> Field<N, Plain<M>> {
-        pub fn write_msg(
+        pub fn write_msg<B: WriteBuf>(
             self,
-            buf: &mut Vec<u8>,
-            mut func: impl FnMut(&mut Vec<u8>, M),
+            buf: &mut B,
+            mut func: impl FnMut(&mut B, M),
         ) -> Field<N, Plain<M>> {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
@@ -307,7 +310,7 @@ impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
         let mut key = None;
         let mut val = None;
         let mut entry_buf = decode_len(buf)?;
-        while entry_buf.has_remaining() {
+        while !entry_buf.is_empty() {
             match decode_key(&mut entry_buf)? {
                 (1, wt) => {
                     check_wire_type(wt, K::WIRE_TYPE, "key")?;
@@ -341,7 +344,7 @@ impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
         let mut key = None;
         let mut val = None;
         let mut entry_buf = decode_len(buf)?;
-        while entry_buf.has_remaining() {
+        while !entry_buf.is_empty() {
             match decode_key(&mut entry_buf)? {
                 (1, wt) => {
                     check_wire_type(wt, K::WIRE_TYPE, "key")?;
@@ -370,7 +373,7 @@ pub mod maps {
         /// pairs of encodable types — `HashMap`, `BTreeMap`, arrays of tuples, etc.
         pub fn write<I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut impl WriteBuf,
             values: I,
         ) -> Field<N, PbMap<K, V>> {
             for (k, v) in values {
@@ -382,7 +385,7 @@ pub mod maps {
         /// can represent deletions in update messages.
         pub fn write_entry<A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut impl WriteBuf,
             key: A,
             value: Option<B>,
         ) -> Field<N, PbMap<K, V>> {
@@ -392,7 +395,6 @@ pub mod maps {
 
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
-            // len of the entry message, which is 1 (for the key) + len of the key + (0 if value is None else 1 + len of value)
             let len = K::len(1, k) + v.map(|v| V::len(2, v)).unwrap_or(0);
             write_varint(len as u64, buf);
             let t = const { EncodedTag::new(1, K::WIRE_TYPE) };
@@ -409,11 +411,11 @@ pub mod maps {
     }
     impl<const N: u32, K: ProtobufScalar, M: MessageSchema> Field<N, PbMap<K, M>> {
         /// Writes a map entry where the value is a nested message, written via closure.
-        pub fn write_msg<A: ProtoEncode<K>>(
+        pub fn write_msg<B: WriteBuf, A: ProtoEncode<K>>(
             self,
-            buf: &mut Vec<u8>,
+            buf: &mut B,
             key: A,
-            mut value: impl FnMut(&mut Vec<u8>, M),
+            mut value: impl FnMut(&mut B, M),
         ) -> Field<N, PbMap<K, M>> {
             let tag = const { EncodedTag::new(N, WireType::LEN) };
             tag.write(buf);
@@ -458,7 +460,7 @@ pub trait ProtoEncode<P: ProtobufScalar> {
     /// `as_scalar()` and delegates to `P::write_value`. Override this directly
     /// if your type can't cheaply produce the scalar's Rust type — but note that
     /// packed fields won't work without `as_scalar()`.
-    fn encode(buf: &mut Vec<u8>, value: &Self) {
+    fn encode(buf: &mut impl WriteBuf, value: &Self) {
         let value = value.as_scalar();
         P::write_value(value, buf);
     }
@@ -536,7 +538,9 @@ gen_encodes!(bool => Bool);
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
+    use alloc::{string::ToString, vec, vec::Vec};
 
     #[test]
     fn test_map_int_string() {

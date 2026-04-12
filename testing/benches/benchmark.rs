@@ -39,7 +39,7 @@ fn bench_packed_repeated(c: &mut Criterion) {
             b.iter(|| {
                 let schema = TSimpleMessage::default();
                 schema.manynumbers.write(&mut buf, &manynumbers);
-                black_box(&mut buf);
+                black_box(buf.clear());
             });
             black_box(buf);
         });
@@ -69,7 +69,7 @@ fn bench_packed_repeated(c: &mut Criterion) {
             let mut buf = Vec::with_capacity(1024 * 10);
             b.iter(|| {
                 msg.encode(&mut buf).unwrap();
-                black_box(&mut buf);
+                black_box(buf.clear());
             });
             black_box(buf);
         });
@@ -93,7 +93,7 @@ fn bench_normal_repeated(c: &mut Criterion) {
             b.iter(|| {
                 let schema = TSimpleMessage::default();
                 schema.manynumbers_unpacked.write(&mut buf, &manynumbers);
-                black_box(&mut buf);
+                black_box(buf.clear());
             });
             black_box(buf);
         });
@@ -123,7 +123,7 @@ fn bench_normal_repeated(c: &mut Criterion) {
             let mut buf = Vec::with_capacity(1024 * 10);
             b.iter(|| {
                 msg.encode(&mut buf).unwrap();
-                black_box(&mut buf);
+                black_box(buf.clear());
             });
             black_box(buf);
         });
