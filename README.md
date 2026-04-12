@@ -205,9 +205,6 @@ Due to the design of the deserializer as a-field-at-a-time, it cannot automatica
 
 **OneOf is not enforced.** The serializer generates a OneOf type that groups the variants together, but nothing prevents you from writing more than one (except common sense). The deserializer flattens OneOf variants into individual fields like any other. If you need to enforce mutual exclusivity, you can implement it in your code.
 
-**Vec\<u8> only as the buffer.** Currently, the writers all expect a Vec as the buffer they write to. im hoping to generalize this to fixed arrays, slices, and maybe `BytesMut` in a future release.
-
-
 ## How It Works
 
 Tacky is built on a few ideas that work together.
