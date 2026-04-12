@@ -10,7 +10,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run benchmarks
-        run: cargo bench 2>&1 | tee bench_output.txt
+        run: cargo bench -p testing 2>&1 | tee bench_output.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results
