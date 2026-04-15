@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package accesslog;
+
+message AccessLog {
+  repeated Entry entries = 1;
+  string server_id = 2;
+  int64 batch_timestamp = 3;
+}
+
+message Entry {
+  string remote_addr = 1;
+  HttpMethod method = 2;
+  string path = 3;
+  string query = 4;
+  int32 status = 5;
+  int64 response_bytes = 6;
+  int64 duration_micros = 7;
+  string user_agent = 8;
+  string referer = 9;
+  int64 timestamp = 10;
+  string host = 11;
+  string protocol = 12;
+  repeated Header request_headers = 13;
+}
+
+message Header {
+  string name = 1;
+  string value = 2;
+}
+
+enum HttpMethod {
+  UNKNOWN = 0;
+  GET = 1;
+  POST = 2;
+  PUT = 3;
+  DELETE = 4;
+  PATCH = 5;
+  HEAD = 6;
+  OPTIONS = 7;
+}

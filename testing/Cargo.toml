@@ -16,9 +16,9 @@ tacky-build = { path = "../tacky-build" }
 criterion = "0.5"
 
 [[bench]]
-name = "benchmark"
+name = "comparison"
 harness = false
 
 [[bench]]
-name = "microbench"
+name = "regression"
 harness = false

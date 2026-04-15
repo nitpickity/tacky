@@ -216,14 +216,24 @@ pub mod packed {
     impl<'a, T: Packable> Iterator for PackedIter<'a, T> {
         type Item = Result<T::RustType<'a>, DecodeError>;
 
+        #[inline]
         fn next(&mut self) -> Option<Self::Item> {
             if self.buf.is_empty() {
                 return None;
             }
-            let mut buf = self.buf;
-            let out = T::read(&mut buf);
-            self.buf = if out.is_ok() { buf } else { &[] };
-            Some(out)
+            match T::read(&mut self.buf) {
+                Ok(v) => Some(Ok(v)),
+                Err(e) => {
+                    self.buf = &[];
+                    Some(Err(e))
+                }
+            }
+        }
+
+        #[inline]
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            // Each element is at least 1 byte.
+            (0, Some(self.buf.len()))
         }
     }
 }

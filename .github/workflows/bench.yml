@@ -12,7 +12,7 @@ jobs:
       - name: Install protoc
         run: sudo apt-get install -y protobuf-compiler
       - name: Run benchmarks
-        run: cargo bench -p testing 2>&1 | tee bench_output.txt
+        run: cargo bench -p testing --bench comparison 2>&1 | tee bench_output.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results

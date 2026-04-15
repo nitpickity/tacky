@@ -167,3 +167,15 @@ message ApiResponse {
     }
     optional bool cached = 5;
 }
+
+// Single-field messages for isolated micro-benchmarks.
+// Using dedicated messages ensures neither side pays for unrelated field checks.
+message PackedInts {
+    repeated int32 values = 1 [packed=true];
+}
+message UnpackedInts {
+    repeated int32 values = 1;
+}
+message RepeatedStrings {
+    repeated string values = 1;
+}

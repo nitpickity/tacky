@@ -1,4 +1,4 @@
-use crate::parser::{parse_ty, Field, Label, PbType, Scalar};
+use crate::parser::{field_ident, parse_ty, Field, Label, PbType, Scalar};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -10,7 +10,7 @@ pub fn field_type(field: &Field) -> TokenStream {
         label,
     } = field;
 
-    let name_ident = format_ident!("{name}");
+    let name_ident = field_ident(name);
     let number_lit = proc_macro2::Literal::u32_unsuffixed(*number as u32);
 
     let wrap_label = |l: &str| {
