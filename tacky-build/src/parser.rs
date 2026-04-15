@@ -40,6 +40,12 @@ pub fn parse_ty(s: &str) -> syn::Type {
     syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
 }
 
+/// Create an identifier that handles Rust keywords by using raw identifiers (e.g. `r#type`).
+pub fn field_ident(name: &str) -> proc_macro2::Ident {
+    syn::parse_str::<syn::Ident>(name)
+        .unwrap_or_else(|_| proc_macro2::Ident::new_raw(name, proc_macro2::Span::call_site()))
+}
+
 fn read_proto_file(file: &str, includes: &[&str]) -> Vec<FileDescriptor> {
     let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, includes).unwrap();
     let cfg = cfg.build();
@@ -189,6 +195,15 @@ impl PbType {
             PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => 2,
         }
     }
+
+    /// Whether this type is a scalar that supports packed encoding (everything except string/bytes).
+    pub fn is_packable_scalar(&self) -> bool {
+        match self {
+            PbType::Scalar(Scalar::String) | PbType::Scalar(Scalar::Bytes) => false,
+            PbType::Scalar(_) | PbType::Enum(_) => true,
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for PbType {
@@ -232,11 +247,24 @@ fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
         default,
         deprecated,
     } = field;
+    let ty = resolve_type(typ.clone(), desc);
+    let mut label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
+
+    // pb-rs's scan_syntax fails on files with leading comments, misdetecting
+    // proto3 as proto2. This causes repeated scalar fields to get Repeated
+    // instead of Packed. Fix it here using the correctly-parsed syntax.
+    if matches!(desc.syntax, pb_rs::types::Syntax::Proto3)
+        && matches!(label, Label::Repeated)
+        && ty.is_packable_scalar()
+    {
+        label = Label::Packed;
+    }
+
     Field {
         name: name.clone(),
         number: *number,
-        ty: resolve_type(typ.clone(), desc),
-        label: frequency.map(|f| f.into()).unwrap_or(Label::Plain),
+        ty,
+        label,
     }
 }
 impl From<pb_rs::types::Frequency> for Label {
@@ -432,7 +460,6 @@ pub fn write_proto(file: &str, output: &str) {
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
     let mut files = read_proto_file(file, includes);
     let test_file = files.pop().unwrap();
-    let mod_name = format_ident!("{}", test_file.package);
 
     let all_messages = collect_all_messages(&test_file.messages, "");
     let all_enums = collect_all_enums(&test_file.messages, &test_file.enums, "");
@@ -444,13 +471,26 @@ pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
         .iter()
         .map(|(e, qname)| write_enum(e, qname, &test_file));
 
+    // Build the innermost module content
+    let mut inner = quote! {
+        use ::tacky::*;
+        #(#messages)*
+        #(#enums)*
+    };
+
+    // Wrap in nested modules for dotted package names (e.g. "perftools.profiles")
+    for part in test_file.package.rsplit('.') {
+        let mod_name = format_ident!("{}", part);
+        inner = quote! {
+            pub mod #mod_name {
+                #inner
+            }
+        };
+    }
+
     let token_stream = quote! {
         #[allow(unused, dead_code)]
-        pub mod #mod_name {
-            use ::tacky::*;
-            #(#messages)*
-            #(#enums)*
-        }
+        #inner
     };
 
     // eprintln!("GENERATED CODE:\n{}", token_stream.to_string());

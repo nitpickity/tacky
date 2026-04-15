@@ -623,13 +623,118 @@ pub const fn encoded_len_varint(value: u64) -> usize {
 
 #[inline]
 pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+    let bytes = *buf;
+
+    // Fast path: single byte (field tags, small ints, bools, enums).
+    let &b = bytes.first().ok_or(DecodeError::Truncated)?;
+    if b < 0x80 {
+        *buf = &bytes[1..];
+        return Ok(b as u64);
+    }
+
+    // With ≥10 bytes remaining, every index 0..9 is provably in-bounds
+    // so the compiler eliminates per-byte bounds checks after inlining.
+    if bytes.len() >= 10 {
+        decode_varint_long(buf)
+    } else {
+        decode_varint_short(buf)
+    }
+}
+
+/// Stolen from Prost..
+/// unrolled varint decoder for the common case where ≥10 bytes remain.
+#[inline]
+fn decode_varint_long(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+    let bytes = *buf;
+
+    let mut part0: u32 = u32::from(bytes[0]) - 0x80;
+
+    let b = bytes[1];
+    part0 += u32::from(b) << 7;
+    if b < 0x80 {
+        *buf = &bytes[2..];
+        return Ok(u64::from(part0));
+    }
+    part0 -= 0x80 << 7;
+
+    let b = bytes[2];
+    part0 += u32::from(b) << 14;
+    if b < 0x80 {
+        *buf = &bytes[3..];
+        return Ok(u64::from(part0));
+    }
+    part0 -= 0x80 << 14;
+
+    let b = bytes[3];
+    part0 += u32::from(b) << 21;
+    if b < 0x80 {
+        *buf = &bytes[4..];
+        return Ok(u64::from(part0));
+    }
+    part0 -= 0x80 << 21;
+    let value = u64::from(part0);
+
+    let b = bytes[4];
+    let mut part1: u32 = u32::from(b);
+    if b < 0x80 {
+        *buf = &bytes[5..];
+        return Ok(value | u64::from(part1) << 28);
+    }
+    part1 -= 0x80;
+
+    let b = bytes[5];
+    part1 += u32::from(b) << 7;
+    if b < 0x80 {
+        *buf = &bytes[6..];
+        return Ok(value | u64::from(part1) << 28);
+    }
+    part1 -= 0x80 << 7;
+
+    let b = bytes[6];
+    part1 += u32::from(b) << 14;
+    if b < 0x80 {
+        *buf = &bytes[7..];
+        return Ok(value | u64::from(part1) << 28);
+    }
+    part1 -= 0x80 << 14;
+
+    let b = bytes[7];
+    part1 += u32::from(b) << 21;
+    if b < 0x80 {
+        *buf = &bytes[8..];
+        return Ok(value | u64::from(part1) << 28);
+    }
+    part1 -= 0x80 << 21;
+    let value = value | u64::from(part1) << 28;
+
+    let b = bytes[8];
+    let mut part2: u32 = u32::from(b);
+    if b < 0x80 {
+        *buf = &bytes[9..];
+        return Ok(value | u64::from(part2) << 56);
+    }
+    part2 -= 0x80;
+
+    let b = bytes[9];
+    part2 += u32::from(b) << 7;
+    if b >= 0x02 {
+        return Err(DecodeError::Truncated);
+    }
+
+    *buf = &bytes[10..];
+    Ok(value | u64::from(part2) << 56)
+}
+
+/// Fallback loop decoder for buffers shorter than 10 bytes.
+#[inline]
+fn decode_varint_short(buf: &mut &[u8]) -> Result<u64, DecodeError> {
+    let bytes = *buf;
     let mut result: u64 = 0;
     let mut shift = 0u32;
-    loop {
-        let &b = buf.first().ok_or(DecodeError::Truncated)?;
-        *buf = &buf[1..];
-        result |= ((b & 0x7F) as u64) << shift;
-        if b & 0x80 == 0 {
+    for (i, &b) in bytes.iter().enumerate() {
+        result |= u64::from(b & 0x7F) << shift;
+        if b < 0x80 {
+            *buf = &bytes[i + 1..];
             return Ok(result);
         }
         shift += 7;
@@ -637,6 +742,7 @@ pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
             return Err(DecodeError::Truncated);
         }
     }
+    Err(DecodeError::Truncated)
 }
 
 #[inline]

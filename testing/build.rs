@@ -14,5 +14,17 @@ fn main() {
     println!("cargo:rerun-if-changed={proto3_file}");
     tacky_build::write_proto(proto3_file, &format!("{out_dir}/proto3.rs"));
 
-    prost_build::compile_protos(&[simple_file, proto3_file], &["."]).unwrap();
+    let pprof_file = "protos/pprof.proto";
+    println!("cargo:rerun-if-changed={pprof_file}");
+    tacky_build::write_proto(pprof_file, &format!("{out_dir}/pprof.rs"));
+
+    let accesslog_file = "protos/accesslog.proto";
+    println!("cargo:rerun-if-changed={accesslog_file}");
+    tacky_build::write_proto(accesslog_file, &format!("{out_dir}/tacky_accesslog.rs"));
+
+    prost_build::compile_protos(
+        &[simple_file, proto3_file, pprof_file, accesslog_file],
+        &["."],
+    )
+    .unwrap();
 }
