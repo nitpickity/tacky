@@ -74,7 +74,7 @@ pub mod optional {
             if let Some(value) = value {
                 let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
                 t.write(buf);
-                P::write_value(value.as_scalar(), buf);
+                V::encode(buf, &value);
             }
             Field::new()
         }
@@ -107,7 +107,7 @@ pub mod repeated {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             for value in values {
                 t.write(buf);
-                P::write_value(value.as_scalar(), buf);
+                V::encode(buf, &value);
             }
             Field::new()
         }
@@ -117,7 +117,7 @@ pub mod repeated {
         pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut impl WriteBuf, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             t.write(buf);
-            P::write_value(value.as_scalar(), buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
@@ -249,7 +249,7 @@ pub mod required {
         ) -> Field<N, Required<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             t.write(buf);
-            P::write_value(value.as_scalar(), buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
@@ -285,7 +285,7 @@ pub mod plain {
             }
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
             t.write(buf);
-            P::write_value(value.as_scalar(), buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
