@@ -401,7 +401,6 @@ name = "pb-rs"
 version = "0.10.0"
 dependencies = [
  "nom",
- "walkdir",
 ]
 
 [[package]]

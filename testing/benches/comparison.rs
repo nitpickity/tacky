@@ -7,25 +7,17 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use prost::Message;
 
-#[allow(dead_code)]
+#[allow(dead_code, unused)]
 mod tacky_proto {
-    include!(concat!(env!("OUT_DIR"), "/simple.rs"));
+    include!(concat!(env!("OUT_DIR"), "/tacky/_includes.rs"));
 }
 #[allow(dead_code)]
 mod prost_proto {
     include!(concat!(env!("OUT_DIR"), "/example.rs"));
 }
 #[allow(dead_code)]
-mod tacky_pprof {
-    include!(concat!(env!("OUT_DIR"), "/pprof.rs"));
-}
-#[allow(dead_code)]
 mod prost_pprof {
     include!(concat!(env!("OUT_DIR"), "/perftools.profiles.rs"));
-}
-#[allow(dead_code)]
-mod tacky_accesslog {
-    include!(concat!(env!("OUT_DIR"), "/tacky_accesslog.rs"));
 }
 #[allow(dead_code)]
 mod prost_accesslog {
@@ -483,7 +475,7 @@ fn pprof_encode_data() -> PprofEncodeData {
 }
 
 fn tacky_encode_pprof(buf: &mut Vec<u8>, data: &PprofEncodeData) {
-    use tacky_pprof::perftools::profiles::Profile;
+    use tacky_proto::perftools::profiles::Profile;
 
     let s = Profile::default();
 
@@ -688,7 +680,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
 }
 
 fn tacky_decode_pprof_into_prost(wire: &[u8]) -> prost_pprof::Profile {
-    use tacky_pprof::perftools::profiles::{
+    use tacky_proto::perftools::profiles::{
         FunctionField, LabelField, LineField, LocationField, MappingField, Profile, ProfileField,
         SampleField, ValueTypeField,
     };
@@ -960,7 +952,7 @@ fn accesslog_encode_data() -> AccessLogEncodeData {
 }
 
 fn tacky_encode_accesslog(buf: &mut Vec<u8>, data: &AccessLogEncodeData) {
-    use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
+    use tacky_proto::accesslog::{AccessLog, HttpMethod};
 
     let s = AccessLog::default();
 
@@ -1090,7 +1082,7 @@ fn bench_encode_accesslog(c: &mut Criterion) {
 }
 
 fn tacky_decode_accesslog_into_prost(wire: &[u8]) -> prost_accesslog::AccessLog {
-    use tacky_accesslog::accesslog::{AccessLog, AccessLogField, EntryField, HeaderField};
+    use tacky_proto::accesslog::{AccessLog, AccessLogField, EntryField, HeaderField};
 
     let mut msg = prost_accesslog::AccessLog::default();
     for field in AccessLog::decode(wire) {

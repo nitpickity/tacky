@@ -2,12 +2,9 @@
 mod prost_proto {
     include!(concat!(env!("OUT_DIR"), "/example.rs"));
 }
+#[allow(dead_code, unused)]
 mod tacky_proto {
-    include!(concat!(env!("OUT_DIR"), "/simple.rs"));
-}
-#[allow(dead_code)]
-mod tacky_importing {
-    include!(concat!(env!("OUT_DIR"), "/importing.rs"));
+    include!(concat!(env!("OUT_DIR"), "/tacky/_includes.rs"));
 }
 
 mod prost_to_tacky;
@@ -708,14 +705,15 @@ mod tests {
     #[test]
     fn test_nested_definitions_encode_decode() {
         use crate::tacky_proto::example::{
-            Outer, OuterField, OuterFields, OuterInnerField, OuterStatus,
+            outer::{InnerField, Status},
+            Outer, OuterField, OuterFields,
         };
 
         // Encode a message with nested enum and nested message fields
         let mut buf = Vec::new();
         let schema = Outer::default();
         Outer {
-            status: schema.status.write(&mut buf, Some(OuterStatus::Active)),
+            status: schema.status.write(&mut buf, Some(Status::Active)),
             inner: schema.inner.write_msg(&mut buf, |buf, scm| {
                 scm.value.write(buf, Some("nested_value"));
                 scm.num.write(buf, Some(42));
@@ -737,8 +735,8 @@ mod tests {
                     for f in fields {
                         let f = f.unwrap();
                         match f {
-                            OuterInnerField::Value(v) => inner_value = Some(v),
-                            OuterInnerField::Num(v) => inner_num = Some(v),
+                            InnerField::Value(v) => inner_value = Some(v),
+                            InnerField::Num(v) => inner_num = Some(v),
                         }
                     }
                 }
@@ -746,7 +744,7 @@ mod tests {
             }
         }
 
-        assert_eq!(status, Some(OuterStatus::Active));
+        assert_eq!(status, Some(Status::Active));
         assert_eq!(inner_value, Some("nested_value"));
         assert_eq!(inner_num, Some(42));
 
@@ -768,9 +766,11 @@ mod tests {
 
     #[test]
     fn test_imported_types() {
-        use crate::tacky_importing::importing::{SimpleEnum, Wrapper, WrapperField, WrapperFields};
+        use crate::tacky_proto::example::SimpleMessageField;
+        use crate::tacky_proto::importing::{Wrapper, WrapperField, WrapperFields};
 
-        // Encode a Wrapper message that uses imported types
+        // Encode a Wrapper message that uses imported types.
+        // SimpleEnum comes from the `example` package (cross-package reference).
         let mut buf = Vec::new();
         let schema = Wrapper::default();
         Wrapper {
@@ -795,12 +795,8 @@ mod tests {
                     for f in fields {
                         let f = f.unwrap();
                         match f {
-                            crate::tacky_importing::importing::SimpleMessageField::NormalInt(v) => {
-                                normal_int = Some(v)
-                            }
-                            crate::tacky_importing::importing::SimpleMessageField::Astring(v) => {
-                                astring = Some(v)
-                            }
+                            SimpleMessageField::NormalInt(v) => normal_int = Some(v),
+                            SimpleMessageField::Astring(v) => astring = Some(v),
                             _ => {}
                         }
                     }

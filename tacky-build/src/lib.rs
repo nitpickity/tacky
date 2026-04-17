@@ -1,5 +1,4 @@
-#![allow(unused, dead_code)]
 mod field_enum;
 mod field_type;
 mod parser;
-pub use parser::{write_proto, write_proto_with_includes};
+pub use parser::{compile_protos, write_proto, write_proto_with_includes};

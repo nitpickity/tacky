@@ -5,9 +5,9 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-#[allow(dead_code)]
+#[allow(dead_code, unused)]
 mod tacky_proto {
-    include!(concat!(env!("OUT_DIR"), "/simple.rs"));
+    include!(concat!(env!("OUT_DIR"), "/tacky/_includes.rs"));
 }
 
 use tacky_proto::example::{

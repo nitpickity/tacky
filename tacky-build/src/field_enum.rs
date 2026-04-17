@@ -3,7 +3,7 @@ use core::panic;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::parser::{parse_ty, Field, Label, PbType, Scalar};
+use crate::parser::{name_tokens, parse_ty, Field, Label, PbType, Scalar};
 
 /// Whether a field's variant borrows from the input buffer (needs lifetime 'a).
 fn field_borrows(field: &Field) -> bool {
@@ -24,8 +24,8 @@ fn variant_type(field: &Field) -> TokenStream {
         _ => match &field.ty {
             PbType::Scalar(s) => scalar_variant_type(s),
             PbType::Enum((name, _)) => {
-                let ident = format_ident!("{}", name);
-                quote!(#ident)
+                let ty = name_tokens(name);
+                quote!(#ty)
             }
             PbType::Message(msg_name) => {
                 let m = parse_ty(&format!("{}Fields<'a>", msg_name));
@@ -60,8 +60,8 @@ fn packed_variant_type(field: &Field) -> TokenStream {
             quote!(tacky::packed::PackedIter::<'a, #ty_ident>)
         }
         PbType::Enum((name, _)) => {
-            let ident = format_ident!("{}", name);
-            quote!(tacky::packed::PackedIter::<'a, PbEnum<#ident>>)
+            let ty = name_tokens(name);
+            quote!(tacky::packed::PackedIter::<'a, PbEnum<#ty>>)
         }
         _ => panic!("Only scalar and enum fields can be packed"),
     }
@@ -127,16 +127,16 @@ fn decode_expr(field: &Field) -> TokenStream {
         _ => match &field.ty {
             PbType::Scalar(s) => scalar_decode_expr(s),
             PbType::Enum((name, _)) => {
-                let ident = format_ident!("{}", name);
+                let ty = name_tokens(name);
                 quote! {
                     let raw = <Int32 as tacky::ProtobufScalar>::read(buf)?;
-                    let val = #ident::from(raw);
+                    let val = #ty::from(raw);
                 }
             }
             PbType::Message(nested) => {
-                let msg_name = format_ident!("{}", nested);
+                let msg_ty = parse_ty(nested);
                 quote! {
-                    let data = #msg_name::decode(tacky::decode_len(buf)?);
+                    let data = #msg_ty::decode(tacky::decode_len(buf)?);
                 }
             }
             PbType::Map(k, m) => {
@@ -144,7 +144,7 @@ fn decode_expr(field: &Field) -> TokenStream {
                     panic!("Map value type must be a message");
                 };
                 let k = format_ident!("{}", k.tacky_type());
-                let v = format_ident!("{}", msg_name);
+                let v = parse_ty(msg_name);
 
                 quote! {
                     let data = ::tacky::PbMap::<#k, #v>::read_msg(buf, #v::decode)?;
@@ -179,8 +179,8 @@ fn packed_value_expr(field: &Field) -> TokenStream {
             quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
         }
         PbType::Enum((name, _)) => {
-            let ident = format_ident!("{}", name);
-            quote!(tacky::packed::PackedIter::<PbEnum<#ident>>::new(data))
+            let ty = name_tokens(name);
+            quote!(tacky::packed::PackedIter::<PbEnum<#ty>>::new(data))
         }
         _ => panic!("Only scalar and enum fields can be packed"),
     }
@@ -194,8 +194,8 @@ fn packed_scalar_info(field: &Field) -> (TokenStream, TokenStream) {
             (scalar_wire_type_token(s), quote!(#ty_ident))
         }
         PbType::Enum((name, _)) => {
-            let ident = format_ident!("{}", name);
-            (quote!(tacky::WireType::VARINT), quote!(PbEnum<#ident>))
+            let ty = name_tokens(name);
+            (quote!(tacky::WireType::VARINT), quote!(PbEnum<#ty>))
         }
         _ => panic!("Only scalar and enum fields can be packed"),
     }
@@ -210,8 +210,8 @@ fn packed_unpacked_value_expr(field: &Field) -> TokenStream {
             quote!(tacky::packed::PackedIter::<#ty_ident>::new(data))
         }
         PbType::Enum((name, _)) => {
-            let ident = format_ident!("{}", name);
-            quote!(tacky::packed::PackedIter::<PbEnum<#ident>>::new(data))
+            let ty = name_tokens(name);
+            quote!(tacky::packed::PackedIter::<PbEnum<#ty>>::new(data))
         }
         _ => panic!("Only scalar and enum fields can be packed"),
     }
@@ -296,10 +296,10 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
     let fields_iterator_name = format_ident!("{name}Fields");
 
-    let (lt_token, lt_name) = if needs_lifetime {
-        (quote! {<'a>}, (quote! {'a}))
+    let lt_token = if needs_lifetime {
+        quote! {<'a>}
     } else {
-        (quote! {}, quote! {})
+        quote! {}
     };
 
     quote! {

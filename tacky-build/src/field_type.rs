@@ -1,6 +1,6 @@
-use crate::parser::{field_ident, parse_ty, Field, Label, PbType, Scalar};
+use crate::parser::{field_ident, parse_ty, Field, Label, PbType};
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 pub fn field_type(field: &Field) -> TokenStream {
     let Field {

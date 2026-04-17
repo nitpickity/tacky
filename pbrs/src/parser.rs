@@ -473,7 +473,6 @@ fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
                     name,
                     fields,
                     package: "".to_string(),
-                    module: "".to_string(),
                     imported: false,
                 }
             },

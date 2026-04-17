@@ -1,40 +1,11 @@
-//! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
-//! and dont i dont to write my own (yet).
+//! Wraps pb-rs as the underlying protobuf parser. No protoc system dependency needed.
 
 use crate::{field_enum::field_enum, field_type::field_type};
-use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
+use pb_rs::types::{EnumIndex, Enumerator, FieldType, FileDescriptor, Message, MessageIndex};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::BTreeMap;
 use std::io::Write;
-
-/// Recursively collect all messages (including nested) with their qualified names.
-fn collect_all_messages<'a>(messages: &'a [Message], prefix: &str) -> Vec<(&'a Message, String)> {
-    let mut result = Vec::new();
-    for m in messages {
-        let qname = format!("{}{}", prefix, m.name);
-        result.push((m, qname.clone()));
-        result.extend(collect_all_messages(&m.messages, &qname));
-    }
-    result
-}
-
-/// Recursively collect all enums (top-level and nested inside messages) with their qualified names.
-fn collect_all_enums<'a>(
-    messages: &'a [Message],
-    enums: &'a [Enumerator],
-    prefix: &str,
-) -> Vec<(&'a Enumerator, String)> {
-    let mut result = Vec::new();
-    for e in enums {
-        let qname = format!("{}{}", prefix, e.name);
-        result.push((e, qname));
-    }
-    for m in messages {
-        let mprefix = format!("{}{}", prefix, m.name);
-        result.extend(collect_all_enums(&m.messages, &m.enums, &mprefix));
-    }
-    result
-}
 
 pub fn parse_ty(s: &str) -> syn::Type {
     syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
@@ -46,16 +17,93 @@ pub fn field_ident(name: &str) -> proc_macro2::Ident {
         .unwrap_or_else(|_| proc_macro2::Ident::new_raw(name, proc_macro2::Span::call_site()))
 }
 
-fn read_proto_file(file: &str, includes: &[&str]) -> Vec<FileDescriptor> {
-    let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, includes).unwrap();
-    let cfg = cfg.build();
-    let mut out = Vec::new();
-    for cfg in cfg {
-        let file = pb_rs::types::FileDescriptor::read_proto(&cfg.in_file, &cfg.import_search_path)
-            .unwrap();
-        out.push(file)
+/// Parse a potentially path-containing name (e.g. `"outer::Inner"`) into tokens.
+/// Simple names produce an ident, paths produce a qualified path.
+pub fn name_tokens(name: &str) -> TokenStream {
+    if name.contains("::") {
+        let ty: syn::Type = syn::parse_str(name)
+            .unwrap_or_else(|_| panic!("failed to parse name as path: {}", name));
+        quote!(#ty)
+    } else {
+        let ident = format_ident!("{}", name);
+        quote!(#ident)
     }
-    out
+}
+
+fn read_proto_file(file: &str, includes: &[&str]) -> FileDescriptor {
+    let cfg = pb_rs::ConfigBuilder::new(&[file], includes).unwrap();
+    let mut cfgs = cfg.build();
+    let cfg = cfgs.pop().unwrap();
+    pb_rs::types::FileDescriptor::read_proto(&cfg.in_file, &cfg.import_search_path).unwrap()
+}
+
+/// Compute a prost-like Rust path for a message index within a descriptor.
+/// Top-level `Foo` → `"Foo"`, nested `Outer.Inner` → `"outer::Inner"`.
+fn message_rust_path(idx: &MessageIndex, desc: &FileDescriptor) -> String {
+    let mut parts = Vec::new();
+    let mut current_messages = &desc.messages;
+    let indexes = idx.indexes();
+    for (i, &index) in indexes.iter().enumerate() {
+        let m = &current_messages[index];
+        if i < indexes.len() - 1 {
+            parts.push(heck::AsSnakeCase(&m.name).to_string());
+        } else {
+            parts.push(m.name.clone());
+        }
+        current_messages = &m.messages;
+    }
+    parts.join("::")
+}
+
+/// Compute a prost-like Rust path for an enum index within a descriptor.
+/// Top-level `Status` → `"Status"`, nested inside `Outer` → `"outer::Status"`.
+fn enum_rust_path(idx: &EnumIndex, desc: &FileDescriptor) -> String {
+    let enum_name = &idx.get_enum(desc).name;
+    let parent_indexes = idx.msg_indexes();
+    if parent_indexes.is_empty() {
+        enum_name.clone()
+    } else {
+        let mut parts = Vec::new();
+        let mut current_messages = &desc.messages;
+        for &index in parent_indexes {
+            let m = &current_messages[index];
+            parts.push(heck::AsSnakeCase(&m.name).to_string());
+            current_messages = &m.messages;
+        }
+        parts.push(enum_name.clone());
+        parts.join("::")
+    }
+}
+
+/// Given a type's package and the current (owning) package, compute the Rust
+/// module prefix needed to reach the type.  When packages match, returns "".
+/// When they differ, returns "super::<target_pkg_module_path>::".
+fn cross_package_prefix(type_package: &str, current_package: &str) -> String {
+    if type_package == current_package || type_package.is_empty() {
+        return String::new();
+    }
+    // The target type lives in a sibling package module.  From inside
+    // `mod current_pkg { ... }`, we reach sibling `mod target_pkg` via
+    // `super::target_pkg`.  For dotted packages like "perftools.profiles",
+    // the module nesting is `mod perftools { mod profiles { ... } }`, so
+    // the prefix becomes `super::perftools::profiles::`.
+    let parts: Vec<&str> = type_package.split('.').collect();
+    // How many `super::` do we need?  One to escape the current package's
+    // innermost module, then one more for each additional nesting level.
+    let current_depth = if current_package.is_empty() {
+        0
+    } else {
+        current_package.split('.').count()
+    };
+    let mut prefix = String::new();
+    for _ in 0..current_depth {
+        prefix.push_str("super::");
+    }
+    for part in &parts {
+        prefix.push_str(part);
+        prefix.push_str("::");
+    }
+    prefix
 }
 
 #[derive(Debug)]
@@ -117,21 +165,6 @@ impl Scalar {
             Scalar::Bytes => "PbBytes",
         }
     }
-
-    pub const fn wire_type(&self) -> u32 {
-        match self {
-            Scalar::Int32
-            | Scalar::Sint32
-            | Scalar::Int64
-            | Scalar::Sint64
-            | Scalar::Uint32
-            | Scalar::Uint64
-            | Scalar::Bool => 0,
-            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => 5,
-            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => 1,
-            Scalar::String | Scalar::Bytes => 2,
-        }
-    }
 }
 impl std::fmt::Display for Scalar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -142,12 +175,14 @@ impl std::fmt::Display for Scalar {
 pub enum PbType {
     Scalar(Scalar),
     Enum((String, Vec<i32>)), // name and allowed values
-    Message(String),          //name
+    Message(String),          // name (may contain :: for nested/cross-pkg types)
     SimpleMap(Scalar, Scalar),
     Map(Scalar, Box<PbType>),
 }
 
-fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
+/// Resolve a pb-rs `FieldType` to a `PbType`, with cross-package awareness.
+/// `current_package` is the file-level package of the message that owns this field.
+fn resolve_type(value: FieldType, desc: &FileDescriptor, current_package: &str) -> PbType {
     match value {
         FieldType::Int32 => PbType::Scalar(Scalar::Int32),
         FieldType::Int64 => PbType::Scalar(Scalar::Int64),
@@ -165,8 +200,8 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
         FieldType::Sfixed32 => PbType::Scalar(Scalar::Sfixed32),
         FieldType::Float => PbType::Scalar(Scalar::Float),
         FieldType::Map(k, v) => {
-            let kt: PbType = resolve_type(*k, desc);
-            let vt: PbType = resolve_type(*v, desc);
+            let kt = resolve_type(*k, desc, current_package);
+            let vt = resolve_type(*v, desc, current_package);
             match (kt, vt) {
                 (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k, v),
                 (PbType::Scalar(k), v) => PbType::Map(k, Box::new(v)),
@@ -174,28 +209,42 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
             }
         }
         FieldType::Message(m) => {
-            let name = m.qualified_name(desc);
-            PbType::Message(name)
+            let target_msg = m.get_message(desc);
+            let prefix = if target_msg.imported {
+                // Imported type — find its file-level package from its top-level
+                // ancestor's package field (top-level imported messages have
+                // package = their original file's package).
+                let top_msg = desc.messages.get(m.indexes()[0]).unwrap();
+                cross_package_prefix(&top_msg.package, current_package)
+            } else {
+                String::new()
+            };
+            let local_path = message_rust_path(&m, desc);
+            PbType::Message(format!("{}{}", prefix, local_path))
         }
         FieldType::Enum(e) => {
-            let name = e.qualified_name(desc);
-            let enum_data = e.get_enum(desc);
-            let values = enum_data.fields.iter().map(|(_, v)| *v).collect();
+            let target_enum = e.get_enum(desc);
+            let prefix = if target_enum.imported {
+                let parent_indexes = e.msg_indexes();
+                let target_file_pkg = if parent_indexes.is_empty() {
+                    target_enum.package.clone()
+                } else {
+                    desc.messages[parent_indexes[0]].package.clone()
+                };
+                cross_package_prefix(&target_file_pkg, current_package)
+            } else {
+                String::new()
+            };
+            let local_path = enum_rust_path(&e, desc);
+            let name = format!("{}{}", prefix, local_path);
+            let values = target_enum.fields.iter().map(|(_, v)| *v).collect();
             PbType::Enum((name, values))
         }
-        FieldType::MessageOrEnum(s) => unreachable!(),
+        FieldType::MessageOrEnum(_) => unreachable!(),
     }
 }
 
 impl PbType {
-    pub const fn wire_type(&self) -> u32 {
-        match self {
-            PbType::Scalar(s) => s.wire_type(),
-            PbType::Enum(_) => 0, //varint
-            PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => 2,
-        }
-    }
-
     /// Whether this type is a scalar that supports packed encoding (everything except string/bytes).
     pub fn is_packable_scalar(&self) -> bool {
         match self {
@@ -238,16 +287,19 @@ pub struct OneOfGroup {
     pub fields: Vec<Field>,
 }
 
-fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
+fn convert_field(
+    field: &pb_rs::types::Field,
+    desc: &FileDescriptor,
+    current_package: &str,
+) -> Field {
     let pb_rs::types::Field {
         name,
         frequency,
         typ,
         number,
-        default,
-        deprecated,
+        ..
     } = field;
-    let ty = resolve_type(typ.clone(), desc);
+    let ty = resolve_type(typ.clone(), desc, current_package);
     let mut label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
 
     // pb-rs's scan_syntax fails on files with leading comments, misdetecting
@@ -279,29 +331,39 @@ impl From<pb_rs::types::Frequency> for Label {
     }
 }
 
-fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> TokenStream {
-    // Regular (non-oneof) fields
-    let regular_fields: Vec<Field> = m.fields.iter().map(|f| convert_field(f, desc)).collect();
+fn write_message(
+    m: &Message,
+    name: &str,
+    desc: &FileDescriptor,
+    current_package: &str,
+) -> TokenStream {
+    let regular_fields: Vec<Field> = m
+        .fields
+        .iter()
+        .map(|f| convert_field(f, desc, current_package))
+        .collect();
 
-    // Oneof groups
     let oneof_groups: Vec<OneOfGroup> = m
         .oneofs
         .iter()
         .map(|o| OneOfGroup {
             name: o.name.clone(),
-            fields: o.fields.iter().map(|f| convert_field(f, desc)).collect(),
+            fields: o
+                .fields
+                .iter()
+                .map(|f| convert_field(f, desc, current_package))
+                .collect(),
         })
         .collect();
 
-    // All fields flattened (for the decode enum)
-    let all_fields: Vec<Field> = m.all_fields().map(|f| convert_field(f, desc)).collect();
-
-    let struct_schema = message_schema(qualified_name, &regular_fields, &oneof_groups);
-    let field_enum = field_enum(qualified_name, &all_fields);
-    let oneof_impls: Vec<TokenStream> = oneof_groups
-        .iter()
-        .map(|g| write_oneof(qualified_name, g))
+    let all_fields: Vec<Field> = m
+        .all_fields()
+        .map(|f| convert_field(f, desc, current_package))
         .collect();
+
+    let struct_schema = message_schema(name, &regular_fields, &oneof_groups);
+    let field_enum = field_enum(name, &all_fields);
+    let oneof_impls: Vec<TokenStream> = oneof_groups.iter().map(|g| write_oneof(name, g)).collect();
 
     quote! {
         #struct_schema
@@ -310,28 +372,22 @@ fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> To
     }
 }
 
-fn write_enum(m: &Enumerator, qualified_name: &str, _desc: &FileDescriptor) -> TokenStream {
-    let name_ident = format_ident!("{qualified_name}");
+fn write_enum(m: &Enumerator, name: &str) -> TokenStream {
+    let name_ident = format_ident!("{name}");
 
     let variants = m.fields.iter().map(|(field, _number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
-        quote! {
-             #field_ident
-        }
+        quote! { #field_ident }
     });
 
     let from_i32_matches = m.fields.iter().map(|(field, number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
-        quote! {
-            #number => #name_ident::#field_ident
-        }
+        quote! { #number => #name_ident::#field_ident }
     });
 
     let into_i32_matches = m.fields.iter().map(|(field, number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
-        quote! {
-            #name_ident::#field_ident => #number
-        }
+        quote! { #name_ident::#field_ident => #number }
     });
 
     quote! {
@@ -356,6 +412,33 @@ fn write_enum(m: &Enumerator, qualified_name: &str, _desc: &FileDescriptor) -> T
                     #(#into_i32_matches,)*
                     #name_ident::__Unrecognized(v) => v,
                 }
+            }
+        }
+    }
+}
+
+/// Recursively generate code for a message and its nested types.
+fn write_message_tree(m: &Message, desc: &FileDescriptor, current_package: &str) -> TokenStream {
+    let msg_code = write_message(m, &m.name, desc, current_package);
+
+    let nested_msgs: Vec<TokenStream> = m
+        .messages
+        .iter()
+        .map(|n| write_message_tree(n, desc, current_package))
+        .collect();
+
+    let nested_enums: Vec<TokenStream> = m.enums.iter().map(|e| write_enum(e, &e.name)).collect();
+
+    if nested_msgs.is_empty() && nested_enums.is_empty() {
+        msg_code
+    } else {
+        let mod_name = field_ident(&heck::AsSnakeCase(&m.name).to_string());
+        quote! {
+            #msg_code
+            pub mod #mod_name {
+                use super::*;
+                #(#nested_msgs)*
+                #(#nested_enums)*
             }
         }
     }
@@ -415,25 +498,25 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                     }
                 }
                 PbType::Enum((name, _)) => {
-                    let enum_ident = format_ident!("{}", name);
+                    let enum_ty = name_tokens(name);
                     quote! {
-                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
+                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<PbEnum<#enum_ty>>) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::VARINT) };
                             t.write(buf);
-                            <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            <PbEnum<#enum_ty> as ProtobufScalar>::write_value(value.as_scalar(), buf);
                             Self
                         }
                     }
                 }
                 PbType::Message(msg) => {
-                    let msg_ident = parse_ty(msg);
+                    let msg_ty = parse_ty(msg);
                     let method_name = format_ident!("write_{}_msg", f.name);
                     quote! {
-                        pub fn #method_name(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, #msg_ident)) -> Self {
+                        pub fn #method_name(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, #msg_ty)) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::LEN) };
                             t.write(buf);
                             let t = tack::Tack::new(buf);
-                            f(t.buffer, #msg_ident::default());
+                            f(t.buffer, #msg_ty::default());
                             Self
                         }
                     }
@@ -453,51 +536,140 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
     }
 }
 
-pub fn write_proto(file: &str, output: &str) {
-    write_proto_with_includes(file, output, &["."])
-}
-
-pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
-    let mut files = read_proto_file(file, includes);
-    let test_file = files.pop().unwrap();
-
-    let all_messages = collect_all_messages(&test_file.messages, "");
-    let all_enums = collect_all_enums(&test_file.messages, &test_file.enums, "");
-
-    let messages = all_messages
+/// Generate code for a single package module from its non-imported types.
+fn generate_package(package: &str, desc: &FileDescriptor) -> TokenStream {
+    let messages: Vec<TokenStream> = desc
+        .messages
         .iter()
-        .map(|(m, qname)| write_message(m, qname, &test_file));
-    let enums = all_enums
-        .iter()
-        .map(|(e, qname)| write_enum(e, qname, &test_file));
+        .filter(|m| !m.imported)
+        .map(|m| write_message_tree(m, desc, package))
+        .collect();
 
-    // Build the innermost module content
-    let mut inner = quote! {
+    let enums: Vec<TokenStream> = desc
+        .enums
+        .iter()
+        .filter(|e| !e.imported)
+        .map(|e| write_enum(e, &e.name))
+        .collect();
+
+    let inner = quote! {
         use ::tacky::*;
         #(#messages)*
         #(#enums)*
     };
 
-    // Wrap in nested modules for dotted package names (e.g. "perftools.profiles")
-    for part in test_file.package.rsplit('.') {
-        let mod_name = format_ident!("{}", part);
-        inner = quote! {
-            pub mod #mod_name {
-                #inner
-            }
-        };
-    }
+    inner
+}
 
-    let token_stream = quote! {
-        #[allow(unused, dead_code)]
-        #inner
+fn format_and_write(tokens: TokenStream, path: &std::path::Path) {
+    let syntax_tree = syn::parse2(tokens).unwrap();
+    let formatted = prettyplease::unparse(&syntax_tree);
+    let mut file = std::fs::File::create(path).unwrap();
+    file.write_all(formatted.as_bytes()).unwrap();
+}
+
+/// Compile multiple proto files into an output directory.
+///
+/// Produces one `.rs` file per protobuf package (e.g. `example.rs`,
+/// `perftools.profiles.rs`) plus a `_includes.rs` that wires them together
+/// as sibling `pub mod` blocks.  Cross-package field references use `super::`
+/// paths, so the sibling layout is required.
+///
+/// In your `lib.rs` / `main.rs`:
+/// ```ignore
+/// mod protos {
+///     include!(concat!(env!("OUT_DIR"), "/_includes.rs"));
+/// }
+/// ```
+pub fn compile_protos(files: &[&str], output_dir: &str, includes: &[&str]) {
+    std::fs::create_dir_all(output_dir).unwrap();
+    let out = std::path::Path::new(output_dir);
+
+    // Compute the relative suffix from OUT_DIR to output_dir, so the generated
+    // _includes.rs can use `env!("OUT_DIR")` based paths.
+    let out_dir = std::env::var("OUT_DIR").unwrap_or_default();
+    let rel_prefix = if out_dir.is_empty() {
+        String::new()
+    } else {
+        let abs_out = std::fs::canonicalize(out).unwrap();
+        let abs_base = std::fs::canonicalize(&out_dir).unwrap();
+        abs_out
+            .strip_prefix(&abs_base)
+            .map(|p| format!("/{}", p.display()))
+            .unwrap_or_default()
     };
 
-    // eprintln!("GENERATED CODE:\n{}", token_stream.to_string());
+    let mut packages: BTreeMap<String, FileDescriptor> = BTreeMap::new();
+    for file in files {
+        let desc = read_proto_file(file, includes);
+        let pkg = desc.package.clone();
+        packages.insert(pkg, desc);
+    }
 
-    let syntax_tree = syn::parse2(token_stream).unwrap();
-    let formatted = prettyplease::unparse(&syntax_tree);
+    let mut include_lines: Vec<String> = Vec::new();
 
-    let mut file = std::fs::File::create(output).unwrap();
-    file.write_all(formatted.as_bytes()).unwrap();
+    for (package, desc) in &packages {
+        let content = generate_package(package, desc);
+        let token_stream = quote! { #[allow(unused, dead_code)] #content };
+
+        let file_name = if package.is_empty() {
+            "_root.rs".to_string()
+        } else {
+            format!("{}.rs", package)
+        };
+
+        format_and_write(token_stream, &out.join(&file_name));
+
+        let inc_path = format!("{}/{}", rel_prefix, file_name);
+        if package.is_empty() {
+            include_lines.push(format!(
+                "include!(concat!(env!(\"OUT_DIR\"), \"{}\"));",
+                inc_path
+            ));
+        } else {
+            let parts: Vec<&str> = package.split('.').collect();
+            let mut line = String::new();
+            for part in &parts {
+                line.push_str(&format!("pub mod {} {{ ", part));
+            }
+            line.push_str(&format!(
+                "include!(concat!(env!(\"OUT_DIR\"), \"{}\")); ",
+                inc_path
+            ));
+            for _ in &parts {
+                line.push_str("} ");
+            }
+            include_lines.push(line);
+        }
+    }
+
+    let includes_content = include_lines.join("\n");
+    std::fs::write(out.join("_includes.rs"), includes_content).unwrap();
+}
+
+/// Compile a single proto file to a standalone output file.
+pub fn write_proto(file: &str, output: &str) {
+    write_proto_with_includes(file, output, &["."])
+}
+
+/// Compile a single proto file to a standalone output file with custom include paths.
+pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
+    let desc = read_proto_file(file, includes);
+    let package = desc.package.clone();
+    let content = generate_package(&package, &desc);
+
+    let mut inner = content;
+    if !package.is_empty() {
+        for part in package.rsplit('.') {
+            let mod_name = format_ident!("{}", part);
+            inner = quote! {
+                pub mod #mod_name {
+                    #inner
+                }
+            };
+        }
+    }
+
+    let token_stream = quote! { #[allow(unused, dead_code)] #inner };
+    format_and_write(token_stream, std::path::Path::new(output));
 }

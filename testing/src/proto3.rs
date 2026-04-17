@@ -1,8 +1,5 @@
 //! Proto3 message tests: tacky encode → prost decode, and prost encode → tacky decode.
 
-mod tacky_proto3 {
-    include!(concat!(env!("OUT_DIR"), "/proto3.rs"));
-}
 #[allow(dead_code)]
 mod prost_proto3 {
     include!(concat!(env!("OUT_DIR"), "/proto3test.rs"));
@@ -14,7 +11,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::prost_proto3;
-    use super::tacky_proto3::proto3test::*;
+    use crate::tacky_proto::proto3test::*;
 
     // --- Plain (implicit presence) scalars ---
 

@@ -1,26 +1,31 @@
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
+    let tacky_dir = format!("{out_dir}/tacky");
+
     let simple_file = "protos/simple_message.proto";
     let importing_file = "protos/importing.proto";
-    let simple_out = format!("{out_dir}/simple.rs");
-    let importing_out = format!("{out_dir}/importing.rs");
+    let proto3_file = "protos/proto3_message.proto";
+    let pprof_file = "protos/pprof.proto";
+    let accesslog_file = "protos/accesslog.proto";
 
     println!("cargo:rerun-if-changed={simple_file}");
     println!("cargo:rerun-if-changed={importing_file}");
-    tacky_build::write_proto(simple_file, &simple_out);
-    tacky_build::write_proto_with_includes(importing_file, &importing_out, &["."]);
-
-    let proto3_file = "protos/proto3_message.proto";
     println!("cargo:rerun-if-changed={proto3_file}");
-    tacky_build::write_proto(proto3_file, &format!("{out_dir}/proto3.rs"));
-
-    let pprof_file = "protos/pprof.proto";
     println!("cargo:rerun-if-changed={pprof_file}");
-    tacky_build::write_proto(pprof_file, &format!("{out_dir}/pprof.rs"));
-
-    let accesslog_file = "protos/accesslog.proto";
     println!("cargo:rerun-if-changed={accesslog_file}");
-    tacky_build::write_proto(accesslog_file, &format!("{out_dir}/tacky_accesslog.rs"));
+
+    // Compile all tacky protos. Produces one .rs per package plus _includes.rs.
+    tacky_build::compile_protos(
+        &[
+            simple_file,
+            importing_file,
+            proto3_file,
+            pprof_file,
+            accesslog_file,
+        ],
+        &tacky_dir,
+        &["."],
+    );
 
     prost_build::compile_protos(
         &[simple_file, proto3_file, pprof_file, accesslog_file],

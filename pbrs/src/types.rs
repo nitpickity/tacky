@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::fs::File;
-use std::io::{BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Error, Result};
@@ -64,19 +62,10 @@ impl MessageIndex {
         name
     }
 
-    // fn get_message_mut<'a>(&self, desc: &'a mut FileDescriptor) -> &'a mut Message {
-    //     let first_message = self
-    //         .indexes
-    //         .first()
-    //         .and_then(move |i| desc.messages.get_mut(*i));
-    //     self.indexes
-    //         .iter()
-    //         .skip(1)
-    //         .fold(first_message, |cur, next| {
-    //             cur.and_then(|msg| msg.messages.get_mut(*next))
-    //         })
-    //         .expect("Message index not found")
-    // }
+    /// Access the raw index path.
+    pub fn indexes(&self) -> &[usize] {
+        &self.indexes
+    }
 
     fn push(&mut self, i: usize) {
         self.indexes.push(i);
@@ -94,6 +83,11 @@ pub struct EnumIndex {
 }
 
 impl EnumIndex {
+    /// Access the parent message index path (empty for top-level enums).
+    pub fn msg_indexes(&self) -> &[usize] {
+        self.msg_index.indexes()
+    }
+
     pub fn get_enum<'a>(&self, desc: &'a FileDescriptor) -> &'a Enumerator {
         let enums = if self.msg_index.indexes.is_empty() {
             &desc.enums
@@ -148,30 +142,6 @@ impl FieldType {
                 | FieldType::Bytes
         )
     }
-
-    pub fn proto_type(&self) -> &str {
-        match *self {
-            FieldType::Int32 => "int32",
-            FieldType::Sint32 => "sint32",
-            FieldType::Int64 => "int64",
-            FieldType::Sint64 => "sint64",
-            FieldType::Uint32 => "uint32",
-            FieldType::Uint64 => "uint64",
-            FieldType::Bool => "bool",
-            FieldType::Enum(_) => "enum",
-            FieldType::Fixed32 => "fixed32",
-            FieldType::Sfixed32 => "sfixed32",
-            FieldType::Float => "float",
-            FieldType::Fixed64 => "fixed64",
-            FieldType::Sfixed64 => "sfixed64",
-            FieldType::Double => "double",
-            FieldType::String => "string",
-            FieldType::Bytes => "bytes",
-            FieldType::Message(_) => "message",
-            FieldType::Map(_, _) => "map",
-            FieldType::MessageOrEnum(_) => unreachable!("Message / Enum not resolved"),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -184,16 +154,6 @@ pub struct Field {
     pub deprecated: bool,
 }
 
-// fn get_modules(module: &str, imported: bool, desc: &FileDescriptor) -> String {
-//     let skip = usize::from(desc.package.is_empty() && !imported);
-//     module
-//         .split('.')
-//         .filter(|p| !p.is_empty())
-//         .skip(skip)
-//         .map(|p| format!("{}::", p))
-//         .collect()
-// }
-
 #[derive(Debug, Clone, Default)]
 pub struct Extend {
     /// The message being extended.
@@ -201,8 +161,6 @@ pub struct Extend {
     /// All fields that are being added to the extended message.
     pub fields: Vec<Field>,
 }
-
-impl Extend {}
 
 #[derive(Debug, Clone, Default)]
 pub struct Message {
@@ -215,7 +173,6 @@ pub struct Message {
     pub package: String,        // package from imports + nested items
     pub messages: Vec<Message>, // nested messages
     pub enums: Vec<Enumerator>, // nested enums
-    pub module: String,         // 'package' corresponding to actual generated Rust module
     pub path: PathBuf,
     pub import: PathBuf,
     pub index: MessageIndex,
@@ -236,16 +193,6 @@ impl Message {
             e.imported = true;
         }
     }
-
-    // fn get_modules(&self, desc: &FileDescriptor) -> String {
-    //     get_modules(&self.module, self.imported, desc)
-    // }
-
-    // fn is_unit(&self) -> bool {
-    //     self.fields.is_empty()
-    //         && self.oneofs.is_empty()
-    //         && self.messages.iter().all(|m| m.is_unit())
-    // }
 
     fn sanity_checks(&self, _desc: &FileDescriptor) -> Result<()> {
         for f in self.all_fields() {
@@ -277,32 +224,19 @@ impl Message {
         Ok(())
     }
 
-    fn set_package(&mut self, package: &str, module: &str) {
-        // The complication here is that the _package_ (as declared in the proto file) does
-        // not directly map to the _module_. For example, the package 'a.A' where A is a
-        // message will be the module 'a.mod_A', since we can't reuse the message name A as
-        // the submodule containing nested items. Also, protos with empty packages always
-        // have a module corresponding to the file name.
-        let (child_package, child_module) = if package.is_empty() {
-            self.module = module.to_string();
-            (self.name.clone(), format!("{}.mod_{}", module, self.name))
+    fn set_package(&mut self, package: &str) {
+        let child_package = if package.is_empty() {
+            self.name.clone()
         } else {
             self.package = package.to_string();
-            self.module = module.to_string();
-            (
-                format!("{}.{}", package, self.name),
-                format!("{}.mod_{}", module, self.name),
-            )
+            format!("{}.{}", package, self.name)
         };
 
         for m in &mut self.messages {
-            m.set_package(&child_package, &child_module);
+            m.set_package(&child_package);
         }
         for m in &mut self.enums {
-            m.set_package(&child_package, &child_module);
-        }
-        for m in &mut self.oneofs {
-            m.set_package(&child_package, &child_module);
+            m.set_package(&child_package);
         }
     }
 
@@ -313,14 +247,6 @@ impl Message {
             .iter()
             .chain(self.oneofs.iter().flat_map(|o| o.fields.iter()))
     }
-
-    // /// Return an iterator producing mutable references to all the `Field`s of
-    // /// `self`, including both direct and `oneof` fields.
-    // fn all_fields_mut(&mut self) -> impl Iterator<Item = &mut Field> {
-    //     self.fields
-    //         .iter_mut()
-    //         .chain(self.oneofs.iter_mut().flat_map(|o| o.fields.iter_mut()))
-    // }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -335,14 +261,6 @@ pub struct RpcService {
     pub service_name: String,
     pub functions: Vec<RpcFunctionDeclaration>,
 }
-
-impl RpcService {
-    pub fn write_definition<W: Write>(&self, _w: &mut W, _config: &Config) -> Result<()> {
-        Ok(())
-    }
-}
-
-pub type RpcGeneratorFunction = Box<dyn Fn(&RpcService, &mut dyn Write) -> Result<()>>;
 
 #[derive(Debug, Clone, Default)]
 pub struct Extensions {
@@ -363,42 +281,17 @@ impl Extensions {
 pub struct Enumerator {
     pub name: String,
     pub fields: Vec<(String, i32)>,
-    pub fully_qualified_fields: Vec<(String, i32)>,
-    pub partially_qualified_fields: Vec<(String, i32)>,
     pub imported: bool,
     pub package: String,
-    pub module: String,
     pub path: PathBuf,
     pub import: PathBuf,
     pub index: EnumIndex,
 }
 
 impl Enumerator {
-    fn set_package(&mut self, package: &str, module: &str) {
+    fn set_package(&mut self, package: &str) {
         self.package = package.to_string();
-        self.module = module.to_string();
-        self.partially_qualified_fields = self
-            .fields
-            .iter()
-            .map(|f| (format!("{}::{}", &self.name, f.0), f.1))
-            .collect();
-        self.fully_qualified_fields = self
-            .partially_qualified_fields
-            .iter()
-            .map(|pqf| {
-                let fqf = if self.module.is_empty() {
-                    pqf.0.clone()
-                } else {
-                    format!("{}::{}", self.module.replace('.', "::"), pqf.0)
-                };
-                (fqf, pqf.1)
-            })
-            .collect();
     }
-
-    // fn get_modules(&self, desc: &FileDescriptor) -> String {
-    //     get_modules(&self.module, self.imported, desc)
-    // }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -406,29 +299,12 @@ pub struct OneOf {
     pub name: String,
     pub fields: Vec<Field>,
     pub package: String,
-    pub module: String,
     pub imported: bool,
-}
-
-impl OneOf {
-    fn set_package(&mut self, package: &str, module: &str) {
-        self.package = package.to_string();
-        self.module = module.to_string();
-    }
-
-    // fn get_modules(&self, desc: &FileDescriptor) -> String {
-    //     get_modules(&self.module, self.imported, desc)
-    // }
 }
 
 pub struct Config {
     pub in_file: PathBuf,
-    pub out_file: PathBuf,
-    pub single_module: bool,
     pub import_search_path: Vec<PathBuf>,
-    pub no_output: bool,
-    pub error_cycle: bool,
-    pub add_deprecated_fields: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -439,79 +315,10 @@ pub struct FileDescriptor {
     pub messages: Vec<Message>,
     pub message_extends: Vec<Extend>,
     pub enums: Vec<Enumerator>,
-    pub module: String,
     pub rpc_services: Vec<RpcService>,
 }
 
 impl FileDescriptor {
-    pub fn run(configs: &[Config]) -> Result<()> {
-        for config in configs {
-            Self::print_proto(config)?
-        }
-        Ok(())
-    }
-    pub fn print_proto(config: &Config) -> Result<()> {
-        let mut desc = FileDescriptor::read_proto(&config.in_file, &config.import_search_path)?;
-
-        if desc.messages.is_empty() && desc.enums.is_empty() {
-            // There could had been unsupported structures, so bail early
-            return Err(Error::EmptyRead);
-        }
-
-        desc.resolve_types()?;
-        desc.sanity_checks()?;
-
-        if config.single_module {
-            desc.package = "".to_string();
-        }
-
-        let (prefix, file_package) = split_package(&desc.package);
-
-        let file_stem = if file_package.is_empty() {
-            get_file_stem(&config.out_file)?
-        } else {
-            file_package.to_string()
-        };
-
-        let mut out_file = config.out_file.with_file_name(format!("{file_stem}.rs"));
-
-        if !prefix.is_empty() {
-            use std::fs::create_dir_all;
-            // e.g. package is a.b; we need to create directory 'a' and insert it into the path
-            let file = PathBuf::from(out_file.file_name().unwrap());
-            out_file.pop();
-            for p in prefix.split('.') {
-                out_file.push(p);
-
-                if !out_file.exists() {
-                    create_dir_all(&out_file)?;
-                    update_mod_file(&out_file)?;
-                }
-            }
-            out_file.push(file);
-        }
-
-        let imported = |b| if b { " imported" } else { "" };
-        println!("source will be written to {}\n", out_file.display());
-        for m in &desc.messages {
-            println!(
-                "message {} module {}{}",
-                m.name,
-                m.module,
-                imported(m.imported)
-            );
-        }
-        for e in &desc.enums {
-            println!(
-                "enum {} module {}{}",
-                e.name,
-                e.module,
-                imported(e.imported)
-            );
-        }
-        Ok(())
-    }
-
     /// Opens a proto file, reads it and returns raw parsed data
     pub fn read_proto(in_file: &Path, import_search_path: &[PathBuf]) -> Result<FileDescriptor> {
         let file = std::fs::read_to_string(in_file)?;
@@ -530,13 +337,6 @@ impl FileDescriptor {
                 }
             }
         }
-        // proto files with no packages are given an implicit module,
-        // since every generated Rust source file represents a module
-        desc.module = if desc.package.is_empty() {
-            get_file_stem(in_file)?
-        } else {
-            desc.package.clone()
-        };
 
         desc.fetch_imports(in_file, import_search_path)?;
         desc.resolve_types()?;
@@ -611,10 +411,10 @@ impl FileDescriptor {
     /// Get messages and enums from imports
     fn fetch_imports(&mut self, in_file: &Path, import_search_path: &[PathBuf]) -> Result<()> {
         for m in &mut self.messages {
-            m.set_package(&self.package, &self.module);
+            m.set_package(&self.package);
         }
         for m in &mut self.enums {
-            m.set_package(&self.package, &self.module);
+            m.set_package(&self.package);
         }
 
         for import in &self.import_paths {
@@ -648,12 +448,11 @@ impl FileDescriptor {
             // file's local descriptor and would be stale in the combined one.
             f.unresolve_types();
 
-            // if the proto has a packge then the names will be prefixed
+            // if the proto has a package then the names will be prefixed
             let package = f.package.clone();
-            let module = f.module.clone();
             self.messages.extend(f.messages.drain(..).map(|mut m| {
                 if m.package.is_empty() {
-                    m.set_package(&package, &module);
+                    m.set_package(&package);
                 }
                 if m.path.as_os_str().is_empty() {
                     m.path = proto_file.clone();
@@ -666,7 +465,7 @@ impl FileDescriptor {
             }));
             self.enums.extend(f.enums.drain(..).map(|mut e| {
                 if e.package.is_empty() {
-                    e.set_package(&package, &module);
+                    e.set_package(&package);
                 }
                 if e.path.as_os_str().is_empty() {
                     e.path = proto_file.clone();
@@ -819,78 +618,4 @@ impl FileDescriptor {
         }
         Ok(())
     }
-}
-
-/// "" is ("",""), "a" is ("","a"), "a.b" is ("a"."b"), and so forth.
-fn split_package(package: &str) -> (&str, &str) {
-    if package.is_empty() {
-        ("", "")
-    } else if let Some(i) = package.rfind('.') {
-        (&package[0..i], &package[i + 1..])
-    } else {
-        ("", package)
-    }
-}
-
-const MAGIC_HEADER: &str = "// Automatically generated mod.rs";
-
-/// Given a file path, create or update the mod.rs file within its folder
-fn update_mod_file(path: &Path) -> Result<()> {
-    let mut file = path.to_path_buf();
-    use std::fs::OpenOptions;
-    use std::io::prelude::*;
-
-    let name = file.file_stem().unwrap().to_string_lossy().to_string();
-    file.pop();
-    file.push("mod.rs");
-    let matches = "pub mod ";
-    let mut present = false;
-    let mut exists = false;
-    if let Ok(f) = File::open(&file) {
-        exists = true;
-        let mut first = true;
-        for line in BufReader::new(f).lines() {
-            let line = line?;
-            if first {
-                if !line.contains(MAGIC_HEADER) {
-                    // it is NOT one of our generated mod.rs files, so don't modify it!
-                    present = true;
-                    break;
-                }
-                first = false;
-            }
-            if let Some(i) = line.find(matches) {
-                let rest = &line[i + matches.len()..line.len() - 1];
-                if rest == name {
-                    // we already have a reference to this module...
-                    present = true;
-                    break;
-                }
-            }
-        }
-    }
-    if !present {
-        let mut f = if exists {
-            OpenOptions::new().append(true).open(&file)?
-        } else {
-            let mut f = File::create(&file)?;
-            writeln!(f, "{}", MAGIC_HEADER)?;
-            f
-        };
-
-        writeln!(f, "pub mod {};", name)?;
-    }
-    Ok(())
-}
-
-/// get the proper sanitized file stem from an input file path
-fn get_file_stem(path: &Path) -> Result<String> {
-    let mut file_stem = path
-        .file_stem()
-        .and_then(|f| f.to_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| Error::OutputFile(format!("{}", path.display())))?;
-
-    file_stem = file_stem.replace(|c: char| !c.is_alphanumeric(), "_");
-    Ok(file_stem)
 }
