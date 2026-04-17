@@ -12,5 +12,6 @@ members = ["tacky-build", "testing", "pbrs"]
 [features]
 default = ["alloc"]
 alloc = []
+std = ["alloc"]
 
 [dependencies]
