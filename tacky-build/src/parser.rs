@@ -376,13 +376,7 @@ fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenS
             #(#field_defs,)*
             #(#oneof_defs,)*
         }
-        impl MessageSchema for #name_ident {
-            fn schema() -> Self {
-                // SAFETY: this struct is a ZST containing only ZST `Field`s and oneof markers,
-                // so transmuting from `()` (also a ZST) produces a valid value.
-                unsafe { ::core::mem::transmute(()) }
-            }
-        }
+        impl MessageSchema for #name_ident {}
         impl #name_ident {
             pub fn schema() -> Self {
                 <Self as MessageSchema>::schema()

@@ -450,7 +450,17 @@ pub mod maps {
 pub trait MessageSchema: Sized {
     /// Constructs a fresh schema value. Generated schemas are zero-sized,
     /// so this never allocates and never reads memory.
-    fn schema() -> Self;
+    fn schema() -> Self {
+        const {
+            assert!(
+                core::mem::size_of::<Self>() == 0,
+                "MessageSchema implementors must be zero-sized",
+            );
+        }
+        // SAFETY: the const assertion above proves `Self` is a ZST, so any bit
+        // pattern (including all-zero) is a valid value.
+        unsafe { core::mem::zeroed() }
+    }
 }
 
 /// Bridges domain types to protobuf scalars for serialization.
