@@ -48,6 +48,36 @@ schema.numbers.write(&mut buffer, [1, 2, 3, 4]);
 
 `Optional` fields take an `Option`, `Repeated` fields take anything iterable. String fields accept any `AsRef<str>`, so your own string types work without conversion.
 
+## Project Setup
+
+Add `tacky` as a dependency and `tacky-build` as a build dependency:
+
+```toml
+[dependencies]
+tacky = { git = "ssh://git@github.com/nitpickity/tacky.git" }
+
+[build-dependencies]
+tacky-build = { git = "ssh://git@github.com/nitpickity/tacky.git" }
+```
+
+A minimal `build.rs` invokes `tacky_build::write_proto` per `.proto` file:
+
+```rust
+fn main() {
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+    tacky_build::write_proto("protos/my_message.proto", &format!("{out_dir}/my_message.rs"));
+    println!("cargo:rerun-if-changed=protos/my_message.proto");
+}
+```
+
+Then `include!` the generated file from a module in your crate:
+
+```rust
+include!(concat!(env!("OUT_DIR"), "/my_message.rs"));
+```
+
+For protos that import others, use `write_proto_with_includes` and pass the include paths.
+
 ## Exhaustiveness Checking
 
 The usual assumption is that skipping the generated struct means losing safety — forget to write a field and nothing tells you. Tacky sidesteps this with a small trick: every `.write()` call returns the field schema value back. This means you can use the generated schema as a literal to "fill in" and get compile-time exhaustiveness for free:
@@ -189,6 +219,70 @@ for field in SimpleMessageDecoder::new(&buf) {
 
 Fields come back as basic Rust primitives — `&str`, `i32`, `f64`, etc. Mapping those to your domain types is up to you. Only one enum variant lives on the stack at a time, regardless of how many fields the message has. The struct approach that prost and others use can lead to the stack size of the message alone being much larger than the serialized data, and it grows with every field.
 
+### Repeated fields
+
+Unpacked repeated fields appear as one variant per occurrence — match in the loop and append:
+
+```rust
+let mut tags: Vec<String> = Vec::new();
+for field in MessageDecoder::new(&buf) {
+    match field? {
+        MessageField::Tag(s) => tags.push(s.to_owned()),
+        _ => {}
+    }
+}
+```
+
+Packed repeated fields (and `repeated` scalars in proto3, which are packed by default) come back as a single variant carrying an iterator over the elements. Each element is a `Result`, since varint decoding can fail mid-stream:
+
+```rust
+for field in MessageDecoder::new(&buf) {
+    match field? {
+        MessageField::Numbers(iter) => {
+            for n in iter {
+                numbers.push(n?);
+            }
+        }
+        _ => {}
+    }
+}
+```
+
+Protobuf permits the same repeated field to appear multiple times in a message — tacky surfaces that faithfully, so the loop above accumulates across all occurrences without any extra bookkeeping.
+
+### Mapping to custom types
+
+Tacky stops at primitives on purpose: the variant gives you a `&str`, `&[u8]`, or integer, and you decide how it becomes a domain value. Validation, parsing, and enum coercion all happen at the match arm — no separate "generated struct → domain type" pass.
+
+```rust
+match field? {
+    UserField::Name(s) => {
+        user.name = Some(UserName::try_from_str(s)?);
+    }
+    UserField::AccountId(bytes) => {
+        user.account_id = Some(AccountId::from_bytes(bytes.try_into()?));
+    }
+    UserField::CreatedAt(secs) => {
+        user.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
+    }
+    // ...
+}
+```
+
+Generated proto enums come back as a Rust enum that includes an `__Unrecognized(i32)` variant for forward-compatibility, so you can map known values and ignore the rest:
+
+```rust
+UserField::Tier(t) => {
+    user.tier = match t {
+        proto::Tier::Free => Some(Tier::Free),
+        proto::Tier::Pro => Some(Tier::Pro),
+        proto::Tier::Enterprise => Some(Tier::Enterprise),
+        proto::Tier::__Unrecognized(_) => None,
+    };
+}
+```
+
+Nested messages give you a sub-decoder you iterate the same way, so you can build up a domain object field-by-field without ever materializing the proto's intermediate struct.
 
 ## Limitations
 
@@ -271,3 +365,7 @@ pub fn write_msg(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, M)) ->
 ```
 
 The borrow through `t.buffer` also prevents the caller from accidentally writing to the outer buffer while the Tack is active, since `Tack` holds the `&mut Vec<u8>`.
+
+## Acknowledgements
+
+`tacky-build` vendors a heavily modified copy of [pb-rs](https://github.com/tafia/quick-protobuf/tree/master/pb-rs) (from the [quick-protobuf](https://github.com/tafia/quick-protobuf) project, MIT-licensed), used purely as a `.proto` parser and validator at build time. pb-rs parses and validates `.proto` files in pure Rust, which lets tacky avoid the `protoc` system dependency that prost and other libraries pull in. The vendored copy has been stripped down and adapted to that role — none of pb-rs's own code generation is used; the schema and decoder code is all generated by tacky.
