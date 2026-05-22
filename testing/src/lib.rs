@@ -749,6 +749,7 @@ mod tests {
         assert_eq!(status, Some(OuterStatus::Active));
         assert_eq!(inner_value, Some("nested_value"));
         assert_eq!(inner_num, Some(42));
+        assert_eq!(name, Some("outer_name"));
 
         // Also verify prost can decode it (cross-compat)
         use crate::prost_proto::outer;
