@@ -371,15 +371,15 @@ fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenS
     });
     let k = format_ident!("{name}Fields");
     quote! {
-        #[derive(Default, Debug, Copy, Clone)]
+        #[derive(Debug, Copy, Clone)]
         pub struct #name_ident {
             #(#field_defs,)*
             #(#oneof_defs,)*
         }
         impl MessageSchema for #name_ident {}
         impl #name_ident {
-            pub fn new() -> Self {
-                Self::default()
+            pub fn schema() -> Self {
+                <Self as MessageSchema>::schema()
             }
             pub fn decode(buf: &[u8])-> #k<'_> {
                 #k::new(buf)
@@ -433,7 +433,7 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                             let t = const { EncodedTag::new(#number, WireType::LEN) };
                             t.write(buf);
                             let t = tack::Tack::new(buf);
-                            f(t.buffer, #msg_ident::default());
+                            f(t.buffer, #msg_ident::schema());
                             Self
                         }
                     }
