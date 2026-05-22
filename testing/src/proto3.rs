@@ -21,7 +21,7 @@ mod tests {
     #[test]
     fn test_plain_scalars_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = ScalarMessage::default();
+        let s = ScalarMessage::schema();
         ScalarMessage {
             a_int32: s.a_int32.write(&mut buf, 42),
             a_int64: s.a_int64.write(&mut buf, -100i64),
@@ -136,7 +136,7 @@ mod tests {
     fn test_plain_defaults_not_written() {
         // Proto3: default values (0, false, "") should not appear on the wire.
         let mut buf = Vec::new();
-        let s = ScalarMessage::default();
+        let s = ScalarMessage::schema();
         ScalarMessage {
             a_int32: s.a_int32.write(&mut buf, 0),
             a_int64: s.a_int64.write(&mut buf, 0i64),
@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn test_optional_fields_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = OptionalMessage::default();
+        let s = OptionalMessage::schema();
         OptionalMessage {
             opt_int: s.opt_int.write(&mut buf, Some(0)),
             opt_string: s.opt_string.write(&mut buf, Some("")),
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_repeated_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = RepeatedMessage::default();
+        let s = RepeatedMessage::schema();
         RepeatedMessage {
             nums: s.nums.write(&mut buf, &[1, 2, 3]),
             strings: s.strings.write(&mut buf, &["a", "b"]),
@@ -321,7 +321,7 @@ mod tests {
     #[test]
     fn test_repeated_empty() {
         let mut buf = Vec::new();
-        let s = RepeatedMessage::default();
+        let s = RepeatedMessage::schema();
         RepeatedMessage {
             nums: s.nums.write(&mut buf, &[]),
             strings: s.strings.write(&mut buf, Vec::<&str>::new()),
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_enums_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithEnum::default();
+        let s = WithEnum::schema();
         WithEnum {
             status: s.status.write(&mut buf, Status::Active),
             history: s.history.write(
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn test_nesting_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithNesting::default();
+        let s = WithNesting::schema();
         WithNesting {
             single: s.single.write_msg(&mut buf, |buf, s| {
                 s.label.write(buf, "inner");
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_maps_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithMaps::default();
+        let s = WithMaps::schema();
         WithMaps {
             str_int: s.str_int.write(&mut buf, [("a", 1), ("b", 2)]),
             int_str: s.int_str.write(&mut buf, [(10, "ten"), (20, "twenty")]),
@@ -565,7 +565,7 @@ mod tests {
     #[test]
     fn test_oneof_text_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithOneof::default();
+        let s = WithOneof::schema();
         WithOneof {
             id: s.id.write(&mut buf, "req-1"),
             payload: s.payload.write_text(&mut buf, "error msg"),
@@ -582,7 +582,7 @@ mod tests {
     #[test]
     fn test_oneof_number_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithOneof::default();
+        let s = WithOneof::schema();
         WithOneof {
             id: s.id.write(&mut buf, "req-2"),
             payload: s.payload.write_number(&mut buf, 404),
@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn test_oneof_nested_tacky_to_prost() {
         let mut buf = Vec::new();
-        let s = WithOneof::default();
+        let s = WithOneof::schema();
         WithOneof {
             id: s.id.write(&mut buf, "req-3"),
             payload: s.payload.write_nested_msg(&mut buf, |buf, s| {
@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn test_oneof_skipped() {
         let mut buf = Vec::new();
-        let s = WithOneof::default();
+        let s = WithOneof::schema();
         WithOneof {
             id: s.id.write(&mut buf, "req-5"),
             payload: s.payload,

@@ -48,7 +48,7 @@ mod tests {
 
         let tacky_packed = {
             let mut buf = Vec::new();
-            let schema = SimpleMessage::default();
+            let schema = SimpleMessage::schema();
             SimpleMessage {
                 normal_int: schema.normal_int.write(&mut buf, anumber),
                 zigzag_int: schema.zigzag_int.write(&mut buf, Some(24)),
@@ -115,7 +115,7 @@ mod tests {
         let map2: HashMap<i32, f64> = HashMap::from_iter([(1, 1.0), (2, 2.0)]);
         let tacky_packed = {
             let mut buf = Vec::new();
-            let schema = MsgWithMaps::default();
+            let schema = MsgWithMaps::schema();
             MsgWithMaps {
                 map1: schema.map1.write(&mut buf, &map1),
                 map2: schema.map2.write(&mut buf, &map2),
@@ -141,7 +141,7 @@ mod tests {
 
         let tacky_packed = {
             let mut buf = Vec::new();
-            let schema = MsgWithEnums::default();
+            let schema = MsgWithEnums::schema();
 
             MsgWithEnums {
                 enum1: schema.enum1.write(&mut buf, Some(SimpleEnum::First)),
@@ -168,7 +168,7 @@ mod tests {
     fn test_with_nested() {
         let tacky_packed = {
             let mut buf = Vec::new();
-            let msg_schema = MsgWithNesting::default();
+            let msg_schema = MsgWithNesting::schema();
 
             MsgWithNesting {
                 enums: msg_schema.enums.write_msg(&mut buf, |buf, scm| {
@@ -261,7 +261,7 @@ mod tests {
     fn test_decode_simple_message() {
         // Encode
         let mut buf = Vec::new();
-        let schema = SimpleMessage::default();
+        let schema = SimpleMessage::schema();
         SimpleMessage {
             normal_int: schema.normal_int.write(&mut buf, Some(42)),
             zigzag_int: schema.zigzag_int.write(&mut buf, Some(-7)),
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn test_decode_enums() {
         let mut buf = Vec::new();
-        let scm = MsgWithEnums::default();
+        let scm = MsgWithEnums::schema();
         MsgWithEnums {
             enum1: scm.enum1.write(&mut buf, Some(SimpleEnum::Second)),
             enum2: scm.enum2.write(&mut buf, &[AnotherEnum::A, AnotherEnum::B]),
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn test_decode_maps() {
         let mut buf = Vec::new();
-        let scm = MsgWithMaps::default();
+        let scm = MsgWithMaps::schema();
         MsgWithMaps {
             map1: scm
                 .map1
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_maps_with_msg_values() {
-        let s = MapsWithMsg::default();
+        let s = MapsWithMsg::schema();
         let mut buf = Vec::new();
         s.map1.write_msg(&mut buf, "key", |buf, s| {
             s.normal_int.write(buf, Some(42));
@@ -459,7 +459,7 @@ mod tests {
     #[test]
     fn test_decode_nested() {
         let mut buf = Vec::new();
-        let schema = MsgWithNesting::default();
+        let schema = MsgWithNesting::schema();
         MsgWithNesting {
             enums: schema.enums.write_msg(&mut buf, |buf, scm| {
                 scm.enum1.write(buf, Some(SimpleEnum::First));
@@ -580,7 +580,7 @@ mod tests {
 
         // Encode with tacky
         let mut buf = Vec::new();
-        let scm = SimpleMessage::default();
+        let scm = SimpleMessage::schema();
 
         SimpleMessage {
             normal_int: scm.normal_int.write(&mut buf, None::<i64>),
@@ -713,7 +713,7 @@ mod tests {
 
         // Encode a message with nested enum and nested message fields
         let mut buf = Vec::new();
-        let schema = Outer::default();
+        let schema = Outer::schema();
         Outer {
             status: schema.status.write(&mut buf, Some(OuterStatus::Active)),
             inner: schema.inner.write_msg(&mut buf, |buf, scm| {
@@ -773,7 +773,7 @@ mod tests {
 
         // Encode a Wrapper message that uses imported types
         let mut buf = Vec::new();
-        let schema = Wrapper::default();
+        let schema = Wrapper::schema();
         Wrapper {
             msg: schema.msg.write_msg(&mut buf, |buf, scm| {
                 scm.normal_int.write(buf, Some(99));
@@ -843,7 +843,7 @@ mod tests {
     fn test_oneof_encode_decode() {
         // Test encoding with the error variant
         let mut buf = Vec::new();
-        let schema = ApiResponse::default();
+        let schema = ApiResponse::schema();
         ApiResponse {
             request_id: schema.request_id.write(&mut buf, Some("req-1")),
             cached: schema.cached.write(&mut buf, Some(true)),
@@ -881,7 +881,7 @@ mod tests {
     fn test_oneof_with_message_variant() {
         // Test encoding with the message variant
         let mut buf = Vec::new();
-        let schema = ApiResponse::default();
+        let schema = ApiResponse::schema();
         ApiResponse {
             request_id: schema.request_id.write(&mut buf, Some("req-2")),
             cached: schema.cached.write(&mut buf, None::<bool>),
@@ -918,7 +918,7 @@ mod tests {
     fn test_oneof_skipped() {
         // Test that skipping the oneof (not writing any variant) works
         let mut buf = Vec::new();
-        let schema = ApiResponse::default();
+        let schema = ApiResponse::schema();
         ApiResponse {
             request_id: schema.request_id.write(&mut buf, Some("req-3")),
             cached: schema.cached.write(&mut buf, Some(false)),

@@ -26,7 +26,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("int64/small", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.normal_int.write(&mut buf, Some(42i64));
             black_box(buf.as_slice());
             buf.clear();
@@ -35,7 +35,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("int64/large", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.normal_int.write(&mut buf, Some(i64::MAX));
             black_box(buf.as_slice());
             buf.clear();
@@ -46,7 +46,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("sint64/negative", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.zigzag_int.write(&mut buf, Some(-123456i64));
             black_box(buf.as_slice());
             buf.clear();
@@ -57,7 +57,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("sfixed64", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.fixed_int.write(&mut buf, Some(999i64));
             black_box(buf.as_slice());
             buf.clear();
@@ -68,7 +68,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("string/short", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.astring.write(&mut buf, Some("hello"));
             black_box(buf.as_slice());
             buf.clear();
@@ -78,7 +78,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
         let long = "a]".repeat(500);
         let mut buf = Vec::with_capacity(1200);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.astring.write(&mut buf, Some(long.as_str()));
             black_box(buf.as_slice());
             buf.clear();
@@ -90,7 +90,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
         let data = vec![0xABu8; 256];
         let mut buf = Vec::with_capacity(300);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.abytes.write(&mut buf, Some(data.as_slice()));
             black_box(buf.as_slice());
             buf.clear();
@@ -101,7 +101,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("bool", |b| {
         let mut buf = Vec::with_capacity(16);
         b.iter(|| {
-            let scm = TSimpleMessage::default();
+            let scm = TSimpleMessage::schema();
             scm.yesno.write(&mut buf, Some(true));
             black_box(buf.as_slice());
             buf.clear();
@@ -112,7 +112,7 @@ fn bench_encode_scalars(c: &mut Criterion) {
     group.bench_function("enum", |b| {
         let mut buf = Vec::with_capacity(16);
         b.iter(|| {
-            let scm = tacky_proto::example::MsgWithEnums::default();
+            let scm = tacky_proto::example::MsgWithEnums::schema();
             scm.enum1.write(&mut buf, Some(TSimpleEnum::Second));
             black_box(buf.as_slice());
             buf.clear();
@@ -144,7 +144,7 @@ fn bench_encode_packed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("varint/write", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 6);
             b.iter(|| {
-                TSimpleMessage::default().manynumbers.write(&mut buf, &ints);
+                TSimpleMessage::schema().manynumbers.write(&mut buf, &ints);
                 black_box(buf.as_slice());
                 buf.clear();
             });
@@ -154,7 +154,7 @@ fn bench_encode_packed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("float/write", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 5);
             b.iter(|| {
-                TSimpleMessage::default()
+                TSimpleMessage::schema()
                     .packed_floats
                     .write(&mut buf, &floats);
                 black_box(buf.as_slice());
@@ -167,7 +167,7 @@ fn bench_encode_packed(c: &mut Criterion) {
             |b, _| {
                 let mut buf = Vec::with_capacity(count * 5);
                 b.iter(|| {
-                    TSimpleMessage::default()
+                    TSimpleMessage::schema()
                         .packed_floats
                         .write_exact(&mut buf, &floats);
                     black_box(buf.as_slice());
@@ -180,7 +180,7 @@ fn bench_encode_packed(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("double/write", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 9);
             b.iter(|| {
-                TSimpleMessage::default()
+                TSimpleMessage::schema()
                     .packed_doubles
                     .write(&mut buf, &doubles);
                 black_box(buf.as_slice());
@@ -193,7 +193,7 @@ fn bench_encode_packed(c: &mut Criterion) {
             |b, _| {
                 let mut buf = Vec::with_capacity(count * 9);
                 b.iter(|| {
-                    TSimpleMessage::default()
+                    TSimpleMessage::schema()
                         .packed_doubles
                         .write_exact(&mut buf, &doubles);
                     black_box(buf.as_slice());
@@ -209,7 +209,7 @@ fn bench_encode_packed(c: &mut Criterion) {
             |b, _| {
                 let mut buf = Vec::with_capacity(count * 5);
                 b.iter(|| {
-                    TSimpleMessage::default()
+                    TSimpleMessage::schema()
                         .packed_fixed32
                         .write_exact(&mut buf, &fixed32s);
                     black_box(buf.as_slice());
@@ -225,7 +225,7 @@ fn bench_encode_packed(c: &mut Criterion) {
             |b, _| {
                 let mut buf = Vec::with_capacity(count * 9);
                 b.iter(|| {
-                    TSimpleMessage::default()
+                    TSimpleMessage::schema()
                         .packed_fixed64
                         .write_exact(&mut buf, &fixed64s);
                     black_box(buf.as_slice());
@@ -256,7 +256,7 @@ fn bench_encode_unpacked_repeated(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("int32", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 8);
             b.iter(|| {
-                TSimpleMessage::default()
+                TSimpleMessage::schema()
                     .manynumbers_unpacked
                     .write(&mut buf, &ints);
                 black_box(buf.as_slice());
@@ -267,7 +267,7 @@ fn bench_encode_unpacked_repeated(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("string", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 16);
             b.iter(|| {
-                TSimpleMessage::default()
+                TSimpleMessage::schema()
                     .manystrings
                     .write(&mut buf, &strings);
                 black_box(buf.as_slice());
@@ -290,7 +290,7 @@ fn bench_encode_nesting_depth(c: &mut Criterion) {
     group.bench_function("depth_1", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = TBigLevel1::default();
+            let scm = TBigLevel1::schema();
             scm.data.write(&mut buf, Some("level1"));
             scm.num.write(&mut buf, Some(1));
             scm.flag.write(&mut buf, Some(true));
@@ -303,7 +303,7 @@ fn bench_encode_nesting_depth(c: &mut Criterion) {
     group.bench_function("depth_2", |b| {
         let mut buf = Vec::with_capacity(128);
         b.iter(|| {
-            let scm = TBigLevel1::default();
+            let scm = TBigLevel1::schema();
             scm.data.write(&mut buf, Some("level1"));
             scm.num.write(&mut buf, Some(1));
             scm.next.write_msg(&mut buf, |buf, scm| {
@@ -319,7 +319,7 @@ fn bench_encode_nesting_depth(c: &mut Criterion) {
     group.bench_function("depth_3", |b| {
         let mut buf = Vec::with_capacity(192);
         b.iter(|| {
-            let scm = TBigLevel1::default();
+            let scm = TBigLevel1::schema();
             scm.data.write(&mut buf, Some("level1"));
             scm.next.write_msg(&mut buf, |buf, scm| {
                 scm.data.write(buf, Some("level2"));
@@ -337,7 +337,7 @@ fn bench_encode_nesting_depth(c: &mut Criterion) {
     group.bench_function("depth_4", |b| {
         let mut buf = Vec::with_capacity(256);
         b.iter(|| {
-            let scm = TBigLevel1::default();
+            let scm = TBigLevel1::schema();
             scm.data.write(&mut buf, Some("level1"));
             scm.next.write_msg(&mut buf, |buf, scm| {
                 scm.data.write(buf, Some("level2"));
@@ -382,7 +382,7 @@ fn bench_encode_maps(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("string_int32", name), count, |b, _| {
             let mut buf = Vec::with_capacity(count * 20);
             b.iter(|| {
-                MsgWithMaps::default().map1.write(&mut buf, &map);
+                MsgWithMaps::schema().map1.write(&mut buf, &map);
                 black_box(buf.as_slice());
                 buf.clear();
             });
@@ -393,7 +393,7 @@ fn bench_encode_maps(c: &mut Criterion) {
     group.bench_function("string_message/5", |b| {
         let mut buf = Vec::with_capacity(512);
         b.iter(|| {
-            let scm = MapsWithMsg::default();
+            let scm = MapsWithMsg::schema();
             for i in 0..5 {
                 let key: &str = match i {
                     0 => "alpha",
@@ -425,7 +425,7 @@ fn bench_encode_oneof(c: &mut Criterion) {
     group.bench_function("string_variant", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = ApiResponse::default();
+            let scm = ApiResponse::schema();
             scm.request_id.write(&mut buf, Some("req-123"));
             scm.result.write_error(&mut buf, "something went wrong");
             scm.cached.write(&mut buf, Some(false));
@@ -437,7 +437,7 @@ fn bench_encode_oneof(c: &mut Criterion) {
     group.bench_function("int_variant", |b| {
         let mut buf = Vec::with_capacity(64);
         b.iter(|| {
-            let scm = ApiResponse::default();
+            let scm = ApiResponse::schema();
             scm.request_id.write(&mut buf, Some("req-123"));
             scm.result.write_code(&mut buf, 404);
             scm.cached.write(&mut buf, Some(true));
@@ -449,7 +449,7 @@ fn bench_encode_oneof(c: &mut Criterion) {
     group.bench_function("message_variant", |b| {
         let mut buf = Vec::with_capacity(128);
         b.iter(|| {
-            let scm = ApiResponse::default();
+            let scm = ApiResponse::schema();
             scm.request_id.write(&mut buf, Some("req-123"));
             scm.result.write_data_msg(&mut buf, |buf, scm| {
                 scm.normal_int.write(buf, Some(42));
@@ -474,7 +474,7 @@ fn bench_decode_fields(c: &mut Criterion) {
     // Encode a SimpleMessage with many field types populated
     let mut wire = Vec::with_capacity(256);
     {
-        let scm = TSimpleMessage::default();
+        let scm = TSimpleMessage::schema();
         scm.normal_int.write(&mut wire, Some(42i64));
         scm.zigzag_int.write(&mut wire, Some(-7i64));
         scm.fixed_int.write(&mut wire, Some(999i64));
@@ -525,7 +525,7 @@ fn bench_decode_fields(c: &mut Criterion) {
     // Decode the realistic MixedUsageMessage
     let mut mixed_wire = Vec::with_capacity(512);
     {
-        let schema = TMixedUsageMessage::default();
+        let schema = TMixedUsageMessage::schema();
         schema
             .session_id
             .write(&mut mixed_wire, Some("session-12345"));
@@ -587,7 +587,7 @@ fn bench_decode_packed(c: &mut Criterion) {
 
         // Encode packed varint field
         let mut wire_varint = Vec::new();
-        TSimpleMessage::default()
+        TSimpleMessage::schema()
             .manynumbers
             .write(&mut wire_varint, &data);
 
@@ -611,7 +611,7 @@ fn bench_decode_packed(c: &mut Criterion) {
         // Encode packed doubles
         let doubles: Vec<f64> = (0..*count).map(|i| i as f64 * 0.5).collect();
         let mut wire_doubles = Vec::new();
-        TSimpleMessage::default()
+        TSimpleMessage::schema()
             .packed_doubles
             .write(&mut wire_doubles, &doubles);
 
@@ -633,7 +633,7 @@ fn bench_decode_packed(c: &mut Criterion) {
         // Encode packed fixed32
         let fixed32s: Vec<u32> = (0..*count as u32).map(|i| i * 7).collect();
         let mut wire_fixed32 = Vec::new();
-        TSimpleMessage::default()
+        TSimpleMessage::schema()
             .packed_fixed32
             .write(&mut wire_fixed32, &fixed32s);
 

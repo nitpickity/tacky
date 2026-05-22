@@ -44,7 +44,7 @@ use tacky_proto::example::{MixedUsageMessage as TMixedUsageMessage, SimpleEnum a
 
 /// Encode a full MixedUsageMessage with tacky, all fields set.
 fn tacky_encode_mixed_all(buf: &mut Vec<u8>) {
-    let schema = TMixedUsageMessage::default();
+    let schema = TMixedUsageMessage::schema();
     schema
         .session_id
         .write(buf, Some("sess-a]b1c2d3-e4f5-6789-abcd-ef0123456789"));
@@ -343,7 +343,7 @@ fn bench_encode_repeated_strings(c: &mut Criterion) {
 
         // Verify wire compatibility
         let mut tacky_wire = Vec::with_capacity(size * 64);
-        TRepeatedStrings::default()
+        TRepeatedStrings::schema()
             .values
             .write(&mut tacky_wire, &data);
         let mut prost_wire = Vec::new();
@@ -358,7 +358,7 @@ fn bench_encode_repeated_strings(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("tacky", name), size, |b, _| {
             let mut buf = Vec::with_capacity(tacky_wire.len());
             b.iter(|| {
-                TRepeatedStrings::default().values.write(&mut buf, &data);
+                TRepeatedStrings::schema().values.write(&mut buf, &data);
                 black_box(buf.as_slice());
                 buf.clear();
             });
@@ -485,7 +485,7 @@ fn pprof_encode_data() -> PprofEncodeData {
 fn tacky_encode_pprof(buf: &mut Vec<u8>, data: &PprofEncodeData) {
     use tacky_pprof::perftools::profiles::Profile;
 
-    let s = Profile::default();
+    let s = Profile::schema();
 
     // sample_type: cpu / nanoseconds
     s.sample_type.write_msg(buf, |buf, vt| {
@@ -962,7 +962,7 @@ fn accesslog_encode_data() -> AccessLogEncodeData {
 fn tacky_encode_accesslog(buf: &mut Vec<u8>, data: &AccessLogEncodeData) {
     use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
 
-    let s = AccessLog::default();
+    let s = AccessLog::schema();
 
     for i in 0..NUM_LOG_ENTRIES {
         s.entries.write_msg(buf, |buf, e| {

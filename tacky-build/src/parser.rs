@@ -381,6 +381,9 @@ fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenS
             pub fn new() -> Self {
                 Self::default()
             }
+            pub fn schema() -> Self {
+                Self::default()
+            }
             pub fn decode(buf: &[u8])-> #k<'_> {
                 #k::new(buf)
             }

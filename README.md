@@ -40,7 +40,7 @@ Which you use like this:
 
 ```rust
 let mut buffer = Vec::new();
-let schema = SimpleMessage::default();
+let schema = SimpleMessage::schema();
 
 schema.text.write(&mut buffer, Some("hello world"));
 schema.numbers.write(&mut buffer, [1, 2, 3, 4]);
@@ -84,7 +84,7 @@ The usual assumption is that skipping the generated struct means losing safety â
 
 ```rust
 let mut buffer = Vec::new();
-let schema = SimpleMessage::default();
+let schema = SimpleMessage::schema();
 
 SimpleMessage {
     text: schema.text.write(&mut buffer, Some("hello world")),
@@ -143,7 +143,7 @@ Message {
         }
         schema.events // mark as written; a for loop returns (), not the field
     },
-    ..Message::default()
+    ..Message::schema()
 };
 ```
 
