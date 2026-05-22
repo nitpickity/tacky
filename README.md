@@ -28,7 +28,7 @@ message SimpleMessage {
 `tacky-build` generates this schema:
 
 ```rust
-pub struct SimpleMessageSchema {
+pub struct SimpleMessage {
     text: Field<1, Optional<PbString>>,
     numbers: Field<2, Repeated<Int32>>,
     blobs: Field<3, Repeated<PbBytes>>,
@@ -40,7 +40,7 @@ Which you use like this:
 
 ```rust
 let mut buffer = Vec::new();
-let schema = SimpleMessageSchema::default();
+let schema = SimpleMessage::default();
 
 schema.text.write(&mut buffer, Some("hello world"));
 schema.numbers.write(&mut buffer, [1, 2, 3, 4]);
@@ -84,9 +84,9 @@ The usual assumption is that skipping the generated struct means losing safety �
 
 ```rust
 let mut buffer = Vec::new();
-let schema = SimpleMessageSchema::default();
+let schema = SimpleMessage::default();
 
-SimpleMessageSchema {
+SimpleMessage {
     text: schema.text.write(&mut buffer, Some("hello world")),
     numbers: schema.numbers.write(&mut buffer, [1, 2, 3, 4]),
     blobs: schema.blobs,  // explicitly skipped
@@ -94,7 +94,7 @@ SimpleMessageSchema {
 };
 ```
 
-`SimpleMessageSchema` is zero-sized — nothing is being constructed here. The `.write()` calls are the side effects, filling the buffer. The struct literal is purely a compile-time exhaustiveness check. Add a field to your proto schema and this stops compiling. Same safety as a generated data struct, none of the allocation.
+`SimpleMessage` is zero-sized — nothing is being constructed here. The `.write()` calls are the side effects, filling the buffer. The struct literal is purely a compile-time exhaustiveness check. Add a field to your proto schema and this stops compiling. Same safety as a generated data struct, none of the allocation.
 
 ## Nested Messages
 
@@ -114,13 +114,13 @@ For repeated message fields, call `write_msg` multiple times — once per messag
 
 ```rust
 schema.events.write_msg(&mut buf, |buf, scm| {
-    EventSchema {
+    Event {
         name: scm.name.write(buf, Some("click")),
         ..scm
     }
 });
 schema.events.write_msg(&mut buf, |buf, scm| {
-    EventSchema {
+    Event {
         name: scm.name.write(buf, Some("scroll")),
         ..scm
     }
@@ -135,7 +135,7 @@ Message {
     events: {
         for e in events {
             schema.events.write_msg(&mut buf, |buf, scm| {
-                EventSchema {
+                Event {
                     name: scm.name.write(buf, Some(e)),
                     ..scm
                 }
@@ -208,7 +208,7 @@ Decoding is roughly on par with prost when materializing into owned structs. Tac
 `tacky-build` generates an enum with a variant per field, and an iterator that yields them one at a time. You match on variants and build your domain object from primitives. You can either exhaustively match all the fields or just select what you care about. Unknown fields are skipped by the iterator.
 
 ```rust
-for field in SimpleMessageDecoder::new(&buf) {
+for field in SimpleMessage::decode(&buf) {
     match field? {
         SimpleMessageField::Text(s) => { /* s is a &str */ },
         SimpleMessageField::Numbers(n) => { /* n is an i32 */ },
@@ -225,7 +225,7 @@ Unpacked repeated fields appear as one variant per occurrence — match in the l
 
 ```rust
 let mut tags: Vec<String> = Vec::new();
-for field in MessageDecoder::new(&buf) {
+for field in Message::decode(&buf) {
     match field? {
         MessageField::Tag(s) => tags.push(s.to_owned()),
         _ => {}
@@ -236,7 +236,7 @@ for field in MessageDecoder::new(&buf) {
 Packed repeated fields (and `repeated` scalars in proto3, which are packed by default) come back as a single variant carrying an iterator over the elements. Each element is a `Result`, since varint decoding can fail mid-stream:
 
 ```rust
-for field in MessageDecoder::new(&buf) {
+for field in Message::decode(&buf) {
     match field? {
         MessageField::Numbers(iter) => {
             for n in iter {
@@ -306,11 +306,11 @@ Every type in the schema system — scalar markers like `Int32` and `PbString`, 
 A generated message schema is just a struct of these ZSTs:
 
 ```rust
-pub struct SimpleMessageSchema {
+pub struct SimpleMessage {
     text: Field<1, Optional<PbString>>,     // 0 bytes
     numbers: Field<2, Repeated<Int32>>,     // 0 bytes
 }
-// size_of::<SimpleMessageSchema>() == 0
+// size_of::<SimpleMessage>() == 0
 ```
 
 This is why the exhaustiveness pattern works without overhead. When you write a struct literal for compile-time field checking, you're not constructing anything — the compiler verifies every field is accounted for, and the generated code is identical to calling `.write()` on each field individually.
