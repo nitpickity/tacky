@@ -88,7 +88,7 @@ pub mod optional {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
-            f(t.buffer, M::default());
+            f(t.buffer, M::schema());
             Field::new()
         }
     }
@@ -129,7 +129,7 @@ pub mod repeated {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
-            f(t.buffer, M::default());
+            f(t.buffer, M::schema());
             Field::new()
         }
     }
@@ -263,7 +263,7 @@ pub mod required {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
-            func(t.buffer, M::default());
+            func(t.buffer, M::schema());
             Field::new()
         }
     }
@@ -298,7 +298,7 @@ pub mod plain {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             t.write(buf);
             let t = Tack::new(buf);
-            func(t.buffer, M::default());
+            func(t.buffer, M::schema());
             Field::new()
         }
     }
@@ -437,7 +437,7 @@ pub mod maps {
                 let tag = const { EncodedTag::new(2, WireType::LEN) };
                 tag.write(t.buffer);
                 let tt = Tack::new_with_width(t.buffer, 2);
-                value(tt.buffer, M::default());
+                value(tt.buffer, M::schema());
             }
             Field::new()
         }
@@ -447,7 +447,11 @@ pub mod maps {
 /// Marker trait for generated message schema types. Implemented by `tacky-build`
 /// on every generated schema struct. Used as a bound on `Field`'s `write_msg`
 /// methods to distinguish nested message fields from scalar fields.
-pub trait MessageSchema: Default {}
+pub trait MessageSchema: Sized {
+    /// Constructs a fresh schema value. Generated schemas are zero-sized,
+    /// so this never allocates and never reads memory.
+    fn schema() -> Self;
+}
 
 /// Bridges domain types to protobuf scalars for serialization.
 ///
