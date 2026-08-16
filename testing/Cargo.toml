@@ -8,9 +8,18 @@ edition = "2021"
 [dependencies]
 tacky = { path = "../tacky" }
 prost = "0.14"
+# The prost arm of `benches/descriptor_set.rs`. prost-types is generated from
+# descriptor.proto, so the comparison costs us no extra codegen.
+prost-types = "0.14"
+[features]
+# Adds the official C++ protobuf runtime as a third arm in `benches/comparison.rs`.
+# Needs `protoc`, pkg-config and a protobuf C++ install: `brew install protobuf pkg-config`.
+cpp = ["cc"]
+
 [build-dependencies]
 prost-build = "0.14"
 tacky-build = { path = "../tacky-build" }
+cc = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -21,4 +30,16 @@ harness = false
 
 [[bench]]
 name = "regression"
+harness = false
+
+[[bench]]
+name = "google_message1"
+harness = false
+
+[[bench]]
+name = "descriptor_set"
+harness = false
+
+[[bench]]
+name = "otlp_traces"
 harness = false

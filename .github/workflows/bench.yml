@@ -11,9 +11,46 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install protoc
         run: sudo apt-get install -y protobuf-compiler
+      # No `--features cpp` here, so this job needs nothing but protoc. The C++ arms get
+      # their own job below, which has to build the runtime from source.
       - name: Run benchmarks
-        run: cargo bench -p testing --bench comparison 2>&1 | tee bench_output.txt
+        run: |
+          cargo bench -p testing \
+            --bench comparison --bench descriptor_set \
+            --bench google_message1 --bench otlp_traces \
+            2>&1 | tee bench_output.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results
           path: bench_output.txt
+
+  # The `cpp` benches built with static protobuf lib, from source, for best performance. 
+  # Filtered to `^encode_` because that is where the C++ checks exist — the decode groups
+  # have none yet (and doesnt quite matter)
+  bench-cpp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build deps
+        run: sudo apt-get install -y protobuf-compiler cmake ninja-build pkg-config
+      - name: Cache protobuf C++ prefix
+        id: cpp-prefix
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tacky-cpp/prefix
+          key: protobuf-cpp-v28.1-${{ runner.os }}
+      - name: Build protobuf C++ from source
+        if: steps.cpp-prefix.outputs.cache-hit != 'true'
+        run: scripts/build_cpp_static.sh v28.1
+      - name: Run benchmarks against protobuf C++
+        run: |
+          TACKY_PROTOBUF_PREFIX="$HOME/.cache/tacky-cpp/prefix" \
+            cargo bench -p testing --features cpp \
+              --bench comparison --bench descriptor_set \
+              --bench google_message1 --bench otlp_traces \
+              -- '^encode_' 2>&1 | tee bench_cpp_output.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-cpp
+          path: bench_cpp_output.txt
