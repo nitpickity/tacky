@@ -64,28 +64,23 @@ const FDS_TESTING_PROTOS: &[u8] = include_bytes!("../data/testing_protos.fds");
 // Every writer emits fields in ascending tag order, which is the order prost and
 // protoc emit, so the two outputs differ only where tacky pads a length prefix.
 
-fn tacky_encode(buf: &mut Vec<u8>, set: &prost_types::FileDescriptorSet) {
+fn tacky_encode(buf: &mut impl tacky::WriteBuf, set: &prost_types::FileDescriptorSet) {
     let s = td::FileDescriptorSet::schema();
-    for f in &set.file {
-        s.file.write_msg(buf, |buf, _| write_file(buf, f));
-    }
+    s.file
+        .write_msgs(buf, &set.file, |buf, _, f| write_file(buf, f));
 }
 
-fn write_file(buf: &mut Vec<u8>, f: &prost_types::FileDescriptorProto) {
+fn write_file(buf: &mut impl tacky::WriteBuf, f: &prost_types::FileDescriptorProto) {
     let s = td::FileDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.package.write(buf, f.package.as_deref());
     s.dependency.write(buf, &f.dependency);
-    for m in &f.message_type {
-        s.message_type
-            .write_msg(buf, |buf, _| write_message(buf, m));
-    }
-    for e in &f.enum_type {
-        s.enum_type.write_msg(buf, |buf, _| write_enum(buf, e));
-    }
-    for x in &f.extension {
-        s.extension.write_msg(buf, |buf, _| write_field(buf, x));
-    }
+    s.message_type
+        .write_msgs(buf, &f.message_type, |buf, _, m| write_message(buf, m));
+    s.enum_type
+        .write_msgs(buf, &f.enum_type, |buf, _, e| write_enum(buf, e));
+    s.extension
+        .write_msgs(buf, &f.extension, |buf, _, x| write_field(buf, x));
     if let Some(o) = &f.options {
         s.options.write_msg(buf, |buf, t| {
             t.java_package.write(buf, o.java_package.as_deref());
@@ -120,27 +115,22 @@ fn write_file(buf: &mut Vec<u8>, f: &prost_types::FileDescriptorProto) {
 
 /// Recursive: `nested_type` is a `DescriptorProto` again, which is most of what
 /// makes this corpus different from a flat message.
-fn write_message(buf: &mut Vec<u8>, m: &prost_types::DescriptorProto) {
+fn write_message(buf: &mut impl tacky::WriteBuf, m: &prost_types::DescriptorProto) {
     let s = td::DescriptorProto::schema();
     s.name.write(buf, m.name.as_deref());
-    for f in &m.field {
-        s.field.write_msg(buf, |buf, _| write_field(buf, f));
-    }
-    for n in &m.nested_type {
-        s.nested_type.write_msg(buf, |buf, _| write_message(buf, n));
-    }
-    for e in &m.enum_type {
-        s.enum_type.write_msg(buf, |buf, _| write_enum(buf, e));
-    }
-    for r in &m.extension_range {
-        s.extension_range.write_msg(buf, |buf, t| {
+    s.field
+        .write_msgs(buf, &m.field, |buf, _, f| write_field(buf, f));
+    s.nested_type
+        .write_msgs(buf, &m.nested_type, |buf, _, n| write_message(buf, n));
+    s.enum_type
+        .write_msgs(buf, &m.enum_type, |buf, _, e| write_enum(buf, e));
+    s.extension_range
+        .write_msgs(buf, &m.extension_range, |buf, t, r| {
             t.start.write(buf, r.start);
             t.end.write(buf, r.end);
         });
-    }
-    for x in &m.extension {
-        s.extension.write_msg(buf, |buf, _| write_field(buf, x));
-    }
+    s.extension
+        .write_msgs(buf, &m.extension, |buf, _, x| write_field(buf, x));
     if let Some(o) = &m.options {
         s.options.write_msg(buf, |buf, t| {
             t.message_set_wire_format
@@ -151,21 +141,18 @@ fn write_message(buf: &mut Vec<u8>, m: &prost_types::DescriptorProto) {
             t.map_entry.write(buf, o.map_entry);
         });
     }
-    for d in &m.oneof_decl {
-        s.oneof_decl.write_msg(buf, |buf, t| {
-            t.name.write(buf, d.name.as_deref());
-        });
-    }
-    for r in &m.reserved_range {
-        s.reserved_range.write_msg(buf, |buf, t| {
+    s.oneof_decl.write_msgs(buf, &m.oneof_decl, |buf, t, d| {
+        t.name.write(buf, d.name.as_deref());
+    });
+    s.reserved_range
+        .write_msgs(buf, &m.reserved_range, |buf, t, r| {
             t.start.write(buf, r.start);
             t.end.write(buf, r.end);
         });
-    }
     s.reserved_name.write(buf, &m.reserved_name);
 }
 
-fn write_field(buf: &mut Vec<u8>, f: &prost_types::FieldDescriptorProto) {
+fn write_field(buf: &mut impl tacky::WriteBuf, f: &prost_types::FieldDescriptorProto) {
     let s = td::FieldDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.extendee.write(buf, f.extendee.as_deref());
@@ -192,21 +179,18 @@ fn write_field(buf: &mut Vec<u8>, f: &prost_types::FieldDescriptorProto) {
     s.proto3_optional.write(buf, f.proto3_optional);
 }
 
-fn write_enum(buf: &mut Vec<u8>, e: &prost_types::EnumDescriptorProto) {
+fn write_enum(buf: &mut impl tacky::WriteBuf, e: &prost_types::EnumDescriptorProto) {
     let s = td::EnumDescriptorProto::schema();
     s.name.write(buf, e.name.as_deref());
-    for v in &e.value {
-        s.value.write_msg(buf, |buf, t| {
-            t.name.write(buf, v.name.as_deref());
-            t.number.write(buf, v.number);
-        });
-    }
-    for r in &e.reserved_range {
-        s.reserved_range.write_msg(buf, |buf, t| {
+    s.value.write_msgs(buf, &e.value, |buf, t, v| {
+        t.name.write(buf, v.name.as_deref());
+        t.number.write(buf, v.number);
+    });
+    s.reserved_range
+        .write_msgs(buf, &e.reserved_range, |buf, t, r| {
             t.start.write(buf, r.start);
             t.end.write(buf, r.end);
         });
-    }
     s.reserved_name.write(buf, &e.reserved_name);
 }
 
@@ -479,6 +463,50 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
             set.encode(&mut buf).unwrap();
             black_box(buf.as_slice());
             buf.clear();
+        });
+    });
+
+    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+    // *direction* from the buffer kind.
+    group.bench_function("tacky-slice", |b| {
+        let mut backing = vec![0u8; cap + 1024];
+        b.iter(|| {
+            let mut sb = tacky::SliceBuf::new(&mut backing);
+            tacky_encode(&mut sb, &set);
+            black_box(sb.written());
+        });
+    });
+
+    // A downward buffer emits fields in the reverse of the order they are written, which is
+    // legal, so this is checked by decoding rather than by comparing bytes.
+    let mut rev_backing = vec![0u8; cap + 1024];
+    let mut rb = tacky::RevBuf::new(&mut rev_backing);
+    tacky_encode(&mut rb, &set);
+    assert_eq!(
+        prost_types::FileDescriptorSet::decode(rb.written()).unwrap(),
+        set,
+        "reverse writer output does not decode back to the same message"
+    );
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; cap + 1024];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode(&mut rb, &set);
+            black_box(rb.written());
+        });
+    });
+
+    // Handing the result over as an owned, index-0 buffer: the reverse output lives at the
+    // tail, so a `Vec<u8>`-shaped sink forces one compaction.
+    group.bench_function("tacky-rev-owned", |b| {
+        let mut backing = vec![0u8; cap + 1024];
+        let mut out = Vec::with_capacity(cap + 1024);
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode(&mut rb, &set);
+            out.clear();
+            out.extend_from_slice(rb.written());
+            black_box(out.as_slice());
         });
     });
     // descriptor.proto is proto2, so the C++ runtime never validates its strings

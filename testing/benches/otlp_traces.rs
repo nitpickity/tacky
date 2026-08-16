@@ -286,44 +286,39 @@ fn corpus(value_len: (usize, usize)) -> pcol::ExportTraceServiceRequest {
 // Fields go out in ascending tag order, which is the order prost emits, so the two
 // outputs differ only where tacky pads a length prefix.
 
-fn tacky_encode(buf: &mut Vec<u8>, req: &pcol::ExportTraceServiceRequest) {
+fn tacky_encode(buf: &mut impl tacky::WriteBuf, req: &pcol::ExportTraceServiceRequest) {
     let s = t::ExportTraceServiceRequest::schema();
-    for rs in &req.resource_spans {
-        s.resource_spans.write_msg(buf, |buf, s| {
+    s.resource_spans
+        .write_msgs(buf, &req.resource_spans, |buf, s, rs| {
             if let Some(r) = &rs.resource {
                 s.resource.write_msg(buf, |buf, s| {
-                    for a in &r.attributes {
-                        s.attributes.write_msg(buf, |buf, _| write_kv(buf, a));
-                    }
+                    s.attributes
+                        .write_msgs(buf, &r.attributes, |buf, _, a| write_kv(buf, a));
                     s.dropped_attributes_count
                         .write(buf, r.dropped_attributes_count);
                 });
             }
-            for ss in &rs.scope_spans {
-                s.scope_spans.write_msg(buf, |buf, s| {
+            s.scope_spans
+                .write_msgs(buf, &rs.scope_spans, |buf, s, ss| {
                     if let Some(sc) = &ss.scope {
                         s.scope.write_msg(buf, |buf, s| {
                             s.name.write(buf, sc.name.as_str());
                             s.version.write(buf, sc.version.as_str());
-                            for a in &sc.attributes {
-                                s.attributes.write_msg(buf, |buf, _| write_kv(buf, a));
-                            }
+                            s.attributes
+                                .write_msgs(buf, &sc.attributes, |buf, _, a| write_kv(buf, a));
                             s.dropped_attributes_count
                                 .write(buf, sc.dropped_attributes_count);
                         });
                     }
-                    for span in &ss.spans {
-                        s.spans.write_msg(buf, |buf, _| write_span(buf, span));
-                    }
+                    s.spans
+                        .write_msgs(buf, &ss.spans, |buf, _, span| write_span(buf, span));
                     s.schema_url.write(buf, ss.schema_url.as_str());
                 });
-            }
             s.schema_url.write(buf, rs.schema_url.as_str());
         });
-    }
 }
 
-fn write_span(buf: &mut Vec<u8>, span: &ptrace::Span) {
+fn write_span(buf: &mut impl tacky::WriteBuf, span: &ptrace::Span) {
     let s = t::Span::schema();
     s.trace_id.write(buf, span.trace_id.as_slice());
     s.span_id.write(buf, span.span_id.as_slice());
@@ -333,36 +328,29 @@ fn write_span(buf: &mut Vec<u8>, span: &ptrace::Span) {
     s.kind.write(buf, t::SpanSpanKind::from(span.kind));
     s.start_time_unix_nano.write(buf, span.start_time_unix_nano);
     s.end_time_unix_nano.write(buf, span.end_time_unix_nano);
-    for a in &span.attributes {
-        s.attributes.write_msg(buf, |buf, _| write_kv(buf, a));
-    }
+    s.attributes
+        .write_msgs(buf, &span.attributes, |buf, _, a| write_kv(buf, a));
     s.dropped_attributes_count
         .write(buf, span.dropped_attributes_count);
-    for e in &span.events {
-        s.events.write_msg(buf, |buf, s| {
-            s.time_unix_nano.write(buf, e.time_unix_nano);
-            s.name.write(buf, e.name.as_str());
-            for a in &e.attributes {
-                s.attributes.write_msg(buf, |buf, _| write_kv(buf, a));
-            }
-            s.dropped_attributes_count
-                .write(buf, e.dropped_attributes_count);
-        });
-    }
+    s.events.write_msgs(buf, &span.events, |buf, s, e| {
+        s.time_unix_nano.write(buf, e.time_unix_nano);
+        s.name.write(buf, e.name.as_str());
+        s.attributes
+            .write_msgs(buf, &e.attributes, |buf, _, a| write_kv(buf, a));
+        s.dropped_attributes_count
+            .write(buf, e.dropped_attributes_count);
+    });
     s.dropped_events_count.write(buf, span.dropped_events_count);
-    for l in &span.links {
-        s.links.write_msg(buf, |buf, s| {
-            s.trace_id.write(buf, l.trace_id.as_slice());
-            s.span_id.write(buf, l.span_id.as_slice());
-            s.trace_state.write(buf, l.trace_state.as_str());
-            for a in &l.attributes {
-                s.attributes.write_msg(buf, |buf, _| write_kv(buf, a));
-            }
-            s.dropped_attributes_count
-                .write(buf, l.dropped_attributes_count);
-            s.flags.write(buf, l.flags);
-        });
-    }
+    s.links.write_msgs(buf, &span.links, |buf, s, l| {
+        s.trace_id.write(buf, l.trace_id.as_slice());
+        s.span_id.write(buf, l.span_id.as_slice());
+        s.trace_state.write(buf, l.trace_state.as_str());
+        s.attributes
+            .write_msgs(buf, &l.attributes, |buf, _, a| write_kv(buf, a));
+        s.dropped_attributes_count
+            .write(buf, l.dropped_attributes_count);
+        s.flags.write(buf, l.flags);
+    });
     s.dropped_links_count.write(buf, span.dropped_links_count);
     if let Some(st) = &span.status {
         s.status.write_msg(buf, |buf, s| {
@@ -373,7 +361,7 @@ fn write_span(buf: &mut Vec<u8>, span: &ptrace::Span) {
     s.flags.write(buf, span.flags);
 }
 
-fn write_kv(buf: &mut Vec<u8>, kv: &pcommon::KeyValue) {
+fn write_kv(buf: &mut impl tacky::WriteBuf, kv: &pcommon::KeyValue) {
     let s = t::KeyValue::schema();
     s.key.write(buf, kv.key.as_str());
     if let Some(v) = &kv.value {
@@ -383,7 +371,7 @@ fn write_kv(buf: &mut Vec<u8>, kv: &pcommon::KeyValue) {
 
 /// Recursive through `ArrayValue`/`KeyValueList`. An unset `AnyValue.value` writes
 /// nothing, matching prost.
-fn write_any(buf: &mut Vec<u8>, v: &pcommon::AnyValue) {
+fn write_any(buf: &mut impl tacky::WriteBuf, v: &pcommon::AnyValue) {
     use pcommon::any_value::Value;
     let s = t::AnyValue::schema();
     match &v.value {
@@ -402,16 +390,14 @@ fn write_any(buf: &mut Vec<u8>, v: &pcommon::AnyValue) {
         }
         Some(Value::ArrayValue(a)) => {
             s.value.write_array_value_msg(buf, |buf, s| {
-                for inner in &a.values {
-                    s.values.write_msg(buf, |buf, _| write_any(buf, inner));
-                }
+                s.values
+                    .write_msgs(buf, &a.values, |buf, _, inner| write_any(buf, inner));
             });
         }
         Some(Value::KvlistValue(kvl)) => {
             s.value.write_kvlist_value_msg(buf, |buf, s| {
-                for inner in &kvl.values {
-                    s.values.write_msg(buf, |buf, _| write_kv(buf, inner));
-                }
+                s.values
+                    .write_msgs(buf, &kvl.values, |buf, _, inner| write_kv(buf, inner));
             });
         }
         Some(Value::BytesValue(x)) => {
@@ -652,6 +638,50 @@ fn bench_otlp(c: &mut Criterion) {
             buf.clear();
         });
     });
+
+    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+    // *direction* from the buffer kind.
+    group.bench_function("tacky-slice", |b| {
+        let mut backing = vec![0u8; cap + 4096];
+        b.iter(|| {
+            let mut sb = tacky::SliceBuf::new(&mut backing);
+            tacky_encode(&mut sb, &req);
+            black_box(sb.written());
+        });
+    });
+
+    // A downward buffer emits fields in the reverse of the order they are written, which is
+    // legal, so this is checked by decoding rather than by comparing bytes.
+    let mut rev_backing = vec![0u8; cap + 4096];
+    let mut rb = tacky::RevBuf::new(&mut rev_backing);
+    tacky_encode(&mut rb, &req);
+    assert_eq!(
+        pcol::ExportTraceServiceRequest::decode(rb.written()).unwrap(),
+        req,
+        "reverse writer output does not decode back to the same message"
+    );
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; cap + 4096];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode(&mut rb, &req);
+            black_box(rb.written());
+        });
+    });
+
+    // Handing the result over as an owned, index-0 buffer: the reverse output lives at the
+    // tail, so a `Vec<u8>`-shaped sink forces one compaction.
+    group.bench_function("tacky-rev-owned", |b| {
+        let mut backing = vec![0u8; cap + 4096];
+        let mut out = Vec::with_capacity(cap + 4096);
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode(&mut rb, &req);
+            out.clear();
+            out.extend_from_slice(rb.written());
+            black_box(out.as_slice());
+        });
+    });
     #[cfg(feature = "cpp")]
     for (label, kind) in [
         ("cpp", testing::cpp::OTLP_TRACES),
@@ -719,6 +749,50 @@ fn bench_otlp_value_len(c: &mut Criterion) {
                 req.encode(&mut buf).unwrap();
                 black_box(buf.as_slice());
                 buf.clear();
+            });
+        });
+
+        // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+        // *direction* from the buffer kind.
+        group.bench_function("tacky-slice", |b| {
+            let mut backing = vec![0u8; cap + 4096];
+            b.iter(|| {
+                let mut sb = tacky::SliceBuf::new(&mut backing);
+                tacky_encode(&mut sb, &req);
+                black_box(sb.written());
+            });
+        });
+
+        // A downward buffer emits fields in the reverse of the order they are written, which is
+        // legal, so this is checked by decoding rather than by comparing bytes.
+        let mut rev_backing = vec![0u8; cap + 4096];
+        let mut rb = tacky::RevBuf::new(&mut rev_backing);
+        tacky_encode(&mut rb, &req);
+        assert_eq!(
+            pcol::ExportTraceServiceRequest::decode(rb.written()).unwrap(),
+            req,
+            "reverse writer output does not decode back to the same message"
+        );
+        group.bench_function("tacky-rev", |b| {
+            let mut backing = vec![0u8; cap + 4096];
+            b.iter(|| {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                tacky_encode(&mut rb, &req);
+                black_box(rb.written());
+            });
+        });
+
+        // Handing the result over as an owned, index-0 buffer: the reverse output lives at the
+        // tail, so a `Vec<u8>`-shaped sink forces one compaction.
+        group.bench_function("tacky-rev-owned", |b| {
+            let mut backing = vec![0u8; cap + 4096];
+            let mut out = Vec::with_capacity(cap + 4096);
+            b.iter(|| {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                tacky_encode(&mut rb, &req);
+                out.clear();
+                out.extend_from_slice(rb.written());
+                black_box(out.as_slice());
             });
         });
         #[cfg(feature = "cpp")]

@@ -48,11 +48,32 @@ pub fn write_wide_varint(width: usize, value: u64, buf: &mut impl WriteBuf) {
     buf.put_u8(((value >> (7 * (width - 1))) & 0x7F) as u8)
 }
 
+/// Width of the length placeholder every writer reserves, in bytes.
+///
+/// A placeholder holds lengths below `2^(7*WIDTH)`: 1 byte covers 128 B, 2 covers 16 KB,
+/// 3 covers 2 MB. It is a straight trade and not a size/speed dial in one direction:
+///
+/// - **Too narrow** and every nested message past the limit takes the [`Tack::fix_overflow`]
+///   path, which grows the buffer and `copy_within`s that message's whole payload — a cost
+///   proportional to payload size, compounding with nesting depth.
+/// - **Too wide** and every message pays the difference in bytes, as a padded (valid but
+///   non-minimal) varint, plus the stores to write it. Only width 1 is guaranteed minimal,
+///   because `fix_overflow` rewrites the prefix to exactly the width the length needs.
+///
+/// Width 1 is the default because it is the only width that is *always* minimal: it is the
+/// one width where a message that does not fit gets its prefix rewritten to exactly the
+/// length it needs, so output is byte-identical to a two-pass encoder's. Wider settings buy
+/// time on deeply nested large payloads — measured at -30% on a 232 KB five-level OTLP batch
+/// — at the cost of padding every message (+25% output on a corpus of thousands of tiny
+/// ones). A downward-growing buffer ([`RevBuf`](`crate::RevBuf`)) avoids the trade entirely,
+/// since it knows each length before it writes it.
+pub const DEFAULT_WIDTH: u32 = 1;
+
 impl<'b, B: WriteBuf> Tack<'b, B> {
-    /// Creates a new Tack with a 3-byte placeholder (~2MB max).
+    /// Creates a new Tack with a [`DEFAULT_WIDTH`]-byte placeholder.
     /// Used for nested messages. The caller must write the field tag first.
     pub fn new(buffer: &'b mut B) -> Self {
-        Self::new_with_width(buffer, 3)
+        Self::new_with_width(buffer, DEFAULT_WIDTH)
     }
     /// Creates a new Tack with a custom placeholder width.
     /// Used for packed fields and map entries (width=2, ~16KB max).

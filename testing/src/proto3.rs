@@ -400,6 +400,53 @@ mod tests {
 
     // --- Nested messages ---
 
+    /// Pins the reverse buffer at the byte level: writing a message's fields in *descending*
+    /// order into a `RevBuf` must produce exactly the bytes an ascending forward writer
+    /// produces, since each write prepends. Decode-and-compare checks (what the benches use,
+    /// because they share one ascending encoder for both directions) would absorb an
+    /// off-by-one or a reversed varint; this does not.
+    #[test]
+    fn test_revbuf_descending_matches_prost() {
+        let mut backing = [0u8; 256];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        let s = ScalarMessage::schema();
+        // Descending field order: a_bytes is 15, a_int32 is 1.
+        s.a_bytes.write(&mut rb, [0xFFu8, 0x00].as_slice());
+        s.a_string.write(&mut rb, "hello");
+        s.a_double.write(&mut rb, 2.71828f64);
+        s.a_float.write(&mut rb, 3.14f32);
+        s.a_sfixed64.write(&mut rb, i64::MIN);
+        s.a_sfixed32.write(&mut rb, i32::MIN);
+        s.a_fixed64.write(&mut rb, 0xCAFE_BABE_DEAD_BEEFu64);
+        s.a_fixed32.write(&mut rb, 0xDEAD_BEEFu32);
+        s.a_bool.write(&mut rb, true);
+        s.a_sint64.write(&mut rb, i64::MIN);
+        s.a_sint32.write(&mut rb, -50);
+        s.a_uint64.write(&mut rb, u64::MAX);
+        s.a_uint32.write(&mut rb, 300u32);
+        s.a_int64.write(&mut rb, -100i64);
+        s.a_int32.write(&mut rb, 42);
+
+        let prost_msg = prost_proto3::ScalarMessage {
+            a_int32: 42,
+            a_int64: -100,
+            a_uint32: 300,
+            a_uint64: u64::MAX,
+            a_sint32: -50,
+            a_sint64: i64::MIN,
+            a_bool: true,
+            a_fixed32: 0xDEAD_BEEF,
+            a_fixed64: 0xCAFE_BABE_DEAD_BEEF,
+            a_sfixed32: i32::MIN,
+            a_sfixed64: i64::MIN,
+            a_float: 3.14,
+            a_double: 2.71828,
+            a_string: "hello".into(),
+            a_bytes: vec![0xFF, 0x00],
+        };
+        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+    }
+
     #[test]
     fn test_nesting_tacky_to_prost() {
         let mut buf = Vec::new();

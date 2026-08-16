@@ -1,8 +1,20 @@
 //! Buffer trait for protobuf serialization.
 //!
 //! [`WriteBuf`] covers both appending (for scalar writes) and random-access patching
-//! (for [`Tack`](`crate::Tack`)'s length placeholders). `Vec<u8>` and [`SliceBuf`]
-//! implement this.
+//! (for [`Tack`](`crate::Tack`)'s length placeholders). Three buffers implement it:
+//!
+//! - `Vec<u8>` — grows as needed, the default.
+//! - [`SliceBuf`] — a cursor over a caller-owned `&mut [u8]`, for `no_std`/no-alloc.
+//! - [`RevBuf`] — fills the same kind of slice *backwards*. Every write prepends, so a
+//!   nested message's length is known by the time it is written: no placeholder, no
+//!   `Tack`, no overflow shift, and always a minimal-width varint. The cost is that the
+//!   caller must let the writers own repeated-field iteration (see
+//!   `Field::<N, Repeated<M>>::write_msgs`), because a hand-written loop would emit list
+//!   elements in reverse. Map entries are exempt: their order is unspecified by protobuf,
+//!   so they are written in iteration order either way.
+//!
+//! Direction is a compile-time property ([`WriteBuf::REVERSE`]), so the writers' two arms
+//! fold away per buffer type and the forward path pays nothing for the reverse one.
 
 /// A contiguous byte buffer that supports both appending and random-access patching.
 ///
@@ -10,6 +22,14 @@
 /// used by [`Tack`](`crate::Tack`) to patch length placeholders. `grow` and `copy_within`
 /// are only called on Tack's overflow cold path — fixed-size buffers can panic there.
 pub trait WriteBuf {
+    /// True for buffers that grow *downward*, where every write prepends. Composite
+    /// writes — tag then value, length then payload — have to be emitted in the opposite
+    /// order so they land correctly, and this is what lets the writers pick. It is an
+    /// associated const, so each branch folds away per buffer type at compile time.
+    ///
+    /// `WriteBuf` is never used as a trait object, so the const costs no flexibility.
+    const REVERSE: bool = false;
+
     fn put_u8(&mut self, val: u8);
     fn put_slice(&mut self, src: &[u8]);
     fn len(&self) -> usize;
@@ -34,9 +54,39 @@ pub trait WriteBuf {
 
     /// Appends a base-128 varint. The default is the byte-at-a-time loop, which is right
     /// for `Vec` (`push` is a compare and a store) but leaves a cursor buffer paying its
-    /// bounds check per byte — see [`SliceBuf`]'s override.
+    /// bounds check per byte — see [`SliceBuf`]'s override. [`RevBuf`] must override it for
+    /// a second reason: prepending one byte at a time would reverse the varint's groups.
     fn put_varint(&mut self, value: u64) {
         crate::scalars::write_varint_into(value, self);
+    }
+
+    /// Writes a length-delimited submessage: the tag, the byte length of whatever `f`
+    /// writes, and the payload.
+    ///
+    /// The forward default reserves a placeholder ([`Tack`](`crate::Tack`)) because the
+    /// length is not known until `f` returns; a downward-growing buffer overrides this to
+    /// run `f` first and prepend the exact length, which is why it needs no placeholder,
+    /// no width and no overflow shift. Every nested-message and packed-field writer goes
+    /// through here, so this method is the only place submessage direction lives.
+    /// `#[inline]` is load-bearing: this is one call per submessage, and without it the
+    /// `Tack` cannot be kept in registers across the closure — accesslog paid +80% and otlp
+    /// +45% with it missing.
+    #[inline]
+    fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self))
+    where
+        Self: Sized,
+    {
+        tag.write(self);
+        let t = crate::tack::Tack::new(self);
+        f(t.buffer);
+    }
+
+    /// Appends a length-delimited payload: its length as a varint, then the bytes.
+    /// Direction lives here rather than in every writer — a downward buffer prepends the
+    /// payload first and the length second, so both land in the right order.
+    fn put_len_delimited(&mut self, payload: &[u8]) {
+        self.put_varint(payload.len() as u64);
+        self.put_slice(payload);
     }
 
     fn put_u32_le(&mut self, val: u32) {
@@ -92,6 +142,173 @@ mod alloc_impls {
         #[inline]
         fn copy_within(&mut self, src: core::ops::Range<usize>, dest: usize) {
             self.as_mut_slice().copy_within(src, dest);
+        }
+    }
+}
+
+// --- Reverse (downward-growing) buffer ---
+
+/// A buffer that fills from the end backwards, so a nested message's length is known by
+/// the time it has to be written — no placeholder, no [`Tack`](`crate::Tack`), no overflow
+/// shift, and always a minimal-width varint.
+///
+/// The cost is that **every write prepends**, so fields land on the wire in the reverse of
+/// the order they are written. Protobuf allows any field order, with two exceptions that
+/// are the caller's responsibility:
+///
+/// - **elements of a repeated field must be written in reverse**, since their wire order is
+///   their list order;
+/// - **duplicate map keys** follow last-one-wins, so their relative order matters too.
+///
+/// Writing a message's fields in descending field order therefore reproduces exactly the
+/// bytes an ascending forward writer produces — which is how the spike is checked.
+///
+/// Fixed capacity: `grow` panics, like [`SliceBuf`]. Use [`RevBuf::written`] to get the
+/// bytes, which live at the *tail* of the backing slice.
+pub struct RevBuf<'a> {
+    buf: &'a mut [u8],
+    /// Index of the first written byte. Writes move it down; `buf.len() - pos` is the
+    /// length written so far.
+    pos: usize,
+}
+
+impl<'a> RevBuf<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        let pos = buf.len();
+        RevBuf { buf, pos }
+    }
+
+    /// The bytes written so far, at the tail of the backing slice.
+    pub fn written(&self) -> &[u8] {
+        &self.buf[self.pos..]
+    }
+
+    #[inline]
+    fn claim(&mut self, n: usize) -> &mut [u8] {
+        assert!(self.pos >= n, "RevBuf exhausted");
+        self.pos -= n;
+        // SAFETY: `pos + n` is the old `pos`, which is `<= buf.len()` for the buffer's
+        // whole life, and the assert is what makes the subtraction not wrap.
+        unsafe { self.buf.get_unchecked_mut(self.pos..self.pos + n) }
+    }
+}
+
+impl WriteBuf for RevBuf<'_> {
+    const REVERSE: bool = true;
+
+    /// Runs `f`, then prepends the exact length and the tag — [`Tack`](`crate::Tack`)'s job
+    /// without any of its machinery, since the length is already known when it is needed.
+    #[inline]
+    fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self)) {
+        let before = self.len();
+        f(self);
+        let payload = (self.len() - before) as u64;
+
+        // Both parts are known here — the payload length was just measured and the tag is a
+        // compile-time constant — so claim once and store. Writing them as two separate
+        // appends costs two asserts, two cursor updates, and an out-of-line `memcpy` for
+        // the tag's one to five bytes, which is the per-message overhead that made this
+        // buffer lose to the forward path on `Tack`-dense corpora.
+        let (tag_bytes, tag_len) = tag.raw();
+        // Single-byte lengths are the overwhelming majority — every submessage under 128 B —
+        // and this arm mirrors the forward path's, where a width-1 close is one compare and
+        // one store. `encoded_len_varint` is a `clz` plus a multiply and divide; the forward
+        // path only pays a compare against `0x80`.
+        if payload < 0x80 {
+            let dst = self.claim(tag_len + 1);
+            // SAFETY: `dst.len() == tag_len + 1`, and `tag_len <= 5` per `EncodedTag::new`.
+            unsafe {
+                for i in 0..tag_len {
+                    *dst.get_unchecked_mut(i) = *tag_bytes.get_unchecked(i);
+                }
+                *dst.get_unchecked_mut(tag_len) = payload as u8;
+            }
+            return;
+        }
+        let vn = crate::scalars::encoded_len_varint(payload);
+        let dst = self.claim(tag_len + vn);
+        // SAFETY: `dst.len() == tag_len + vn` by construction, and `tag_len <= 5` is
+        // `EncodedTag::new`'s invariant, so every index below is in range.
+        unsafe {
+            for i in 0..tag_len {
+                *dst.get_unchecked_mut(i) = *tag_bytes.get_unchecked(i);
+            }
+            let mut v = payload;
+            for i in 0..vn - 1 {
+                *dst.get_unchecked_mut(tag_len + i) = ((v & 0x7F) | 0x80) as u8;
+                v >>= 7;
+            }
+            *dst.get_unchecked_mut(tag_len + vn - 1) = v as u8;
+        }
+    }
+
+    #[inline]
+    fn put_u8(&mut self, val: u8) {
+        self.claim(1)[0] = val;
+    }
+    #[inline]
+    fn put_slice(&mut self, src: &[u8]) {
+        // One block prepend: the bytes keep their order, only the block moves.
+        self.claim(src.len()).copy_from_slice(src);
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        let pos = self.pos;
+        &mut self.buf[pos..]
+    }
+    fn grow(&mut self, _additional: usize) {
+        panic!("RevBuf has a fixed capacity and cannot grow")
+    }
+    fn copy_within(&mut self, _src: core::ops::Range<usize>, _dest: usize) {
+        panic!("RevBuf never shifts: lengths are known before they are written")
+    }
+    #[inline]
+    fn put_varint(&mut self, value: u64) {
+        // Claim the exact width and store into it. Staging into a `[u8; 10]` and handing
+        // that to `put_slice` instead costs an out-of-line `memcpy` per varint — ~4.5 ns
+        // of call overhead for one or two bytes, and this is the most frequent write there
+        // is, since every length prefix goes through it.
+        // No `value < 0x80` fast path here, deliberately: field values are mixed magnitude
+        // (pprof interleaves small ids with 4-byte addresses), so that branch mispredicts
+        // and costs 40% on pprof, while `encoded_len_varint`'s `clz` is branchless. The
+        // opposite holds for *message lengths* in `put_msg`, which are locally uniform.
+        let n = crate::scalars::encoded_len_varint(value);
+        let dst = self.claim(n);
+        let mut v = value;
+        for i in 0..n - 1 {
+            dst[i] = ((v & 0x7F) | 0x80) as u8;
+            v >>= 7;
+        }
+        dst[n - 1] = v as u8;
+    }
+    #[inline]
+    fn put_len_delimited(&mut self, payload: &[u8]) {
+        // One claim for length and payload together: the length's width is known from the
+        // payload's, so splitting this into two appends only buys a second assert.
+        if payload.len() < 0x80 {
+            let dst = self.claim(1 + payload.len());
+            // SAFETY: `dst.len() == 1 + payload.len()` by construction.
+            unsafe {
+                *dst.get_unchecked_mut(0) = payload.len() as u8;
+                dst.get_unchecked_mut(1..).copy_from_slice(payload);
+            }
+            return;
+        }
+        let vn = crate::scalars::encoded_len_varint(payload.len() as u64);
+        let dst = self.claim(vn + payload.len());
+        // SAFETY: `dst.len() == vn + payload.len()` by construction.
+        unsafe {
+            let mut v = payload.len() as u64;
+            for i in 0..vn - 1 {
+                *dst.get_unchecked_mut(i) = ((v & 0x7F) | 0x80) as u8;
+                v >>= 7;
+            }
+            *dst.get_unchecked_mut(vn - 1) = v as u8;
+            dst.get_unchecked_mut(vn..).copy_from_slice(payload);
         }
     }
 }

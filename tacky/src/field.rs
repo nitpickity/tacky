@@ -75,11 +75,18 @@ pub mod optional {
         /// every *set* optional field was an out-of-line 79-instruction call. Adding it is
         /// -8%/-9% on the descriptor-set corpora. Do **not** also inline `write_msg`.
         #[inline]
-        pub fn write<V: ProtoEncode<P>>(self, buf: &mut impl WriteBuf, value: Option<V>) -> Self {
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: Option<V>) -> Self {
             if let Some(value) = value {
                 let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-                t.write(buf);
-                V::encode(buf, &value);
+                // A downward-growing buffer prepends, so the tag goes last to land first.
+                // `B::REVERSE` is an associated const: the dead arm folds away per buffer.
+                if B::REVERSE {
+                    V::encode(buf, &value);
+                    t.write(buf);
+                } else {
+                    t.write(buf);
+                    V::encode(buf, &value);
+                }
             }
             Field::new()
         }
@@ -91,9 +98,7 @@ pub mod optional {
         /// The length prefix is patched automatically when the closure returns.
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new(buf);
-            f(t.buffer, M::schema());
+            buf.put_msg(t, |buf| f(buf, M::schema()));
             Field::new()
         }
     }
@@ -103,26 +108,43 @@ pub mod repeated {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Repeated<P>> {
         /// Writes each element with its own tag. For non-packed repeated fields.
+        /// The `DoubleEndedIterator` bound is what lets a downward-growing buffer keep list
+        /// order: there, elements have to be emitted back-to-front, since each one prepends.
         #[inline]
-        pub fn write<V: ProtoEncode<P>>(
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>, I: IntoIterator<Item = V>>(
             self,
-            buf: &mut impl WriteBuf,
-            values: impl IntoIterator<Item = V>,
-        ) -> Field<N, Repeated<P>> {
+            buf: &mut B,
+            values: I,
+        ) -> Field<N, Repeated<P>>
+        where
+            I::IntoIter: DoubleEndedIterator,
+        {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            for value in values {
-                t.write(buf);
-                V::encode(buf, &value);
+            if B::REVERSE {
+                for value in values.into_iter().rev() {
+                    V::encode(buf, &value);
+                    t.write(buf);
+                }
+            } else {
+                for value in values {
+                    t.write(buf);
+                    V::encode(buf, &value);
+                }
             }
             Field::new()
         }
         /// Writes a single element to a repeated field. Convenience for appending
         /// one value without wrapping it in an iterator.
         #[inline]
-        pub fn write_single<V: ProtoEncode<P>>(self, buf: &mut impl WriteBuf, value: V) -> Self {
+        pub fn write_single<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            t.write(buf);
-            V::encode(buf, &value);
+            if B::REVERSE {
+                V::encode(buf, &value);
+                t.write(buf);
+            } else {
+                t.write(buf);
+                V::encode(buf, &value);
+            }
             Field::new()
         }
     }
@@ -132,9 +154,38 @@ pub mod repeated {
         /// to write multiple messages — each call produces one entry.
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new(buf);
-            f(t.buffer, M::schema());
+            buf.put_msg(t, |buf| f(buf, M::schema()));
+            Field::new()
+        }
+
+        /// Writes every element of `values`, one length-delimited submessage each.
+        ///
+        /// Equivalent to `write_msg` in a loop, except that the writer owns the iteration —
+        /// which is what lets it emit elements back-to-front for a downward-growing buffer,
+        /// where each write prepends and a caller's own loop would silently reverse the
+        /// list. Prefer this over a hand-written loop for that reason alone.
+        ///
+        /// The closure takes the element as a third argument, which is the only difference
+        /// from `write_msg` at the call site.
+        pub fn write_msgs<B: WriteBuf, I: IntoIterator>(
+            self,
+            buf: &mut B,
+            values: I,
+            mut f: impl FnMut(&mut B, M, I::Item),
+        ) -> Self
+        where
+            I::IntoIter: DoubleEndedIterator,
+        {
+            let tag = const { EncodedTag::new(N, WireType::LEN) };
+            if B::REVERSE {
+                for value in values.into_iter().rev() {
+                    buf.put_msg(tag, |buf| f(buf, M::schema(), value));
+                }
+            } else {
+                for value in values {
+                    buf.put_msg(tag, |buf| f(buf, M::schema(), value));
+                }
+            }
             Field::new()
         }
     }
@@ -147,22 +198,33 @@ pub mod packed {
         /// Uses a [`Tack`] with width 2 (~16KB) to avoid a two-pass length calculation.
         /// Skips the field entirely if the iterator is empty.
         #[inline]
-        pub fn write<V: ProtoEncode<P>>(
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>, I: IntoIterator<Item = V>>(
             self,
-            buf: &mut impl WriteBuf,
-            values: impl IntoIterator<Item = V>,
-        ) -> Field<N, Packed<P>> {
+            buf: &mut B,
+            values: I,
+        ) -> Field<N, Packed<P>>
+        where
+            I::IntoIter: DoubleEndedIterator,
+        {
             let mut iter = values.into_iter();
             let Some(first) = iter.next() else {
                 return Field::new();
             };
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new_with_width(buf, 2);
-            P::write_value(first.as_scalar(), t.buffer);
-            for value in iter {
-                P::write_value(value.as_scalar(), t.buffer);
-            }
+            buf.put_msg(t, |buf| {
+                if B::REVERSE {
+                    // The tail back-to-front, then `first` last so it lands leftmost.
+                    for value in iter.rev() {
+                        P::write_value(value.as_scalar(), buf);
+                    }
+                    P::write_value(first.as_scalar(), buf);
+                } else {
+                    P::write_value(first.as_scalar(), buf);
+                    for value in iter {
+                        P::write_value(value.as_scalar(), buf);
+                    }
+                }
+            });
             Field::new()
         }
 
@@ -171,13 +233,24 @@ pub mod packed {
         /// directly since `count * fixed_size` gives the exact byte length upfront.
         /// For varint types, falls back to the Tack since encoded size depends on values.
         #[inline]
-        pub fn write_exact<I>(self, buf: &mut impl WriteBuf, values: I) -> Field<N, Packed<P>>
+        pub fn write_exact<B: WriteBuf, I>(self, buf: &mut B, values: I) -> Field<N, Packed<P>>
         where
             I: IntoIterator<Item: ProtoEncode<P>>,
-            I::IntoIter: ExactSizeIterator,
+            I::IntoIter: ExactSizeIterator + DoubleEndedIterator,
         {
             let it = values.into_iter();
             if it.len() == 0 {
+                return Field::new();
+            }
+            if B::REVERSE {
+                // The exact length is no use to a downward buffer — `put_msg` already knows
+                // it by the time it writes it — so both element kinds take one path.
+                let t = const { EncodedTag::new(N, WireType::LEN) };
+                buf.put_msg(t, |buf| {
+                    for value in it.rev() {
+                        P::write_value(value.as_scalar(), buf);
+                    }
+                });
                 return Field::new();
             }
             if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
@@ -190,13 +263,14 @@ pub mod packed {
                 }
                 return Field::new();
             }
-            // Varint types: still need Tack since encoded size depends on values
+            // Varint types: the encoded size depends on the values, so this needs the
+            // placeholder `put_msg` reserves.
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new_with_width(buf, 2);
-            for value in it {
-                P::write_value(value.as_scalar(), t.buffer);
-            }
+            buf.put_msg(t, |buf| {
+                for value in it {
+                    P::write_value(value.as_scalar(), buf);
+                }
+            });
             Field::new()
         }
     }
@@ -247,14 +321,19 @@ pub mod required {
     use super::*;
 
     impl<const N: u32, P: ProtobufScalar> Field<N, Required<P>> {
-        pub fn write<V: ProtoEncode<P>>(
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>>(
             self,
-            buf: &mut impl WriteBuf,
+            buf: &mut B,
             value: V,
         ) -> Field<N, Required<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            t.write(buf);
-            V::encode(buf, &value);
+            if B::REVERSE {
+                V::encode(buf, &value);
+                t.write(buf);
+            } else {
+                t.write(buf);
+                V::encode(buf, &value);
+            }
             Field::new()
         }
     }
@@ -266,9 +345,7 @@ pub mod required {
             mut func: impl FnMut(&mut B, M),
         ) -> Field<N, Required<M>> {
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new(buf);
-            func(t.buffer, M::schema());
+            buf.put_msg(t, |buf| func(buf, M::schema()));
             Field::new()
         }
     }
@@ -280,17 +357,22 @@ pub mod plain {
     impl<const N: u32, P: ProtobufScalar> Field<N, Plain<P>> {
         /// Writes the field only if the value differs from the protobuf default
         /// (0, false, empty string, etc.). This is proto3's implicit presence behavior.
-        pub fn write<V: ProtoEncode<P>>(
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>>(
             self,
-            buf: &mut impl WriteBuf,
+            buf: &mut B,
             value: V,
         ) -> Field<N, Plain<P>> {
             if value.is_default() {
                 return Field::new();
             }
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            t.write(buf);
-            V::encode(buf, &value);
+            if B::REVERSE {
+                V::encode(buf, &value);
+                t.write(buf);
+            } else {
+                t.write(buf);
+                V::encode(buf, &value);
+            }
             Field::new()
         }
     }
@@ -301,9 +383,7 @@ pub mod plain {
             mut func: impl FnMut(&mut B, M),
         ) -> Field<N, Plain<M>> {
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
-            let t = Tack::new(buf);
-            func(t.buffer, M::schema());
+            buf.put_msg(t, |buf| func(buf, M::schema()));
             Field::new()
         }
     }
@@ -386,9 +466,22 @@ pub mod maps {
     impl<const N: u32, K: ProtobufScalar, V: ProtobufScalar> Field<N, PbMap<K, V>> {
         /// Writes all key-value pairs from an iterator. Accepts anything that yields
         /// pairs of encodable types — `HashMap`, `BTreeMap`, arrays of tuples, etc.
-        pub fn write<I: IntoIterator<Item = (A, B)>, A: ProtoEncode<K>, B: ProtoEncode<V>>(
+        ///
+        /// Entry order is *not* reversed for a downward-growing buffer, unlike a repeated
+        /// field's elements: protobuf leaves map entry order unspecified, and requiring
+        /// `DoubleEndedIterator` here would rule out `HashMap`, whose iterator is not one.
+        /// The one visible consequence is duplicate keys — the wire format resolves those
+        /// last-one-wins, so an input that yields the same key twice resolves to the *other*
+        /// value than it would through a forward buffer. `HashMap`/`BTreeMap` cannot produce
+        /// duplicates; an iterator of tuples can.
+        pub fn write<
+            Buf: WriteBuf,
+            I: IntoIterator<Item = (A, B)>,
+            A: ProtoEncode<K>,
+            B: ProtoEncode<V>,
+        >(
             self,
-            buf: &mut impl WriteBuf,
+            buf: &mut Buf,
             values: I,
         ) -> Field<N, PbMap<K, V>> {
             for (k, v) in values {
@@ -398,27 +491,43 @@ pub mod maps {
         }
         /// Writes a single map entry. The value is `Option` so that key-only entries
         /// can represent deletions in update messages.
-        pub fn write_entry<A: ProtoEncode<K>, B: ProtoEncode<V>>(
+        pub fn write_entry<Buf: WriteBuf, A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
-            buf: &mut impl WriteBuf,
+            buf: &mut Buf,
             key: A,
             value: Option<B>,
         ) -> Field<N, PbMap<K, V>> {
             // the tag and wire type for the map field itself
-            let t = const { EncodedTag::new(N, WireType::LEN) };
-            t.write(buf);
+            let entry = const { EncodedTag::new(N, WireType::LEN) };
+            let key_tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
+            let val_tag = const { EncodedTag::new(2, V::WIRE_TYPE) };
 
+            // An entry's length is exact without a placeholder either way: it is the sum of
+            // two scalar field lengths, both known before anything is written.
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
             let len = K::len(1, k) + v.map(|v| V::len(2, v)).unwrap_or(0);
-            write_varint(len as u64, buf);
-            let t = const { EncodedTag::new(1, K::WIRE_TYPE) };
-            t.write(buf);
 
+            if Buf::REVERSE {
+                // Value field first so it lands rightmost, then the key field, then the
+                // length, then the entry tag — the mirror of the order below.
+                if let Some(value) = value {
+                    B::encode(buf, &value);
+                    val_tag.write(buf);
+                }
+                A::encode(buf, &key);
+                key_tag.write(buf);
+                buf.put_varint(len as u64);
+                entry.write(buf);
+                return Field::new();
+            }
+
+            entry.write(buf);
+            buf.put_varint(len as u64);
+            key_tag.write(buf);
             A::encode(buf, &key);
             if let Some(value) = value {
-                let t = const { EncodedTag::new(2, V::WIRE_TYPE) };
-                t.write(buf);
+                val_tag.write(buf);
                 B::encode(buf, &value);
             }
             Field::new()
@@ -432,16 +541,32 @@ pub mod maps {
             key: A,
             mut value: impl FnMut(&mut B, M),
         ) -> Field<N, PbMap<K, M>> {
-            let tag = const { EncodedTag::new(N, WireType::LEN) };
-            tag.write(buf);
-            let t = Tack::new_with_width(buf, 2);
-            let tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
-            tag.write(t.buffer);
+            let entry = const { EncodedTag::new(N, WireType::LEN) };
+            let key_tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
+            let val_tag = const { EncodedTag::new(2, WireType::LEN) };
+
+            if B::REVERSE {
+                // Both lengths are exact by the time they are written, so neither level
+                // needs a placeholder. Value field first, so it lands to the right of the
+                // key field.
+                buf.put_msg(entry, |buf| {
+                    buf.put_msg(val_tag, |buf| value(buf, M::schema()));
+                    A::encode(buf, &key);
+                    key_tag.write(buf);
+                });
+                return Field::new();
+            }
+
+            // Forward: kept on explicit width-2 placeholders rather than routed through
+            // `put_msg`, so map entries' reserved width — and therefore their bytes — is
+            // unchanged by this.
+            entry.write(buf);
+            let t = Tack::new_with_width(buf, crate::tack::DEFAULT_WIDTH);
+            key_tag.write(t.buffer);
             A::encode(t.buffer, &key);
             {
-                let tag = const { EncodedTag::new(2, WireType::LEN) };
-                tag.write(t.buffer);
-                let tt = Tack::new_with_width(t.buffer, 2);
+                val_tag.write(t.buffer);
+                let tt = Tack::new_with_width(t.buffer, crate::tack::DEFAULT_WIDTH);
                 value(tt.buffer, M::schema());
             }
             Field::new()

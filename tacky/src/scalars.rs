@@ -413,8 +413,7 @@ impl ProtobufScalar for PbString {
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
-        write_varint(value.len() as u64, buf);
-        buf.put_slice(value.as_bytes());
+        buf.put_len_delimited(value.as_bytes());
     }
 
     #[inline]
@@ -436,8 +435,7 @@ impl ProtobufScalar for PbBytes {
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
-        write_varint(value.len() as u64, buf);
-        buf.put_slice(value);
+        buf.put_len_delimited(value);
     }
 
     #[inline]
@@ -832,6 +830,7 @@ mod tests {
 /// the varint encoding happens at compile time. At runtime, writing a tag is
 /// just a memcpy of 1-2 bytes. This matters in tight loops over repeated fields
 /// where the tag is written once per element.
+#[derive(Copy, Clone)]
 pub struct EncodedTag {
     bytes: [u8; 5],
     len: u8,
@@ -862,6 +861,16 @@ impl EncodedTag {
     #[inline]
     pub fn write(&self, buf: &mut impl WriteBuf) {
         buf.put_slice(&self.bytes[..self.len as usize]);
+    }
+
+    /// The 5-byte backing array and how many of its bytes are the tag. Exposed so a
+    /// caller that is already claiming space for something else — `RevBuf::put_msg`
+    /// claims for the length varint — can store the tag into it rather than paying a
+    /// second reserve and an out-of-line `memcpy` for one to five bytes. `len()` is
+    /// always in `1..=5`.
+    #[inline]
+    pub const fn raw(&self) -> (&[u8; 5], usize) {
+        (&self.bytes, self.len as usize)
     }
 }
 

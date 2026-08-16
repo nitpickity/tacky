@@ -80,7 +80,7 @@ fn bench_ffi_overhead(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 /// Encode a full MixedUsageMessage with tacky, all fields set.
-fn tacky_encode_mixed_all(buf: &mut Vec<u8>) {
+fn tacky_encode_mixed_all(buf: &mut impl tacky::WriteBuf) {
     let schema = TMixedUsageMessage::schema();
     schema
         .session_id
@@ -112,7 +112,7 @@ fn tacky_encode_mixed_all(buf: &mut Vec<u8>) {
         scm.metrics.write(buf, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.5, 2.0, 3.0, 5.0, 10.0]);
         scm.flags.write(buf, &[true, false, true, true, false, false, true, true, false, true]);
     });
-    for (label, count, active) in [
+    const HISTORY: [(&str, i32, bool); 8] = [
         ("order-received", 150, true),
         ("validation-passed", 148, true),
         ("inventory-reserved", 145, true),
@@ -121,13 +121,14 @@ fn tacky_encode_mixed_all(buf: &mut Vec<u8>) {
         ("shipped", 130, true),
         ("delivered", 120, false),
         ("returned", 5, true),
-    ] {
-        schema.history.write_msg(buf, |buf, scm| {
-            scm.label.write(buf, Some(label));
-            scm.count.write(buf, Some(count));
-            scm.active.write(buf, Some(active));
+    ];
+    schema
+        .history
+        .write_msgs(buf, &HISTORY, |buf, scm, (label, count, active)| {
+            scm.label.write(buf, Some(*label));
+            scm.count.write(buf, Some(*count));
+            scm.active.write(buf, Some(*active));
         });
-    }
     schema.related_ids.write(
         buf,
         &[
@@ -230,6 +231,51 @@ fn bench_encode_realistic(c: &mut Criterion) {
     // exactly, which is what proves both runtimes encode the same message.
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
+
+    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+    // *direction* from the buffer kind.
+    group.bench_function("tacky-slice", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut sb = tacky::SliceBuf::new(&mut backing);
+            tacky_encode_mixed_all(&mut sb);
+            black_box(sb.written());
+        });
+    });
+
+    // Field order differs — a downward buffer emits fields in the reverse of the order they
+    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
+    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
+    let mut rev_backing = vec![0u8; size as usize + 1024];
+    let mut rb = tacky::RevBuf::new(&mut rev_backing);
+    tacky_encode_mixed_all(&mut rb);
+    assert_eq!(
+        PMixedUsageMessage::decode(rb.written()).unwrap(),
+        prost_msg,
+        "reverse writer output does not decode back to the same message"
+    );
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_mixed_all(&mut rb);
+            black_box(rb.written());
+        });
+    });
+
+    // What handing the result over as an owned, index-0 buffer costs: the reverse output
+    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
+    group.bench_function("tacky-rev-owned", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        let mut out = Vec::with_capacity(size as usize + 1024);
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_mixed_all(&mut rb);
+            out.clear();
+            out.extend_from_slice(rb.written());
+            black_box(out.as_slice());
+        });
+    });
     #[cfg(feature = "cpp")]
     bench_cpp_arms(&mut group, "cpp", cpp::MIXED, &prost_wire);
 
@@ -534,7 +580,7 @@ fn pprof_encode_data() -> PprofEncodeData {
     }
 }
 
-fn tacky_encode_pprof(buf: &mut Vec<u8>, data: &PprofEncodeData) {
+fn tacky_encode_pprof(buf: &mut impl tacky::WriteBuf, data: &PprofEncodeData) {
     use tacky_pprof::perftools::profiles::Profile;
 
     let s = Profile::schema();
@@ -545,20 +591,16 @@ fn tacky_encode_pprof(buf: &mut Vec<u8>, data: &PprofEncodeData) {
         vt.unit.write(buf, 2i64);
     });
 
-    // samples
-    for i in 0..NUM_SAMPLES {
-        s.sample.write_msg(buf, |buf, sample| {
-            sample.location_id.write(buf, &data.sample_locs[i]);
-            sample.value.write(buf, &data.sample_values[i]);
-            sample.label.write_msg(buf, |buf, l| {
-                l.key.write(buf, 3i64);
-                l.num.write(buf, (i % 8) as i64);
-                l.num_unit.write(buf, 4i64);
-            });
+    s.sample.write_msgs(buf, 0..NUM_SAMPLES, |buf, sample, i| {
+        sample.location_id.write(buf, &data.sample_locs[i]);
+        sample.value.write(buf, &data.sample_values[i]);
+        sample.label.write_msg(buf, |buf, l| {
+            l.key.write(buf, 3i64);
+            l.num.write(buf, (i % 8) as i64);
+            l.num_unit.write(buf, 4i64);
         });
-    }
+    });
 
-    // mapping
     s.mapping.write_msg(buf, |buf, m| {
         m.id.write(buf, 1u64);
         m.memory_start.write(buf, 0x400000u64);
@@ -572,44 +614,39 @@ fn tacky_encode_pprof(buf: &mut Vec<u8>, data: &PprofEncodeData) {
         m.has_inline_frames.write(buf, true);
     });
 
-    // locations
-    for i in 1..=NUM_LOCATIONS {
-        s.location.write_msg(buf, |buf, loc| {
+    s.location
+        .write_msgs(buf, 1..=NUM_LOCATIONS, |buf, loc, i| {
             loc.id.write(buf, i as u64);
             loc.mapping_id.write(buf, 1u64);
             loc.address.write(buf, (0x400000 + i * 16) as u64);
-            loc.line.write_msg(buf, |buf, line| {
-                line.function_id.write(buf, (i % NUM_FUNCTIONS + 1) as u64);
-                line.line.write(buf, (i * 10) as i64);
-            });
-            if i % 3 == 0 {
-                loc.line.write_msg(buf, |buf, line| {
-                    line.function_id
-                        .write(buf, ((i + 1) % NUM_FUNCTIONS + 1) as u64);
-                    line.line.write(buf, (i * 10 + 5) as i64);
+            // One `Line` per location, two on every third — as a slice, so the writer controls
+            // element order for both directions.
+            let base = ((i % NUM_FUNCTIONS + 1) as u64, (i * 10) as i64);
+            let extra = (((i + 1) % NUM_FUNCTIONS + 1) as u64, (i * 10 + 5) as i64);
+            let pair = [base, extra];
+            let single = [base];
+            let lines: &[(u64, i64)] = if i % 3 == 0 { &pair } else { &single };
+            loc.line
+                .write_msgs(buf, lines, |buf, line, (function_id, no)| {
+                    line.function_id.write(buf, *function_id);
+                    line.line.write(buf, *no);
                 });
-            }
         });
-    }
 
-    // functions
-    for i in 1..=NUM_FUNCTIONS {
-        s.function.write_msg(buf, |buf, f| {
-            f.id.write(buf, i as u64);
-            f.name.write(buf, (7 + i - 1) as i64);
-            f.system_name.write(buf, (7 + i - 1) as i64);
-            f.filename
-                .write(buf, (7 + NUM_FUNCTIONS + (i - 1) % 5) as i64);
-            f.start_line.write(buf, (i * 100) as i64);
-        });
-    }
+    s.function.write_msgs(buf, 1..=NUM_FUNCTIONS, |buf, f, i| {
+        f.id.write(buf, i as u64);
+        f.name.write(buf, (7 + i - 1) as i64);
+        f.system_name.write(buf, (7 + i - 1) as i64);
+        f.filename
+            .write(buf, (7 + NUM_FUNCTIONS + (i - 1) % 5) as i64);
+        f.start_line.write(buf, (i * 100) as i64);
+    });
 
-    // string_table — iterate and write each string individually to avoid intermediate Vec
-    for st in &data.string_table {
-        s.string_table.write(buf, &[st.as_str()]);
-    }
+    // One call with the whole table rather than one call per string: the repeated writer
+    // owns element order, which is what a downward-growing buffer needs.
+    s.string_table
+        .write(buf, data.string_table.iter().map(|st| st.as_str()));
 
-    // scalar fields
     s.time_nanos.write(buf, 1_678_886_400_000_000_000i64);
     s.duration_nanos.write(buf, 30_000_000_000i64);
     s.period_type.write_msg(buf, |buf, vt| {
@@ -740,6 +777,51 @@ fn bench_encode_pprof(c: &mut Criterion) {
     // exactly, which is what proves both runtimes encode the same message.
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
+
+    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+    // *direction* from the buffer kind.
+    group.bench_function("tacky-slice", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut sb = tacky::SliceBuf::new(&mut backing);
+            tacky_encode_pprof(&mut sb, &data);
+            black_box(sb.written());
+        });
+    });
+
+    // Field order differs — a downward buffer emits fields in the reverse of the order they
+    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
+    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
+    let mut rev_backing = vec![0u8; size as usize + 1024];
+    let mut rb = tacky::RevBuf::new(&mut rev_backing);
+    tacky_encode_pprof(&mut rb, &data);
+    assert_eq!(
+        prost_pprof::Profile::decode(rb.written()).unwrap(),
+        prost_msg,
+        "reverse writer output does not decode back to the same message"
+    );
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_pprof(&mut rb, &data);
+            black_box(rb.written());
+        });
+    });
+
+    // What handing the result over as an owned, index-0 buffer costs: the reverse output
+    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
+    group.bench_function("tacky-rev-owned", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        let mut out = Vec::with_capacity(size as usize + 1024);
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_pprof(&mut rb, &data);
+            out.clear();
+            out.extend_from_slice(rb.written());
+            black_box(out.as_slice());
+        });
+    });
     #[cfg(feature = "cpp")]
     bench_cpp_arms(&mut group, "cpp", cpp::PPROF, &prost_wire);
     #[cfg(feature = "cpp")]
@@ -1020,52 +1102,47 @@ fn accesslog_encode_data() -> AccessLogEncodeData {
     }
 }
 
-fn tacky_encode_accesslog(buf: &mut Vec<u8>, data: &AccessLogEncodeData) {
+fn tacky_encode_accesslog(buf: &mut impl tacky::WriteBuf, data: &AccessLogEncodeData) {
     use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
 
+    const BASE_HEADERS: [(&str, &str); 2] = [
+        ("Accept", "application/json"),
+        (
+            "Authorization",
+            "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+        ),
+    ];
+    const WITH_REQUEST_ID: [(&str, &str); 3] = [
+        BASE_HEADERS[0],
+        BASE_HEADERS[1],
+        ("X-Request-Id", "a]b1c2d3-e4f5-6789-abcd-ef0123456789"),
+    ];
+
     let s = AccessLog::schema();
-
-    for i in 0..NUM_LOG_ENTRIES {
-        s.entries.write_msg(buf, |buf, e| {
-            e.remote_addr.write(buf, data.remote_addrs[i].as_str());
-            e.method.write(buf, HttpMethod::from(data.methods[i]));
-            e.path.write(buf, PATHS[i % PATHS.len()]);
-            let q = QUERIES[i % QUERIES.len()];
-            if !q.is_empty() {
-                e.query.write(buf, q);
-            }
-            e.status.write(buf, data.statuses[i]);
-            e.response_bytes.write(buf, data.response_bytes[i]);
-            e.duration_micros.write(buf, data.durations[i]);
-            e.user_agent.write(buf, USER_AGENTS[i % USER_AGENTS.len()]);
-            let r = REFERERS[i % REFERERS.len()];
-            if !r.is_empty() {
-                e.referer.write(buf, r);
-            }
-            e.timestamp.write(buf, data.timestamps[i]);
-            e.host.write(buf, "myapp.example.com");
-            e.protocol.write(buf, "HTTP/2");
-            // 2-3 headers per request
-            e.request_headers.write_msg(buf, |buf, h| {
-                h.name.write(buf, "Accept");
-                h.value.write(buf, "application/json");
+    s.entries.write_msgs(buf, 0..NUM_LOG_ENTRIES, |buf, e, i| {
+        e.remote_addr.write(buf, data.remote_addrs[i].as_str());
+        e.method.write(buf, HttpMethod::from(data.methods[i]));
+        e.path.write(buf, PATHS[i % PATHS.len()]);
+        e.query.write(buf, QUERIES[i % QUERIES.len()]);
+        e.status.write(buf, data.statuses[i]);
+        e.response_bytes.write(buf, data.response_bytes[i]);
+        e.duration_micros.write(buf, data.durations[i]);
+        e.user_agent.write(buf, USER_AGENTS[i % USER_AGENTS.len()]);
+        e.referer.write(buf, REFERERS[i % REFERERS.len()]);
+        e.timestamp.write(buf, data.timestamps[i]);
+        e.host.write(buf, "myapp.example.com");
+        e.protocol.write(buf, "HTTP/2");
+        let headers: &[(&str, &str)] = if i % 3 == 0 {
+            &WITH_REQUEST_ID
+        } else {
+            &BASE_HEADERS
+        };
+        e.request_headers
+            .write_msgs(buf, headers, |buf, h, (name, value)| {
+                h.name.write(buf, *name);
+                h.value.write(buf, *value);
             });
-            e.request_headers.write_msg(buf, |buf, h| {
-                h.name.write(buf, "Authorization");
-                h.value.write(
-                    buf,
-                    "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
-                );
-            });
-            if i % 3 == 0 {
-                e.request_headers.write_msg(buf, |buf, h| {
-                    h.name.write(buf, "X-Request-Id");
-                    h.value.write(buf, "a]b1c2d3-e4f5-6789-abcd-ef0123456789");
-                });
-            }
-        });
-    }
-
+    });
     s.server_id.write(buf, "web-prod-us-east-1a-i-0abc123def");
     s.batch_timestamp.write(buf, 1_700_000_000_000_000i64);
 }
@@ -1151,6 +1228,51 @@ fn bench_encode_accesslog(c: &mut Criterion) {
     // exactly, which is what proves both runtimes encode the same message.
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
+
+    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
+    // *direction* from the buffer kind.
+    group.bench_function("tacky-slice", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut sb = tacky::SliceBuf::new(&mut backing);
+            tacky_encode_accesslog(&mut sb, &data);
+            black_box(sb.written());
+        });
+    });
+
+    // Field order differs — a downward buffer emits fields in the reverse of the order they
+    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
+    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
+    let mut rev_backing = vec![0u8; size as usize + 1024];
+    let mut rb = tacky::RevBuf::new(&mut rev_backing);
+    tacky_encode_accesslog(&mut rb, &data);
+    assert_eq!(
+        prost_accesslog::AccessLog::decode(rb.written()).unwrap(),
+        prost_msg,
+        "reverse writer output does not decode back to the same message"
+    );
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_accesslog(&mut rb, &data);
+            black_box(rb.written());
+        });
+    });
+
+    // What handing the result over as an owned, index-0 buffer costs: the reverse output
+    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
+    group.bench_function("tacky-rev-owned", |b| {
+        let mut backing = vec![0u8; size as usize + 1024];
+        let mut out = Vec::with_capacity(size as usize + 1024);
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_accesslog(&mut rb, &data);
+            out.clear();
+            out.extend_from_slice(rb.written());
+            black_box(out.as_slice());
+        });
+    });
     #[cfg(feature = "cpp")]
     bench_cpp_arms(&mut group, "cpp", cpp::ACCESSLOG, &prost_wire);
     #[cfg(feature = "cpp")]
@@ -1240,6 +1362,8 @@ fn bench_decode_accesslog(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(not(feature = "cpp"))]
+#[cfg(not(feature = "cpp"))]
 criterion_group!(
     benches,
     bench_encode_realistic,
@@ -1251,6 +1375,7 @@ criterion_group!(
     bench_encode_accesslog,
     bench_decode_accesslog,
 );
+
 #[cfg(feature = "cpp")]
 criterion_group!(
     benches,

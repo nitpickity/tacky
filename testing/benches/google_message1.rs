@@ -71,7 +71,7 @@ fn payloads(dataset: &[u8]) -> Vec<Vec<u8>> {
 
 /// Writes one `GoogleMessage1` in ascending tag order, which is the order prost
 /// emits, so the two outputs differ only where tacky pads a length prefix.
-fn tacky_encode_p2(buf: &mut Vec<u8>, m: &prost_p2::GoogleMessage1) {
+fn tacky_encode_p2(buf: &mut impl tacky::WriteBuf, m: &prost_p2::GoogleMessage1) {
     let s = tacky_p2::benchmarks::proto2::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -227,7 +227,7 @@ fn tacky_decode_p2(wire: &[u8]) -> prost_p2::GoogleMessage1 {
 
 /// Same message with implicit presence. `Field<_, Plain<_>>::write` skips
 /// default-valued fields, which is exactly what prost does, so no `if` needed.
-fn tacky_encode_p3(buf: &mut Vec<u8>, m: &prost_p3::GoogleMessage1) {
+fn tacky_encode_p3(buf: &mut impl tacky::WriteBuf, m: &prost_p3::GoogleMessage1) {
     let s = tacky_p3::benchmarks::proto3::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -411,6 +411,43 @@ macro_rules! encode_group {
         let mut group = $c.benchmark_group(concat!("encode_", $name));
         group.throughput(Throughput::Bytes(prost_wire.len() as u64));
         let cap = tacky_wire.len().max(prost_wire.len());
+
+        // One message at a time, so the check is per message rather than over a
+        // concatenation whose order a prepending buffer reverses.
+        {
+            let mut backing = vec![0u8; cap + 1024];
+            for m in &msgs {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                $encode(&mut rb, m);
+                assert_eq!(
+                    &<$msg>::decode(rb.written()).unwrap(),
+                    m,
+                    concat!($name, ": reverse writer output does not decode back")
+                );
+            }
+        }
+        group.bench_function("tacky-slice", |b| {
+            let mut backing = vec![0u8; cap + 1024];
+            b.iter(|| {
+                let mut sb = tacky::SliceBuf::new(&mut backing);
+                for m in &msgs {
+                    $encode(&mut sb, m);
+                }
+                black_box(sb.written());
+            });
+        });
+        group.bench_function("tacky-rev", |b| {
+            let mut backing = vec![0u8; cap + 1024];
+            b.iter(|| {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                // Reversed, so the concatenation lands in the same order as the forward
+                // arm's — each message prepends ahead of the previous one.
+                for m in msgs.iter().rev() {
+                    $encode(&mut rb, m);
+                }
+                black_box(rb.written());
+            });
+        });
 
         group.bench_function("tacky", |b| {
             let mut buf = Vec::with_capacity(cap);
