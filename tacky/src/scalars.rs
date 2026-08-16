@@ -587,7 +587,13 @@ pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeErro
 }
 
 #[inline]
-pub fn write_varint(mut value: u64, buf: &mut impl WriteBuf) {
+pub fn write_varint(value: u64, buf: &mut impl WriteBuf) {
+    buf.put_varint(value)
+}
+
+/// The byte-at-a-time varint loop, i.e. [`WriteBuf::put_varint`]'s default body. Split out
+/// so the trait method can call it without recursing back through [`write_varint`].
+pub fn write_varint_into(mut value: u64, buf: &mut (impl WriteBuf + ?Sized)) {
     loop {
         if value < 0x80 {
             buf.put_u8(value as u8);

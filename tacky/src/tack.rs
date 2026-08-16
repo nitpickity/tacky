@@ -7,7 +7,7 @@
 //! patching the real length on [`Drop`].
 
 use crate::buf::WriteBuf;
-use crate::scalars::{self, encoded_len_varint};
+use crate::scalars::encoded_len_varint;
 
 /// Marks the start of a length-delimited section whose size isn't known yet.
 ///
@@ -75,7 +75,16 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
 
         // Hot path: data fits within the reserved width
         if required_width <= width {
-            let len_prefix_loc = &mut self.buffer.as_mut_slice()[start - width..start];
+            // SAFETY: `new_with_width` writes exactly `width` bytes and only then
+            // records `start = buffer.len()`, and `WriteBuf` cannot shrink a buffer,
+            // so `width <= start <= buffer.len()` holds for the Tack's whole lifetime.
+            // LLVM cannot see this — `start`, `width` and `len` are three unrelated
+            // loads — so the checked index costs a `cmp`/`ccmp`/branch per close.
+            let len_prefix_loc = unsafe {
+                self.buffer
+                    .as_mut_slice()
+                    .get_unchecked_mut(start - width..start)
+            };
             write_wide_varint_slice(width, data_len as u64, len_prefix_loc);
         } else {
             // Cold path: data requires larger varint encoding width
@@ -95,14 +104,33 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
         // Shift data to the right by `diff`
         self.buffer.copy_within(start..old_len, start + diff);
         // Write the correct length using standard varint encoding into the expanded prefix
-        let len_prefix_loc = &mut self.buffer.as_mut_slice()[start - width..start + diff];
-        scalars::write_varint_slice(data_len as u64, len_prefix_loc);
+        // SAFETY: as in `close`, plus `grow(diff)` has just made `len` at least
+        // `old_len + diff`, and `start <= old_len`, so `start + diff <= len`.
+        let len_prefix_loc = unsafe {
+            self.buffer
+                .as_mut_slice()
+                .get_unchecked_mut(start - width..start + diff)
+        };
+        // Padding to exactly `required_width` is the *minimal* encoding, since that is
+        // what `encoded_len_varint` returned — so this is byte-for-byte
+        // `write_varint_slice`, but with the loop bound equal to the slice length,
+        // which drops its per-byte bounds checks.
+        write_wide_varint_slice(required_width, data_len as u64, len_prefix_loc);
     }
 }
 
 /// Write a wide varint directly into a mutable slice (for patching in-place).
+///
+/// `#[inline]` is load-bearing: both callers hand over a slice built to exactly `width`,
+/// so inlining folds the asserts away and with them the per-byte bounds checks. The
+/// length assert stays an `assert!` either way — downgrading it to `debug_assert!` is
+/// what *reintroduces* those checks, since it is the only thing making `buf[i]`
+/// provable.
+#[inline]
 fn write_wide_varint_slice(width: usize, value: u64, buf: &mut [u8]) {
-    assert!(width <= 5 && width > 0);
+    // 10 rather than 5: `fix_overflow` passes the width a varint actually needs, which
+    // for a buffer length only reaches 6+ past 32 GB, so is not bounded by `Tack`'s.
+    debug_assert!(width <= 10 && width > 0);
     assert!(buf.len() >= width);
     if width == 1 {
         buf[0] = value as u8;

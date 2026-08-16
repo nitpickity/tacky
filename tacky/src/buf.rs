@@ -13,6 +13,11 @@ pub trait WriteBuf {
     fn put_u8(&mut self, val: u8);
     fn put_slice(&mut self, src: &[u8]);
     fn len(&self) -> usize;
+    /// A mutable view whose first [`WriteBuf::len`] bytes are what has been written. It may
+    /// be *longer* than that: a fixed-capacity buffer hands back its whole backing store
+    /// rather than reslicing to the cursor, because that reslice is bounds-checked and
+    /// [`Tack`](`crate::Tack`) then checks the same range again. Never treat the returned
+    /// slice's length as the written length; use `len()`.
     fn as_mut_slice(&mut self) -> &mut [u8];
 
     /// Grow the buffer by `additional` bytes. Called only on the overflow cold path.
@@ -25,6 +30,13 @@ pub trait WriteBuf {
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Appends a base-128 varint. The default is the byte-at-a-time loop, which is right
+    /// for `Vec` (`push` is a compare and a store) but leaves a cursor buffer paying its
+    /// bounds check per byte — see [`SliceBuf`]'s override.
+    fn put_varint(&mut self, value: u64) {
+        crate::scalars::write_varint_into(value, self);
     }
 
     fn put_u32_le(&mut self, val: u32) {
@@ -209,14 +221,48 @@ impl WriteBuf for SliceBuf<'_> {
     #[inline]
     fn put_u8(&mut self, val: u8) {
         assert!(self.pos < self.buf.len(), "SliceBuf overflow");
-        self.buf[self.pos] = val;
+        // SAFETY: the assert above is exactly the bound. Indexing instead re-checks it —
+        // `Vec::push` pays one compare and then stores through a raw pointer, and paying
+        // two is why this buffer measured *slower* than `Vec` despite never reallocating.
+        unsafe { *self.buf.get_unchecked_mut(self.pos) = val };
         self.pos += 1;
     }
     #[inline]
     fn put_slice(&mut self, src: &[u8]) {
         let end = self.pos + src.len();
         assert!(end <= self.buf.len(), "SliceBuf overflow");
-        self.buf[self.pos..end].copy_from_slice(src);
+        // SAFETY: `pos <= end <= buf.len()` — the first from the invariant that `pos` only
+        // ever advances to a previously checked `end`, the second from the assert.
+        unsafe {
+            self.buf
+                .get_unchecked_mut(self.pos..end)
+                .copy_from_slice(src)
+        };
+        self.pos = end;
+    }
+    #[inline]
+    fn put_varint(&mut self, value: u64) {
+        // Claim once and store, rather than the trait default's byte-at-a-time loop: that
+        // is fine for `Vec` (`push` is a compare and a store) but costs this buffer a
+        // bounds check per byte.
+        // One byte covers most varints — tags, small ints, and every length under 128 —
+        // and taking it early skips `encoded_len_varint`'s `clz` chain, which otherwise
+        // feeds the store address and serialises with it.
+        if value < 0x80 {
+            self.put_u8(value as u8);
+            return;
+        }
+        let n = crate::scalars::encoded_len_varint(value);
+        let end = self.pos + n;
+        assert!(end <= self.buf.len(), "SliceBuf overflow");
+        // SAFETY: as in `put_slice`, and `n >= 1` for every `u64`.
+        let dst = unsafe { self.buf.get_unchecked_mut(self.pos..end) };
+        let mut v = value;
+        for i in 0..n - 1 {
+            dst[i] = ((v & 0x7F) | 0x80) as u8;
+            v >>= 7;
+        }
+        dst[n - 1] = v as u8;
         self.pos = end;
     }
     #[inline]
@@ -225,11 +271,26 @@ impl WriteBuf for SliceBuf<'_> {
     }
     #[inline]
     fn as_mut_slice(&mut self) -> &mut [u8] {
-        &mut self.buf[..self.pos]
+        // The whole backing store, not `..pos`: the trait only promises the first `len()`
+        // bytes are written, and reslicing here costs a bounds check that `Tack::close`
+        // then pays a second time.
+        self.buf
     }
-    fn grow(&mut self, _additional: usize) {
-        panic!("SliceBuf cannot grow — message exceeded fixed buffer capacity");
+    /// Cannot allocate, but `Tack`'s overflow path needs `additional` bytes made
+    /// writable past `len()` — which a fixed buffer can serve out of the room it
+    /// already has. Panics only when it genuinely has none.
+    ///
+    /// `#[inline]` because `Vec`'s equivalents have it: without it, a width-1 overflow
+    /// costs two out-of-line calls here and none there.
+    #[inline]
+    fn grow(&mut self, additional: usize) {
+        assert!(
+            self.pos + additional <= self.buf.len(),
+            "SliceBuf cannot grow — message exceeded fixed buffer capacity"
+        );
+        self.pos += additional;
     }
+    #[inline]
     fn copy_within(&mut self, src: core::ops::Range<usize>, dest: usize) {
         self.buf[..self.pos].copy_within(src, dest);
     }
@@ -258,6 +319,23 @@ mod tests {
         let mut sb = SliceBuf::new(&mut backing);
         write!(FmtWriter(&mut sb), "pi={:.2}", 3.14159).unwrap();
         assert_eq!(sb.written(), b"pi=3.14");
+    }
+
+    /// At the width-1 default any nested message of 128 B or more takes `Tack`'s
+    /// overflow path, which calls `grow`. A fixed buffer with room to spare must
+    /// serve that rather than panic.
+    #[test]
+    fn slice_buf_survives_tack_overflow() {
+        use crate::{Field, Optional};
+        let mut backing = [0u8; 512];
+        let mut sb = SliceBuf::new(&mut backing);
+        let long = "x".repeat(300);
+        Field::<1, Optional<PbString>>::new().write(&mut sb, Some(long.as_str()));
+
+        let mut slice = sb.written();
+        let (field_nr, wire) = decode_key(&mut slice).unwrap();
+        assert_eq!((field_nr, wire), (1, WireType::LEN));
+        assert_eq!(PbString::read(&mut slice).unwrap(), long);
     }
 
     #[test]
