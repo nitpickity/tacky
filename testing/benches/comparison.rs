@@ -1,8 +1,22 @@
 //! Public benchmarks: tacky vs prost, apples-to-apples.
 //!
-//! These are the numbers you put in the README. Both sides encode identical data
-//! and produce identical wire output. Prost messages are pre-built so we measure
-//! pure encoding/decoding speed, not allocation.
+//! These are the numbers you put in the README. Every arm encodes identical data;
+//! prost and C++ messages are pre-built so we measure pure encoding/decoding
+//! speed, not allocation.
+//!
+//! Wire output is semantically identical everywhere, but not byte-identical:
+//! tacky pads nested-message length prefixes to a fixed width, so its output can
+//! be a little larger.
+//!
+//! `--features cpp` adds arms for the official C++ protobuf runtime. Requires
+//! `protoc` and a protobuf C++ install (`brew install protobuf pkg-config`). Each
+//! C++ workload gets up to four arms:
+//!
+//! - `cpp` — public API equivalent: size pass, then write pass.
+//! - `cpp-cached` — write pass only, sizes precomputed. Not a legal steady state
+//!   for a mutating producer, but it is the runtime's theoretical floor.
+//! - `cpp-noutf8` / `cpp-noutf8-cached` — same, with proto3 UTF-8 validation off,
+//!   which Rust gets for free from `&str`. See `derive_noutf8_proto` in build.rs.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use prost::Message;
@@ -37,6 +51,29 @@ use prost_proto::{
     MixedUsageMessage as PMixedUsageMessage,
 };
 use tacky_proto::example::{MixedUsageMessage as TMixedUsageMessage, SimpleEnum as TSimpleEnum};
+
+// ---------------------------------------------------------------------------
+// Official C++ protobuf runtime (feature = "cpp")
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "cpp")]
+use testing::cpp;
+
+#[cfg(feature = "cpp")]
+#[path = "common/cpp_arms.rs"]
+mod cpp_arms;
+#[cfg(feature = "cpp")]
+use cpp_arms::bench_cpp_arms;
+
+/// Calibration arm: an empty `extern "C"` call, so the FFI cost baked into the
+/// C++ numbers is visible rather than assumed negligible.
+#[cfg(feature = "cpp")]
+fn bench_ffi_overhead(c: &mut Criterion) {
+    c.benchmark_group("ffi_overhead")
+        .bench_function("noop_extern_call", |b| {
+            b.iter(|| cpp::noop());
+        });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -188,6 +225,13 @@ fn bench_encode_realistic(c: &mut Criterion) {
             buf.clear();
         });
     });
+
+    // Only the C++ arms consume this now: they are gated on re-serializing prost's bytes
+    // exactly, which is what proves both runtimes encode the same message.
+    #[cfg(feature = "cpp")]
+    let prost_wire = prost_msg.encode_to_vec();
+    #[cfg(feature = "cpp")]
+    bench_cpp_arms(&mut group, "cpp", cpp::MIXED, &prost_wire);
 
     group.finish();
 }
@@ -372,6 +416,14 @@ fn bench_encode_repeated_strings(c: &mut Criterion) {
                 buf.clear();
             });
         });
+
+        #[cfg(feature = "cpp")]
+        bench_cpp_arms(
+            &mut group,
+            &format!("cpp/{name}"),
+            cpp::REPEATED_STRINGS,
+            &prost_wire,
+        );
     }
 
     group.finish();
@@ -683,6 +735,15 @@ fn bench_encode_pprof(c: &mut Criterion) {
             buf.clear();
         });
     });
+
+    // Only the C++ arms consume this now: they are gated on re-serializing prost's bytes
+    // exactly, which is what proves both runtimes encode the same message.
+    #[cfg(feature = "cpp")]
+    let prost_wire = prost_msg.encode_to_vec();
+    #[cfg(feature = "cpp")]
+    bench_cpp_arms(&mut group, "cpp", cpp::PPROF, &prost_wire);
+    #[cfg(feature = "cpp")]
+    bench_cpp_arms(&mut group, "cpp-noutf8", cpp::PPROF_NO_UTF8, &prost_wire);
 
     group.finish();
 }
@@ -1086,6 +1147,20 @@ fn bench_encode_accesslog(c: &mut Criterion) {
         });
     });
 
+    // Only the C++ arms consume this now: they are gated on re-serializing prost's bytes
+    // exactly, which is what proves both runtimes encode the same message.
+    #[cfg(feature = "cpp")]
+    let prost_wire = prost_msg.encode_to_vec();
+    #[cfg(feature = "cpp")]
+    bench_cpp_arms(&mut group, "cpp", cpp::ACCESSLOG, &prost_wire);
+    #[cfg(feature = "cpp")]
+    bench_cpp_arms(
+        &mut group,
+        "cpp-noutf8",
+        cpp::ACCESSLOG_NO_UTF8,
+        &prost_wire,
+    );
+
     group.finish();
 }
 
@@ -1167,6 +1242,19 @@ fn bench_decode_accesslog(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_encode_realistic,
+    bench_encode_repeated_strings,
+    bench_decode_realistic,
+    bench_decode_repeated_strings,
+    bench_encode_pprof,
+    bench_decode_pprof,
+    bench_encode_accesslog,
+    bench_decode_accesslog,
+);
+#[cfg(feature = "cpp")]
+criterion_group!(
+    benches,
+    bench_ffi_overhead,
     bench_encode_realistic,
     bench_encode_repeated_strings,
     bench_decode_realistic,

@@ -651,32 +651,62 @@ impl FileDescriptor {
             // if the proto has a packge then the names will be prefixed
             let package = f.package.clone();
             let module = f.module.clone();
-            self.messages.extend(f.messages.drain(..).map(|mut m| {
-                if m.package.is_empty() {
-                    m.set_package(&package, &module);
+            // A diamond import (a imports b and c, and b also imports c) reaches the
+            // same file twice, so merge by fully-qualified name. Protobuf guarantees
+            // those are unique, which makes a repeat the same definition and dropping
+            // it lossless.
+            let messages: Vec<Message> = f
+                .messages
+                .drain(..)
+                .map(|mut m| {
+                    if m.package.is_empty() {
+                        m.set_package(&package, &module);
+                    }
+                    if m.path.as_os_str().is_empty() {
+                        m.path = proto_file.clone();
+                    }
+                    if m.import.as_os_str().is_empty() {
+                        m.import = import.clone();
+                    }
+                    m.set_imported();
+                    m
+                })
+                .collect();
+            for m in messages {
+                if !self
+                    .messages
+                    .iter()
+                    .any(|e| e.package == m.package && e.name == m.name)
+                {
+                    self.messages.push(m);
                 }
-                if m.path.as_os_str().is_empty() {
-                    m.path = proto_file.clone();
+            }
+            let enums: Vec<Enumerator> = f
+                .enums
+                .drain(..)
+                .map(|mut e| {
+                    if e.package.is_empty() {
+                        e.set_package(&package, &module);
+                    }
+                    if e.path.as_os_str().is_empty() {
+                        e.path = proto_file.clone();
+                    }
+                    if e.import.as_os_str().is_empty() {
+                        e.import = import.clone();
+                    }
+                    e.imported = true;
+                    e
+                })
+                .collect();
+            for e in enums {
+                if !self
+                    .enums
+                    .iter()
+                    .any(|x| x.package == e.package && x.name == e.name)
+                {
+                    self.enums.push(e);
                 }
-                if m.import.as_os_str().is_empty() {
-                    m.import = import.clone();
-                }
-                m.set_imported();
-                m
-            }));
-            self.enums.extend(f.enums.drain(..).map(|mut e| {
-                if e.package.is_empty() {
-                    e.set_package(&package, &module);
-                }
-                if e.path.as_os_str().is_empty() {
-                    e.path = proto_file.clone();
-                }
-                if e.import.as_os_str().is_empty() {
-                    e.import = import.clone();
-                }
-                e.imported = true;
-                e
-            }));
+            }
         }
         Ok(())
     }

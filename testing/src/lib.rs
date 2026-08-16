@@ -13,6 +13,9 @@ mod tacky_importing {
 mod prost_to_tacky;
 mod proto3;
 
+#[cfg(feature = "cpp")]
+pub mod cpp;
+
 #[cfg(test)]
 mod tests {
     use prost::Message;
