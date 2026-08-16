@@ -406,7 +406,7 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                 PbType::Scalar(s) => {
                     let tacky_ty = parse_ty(s.tacky_type());
                     quote! {
-                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<#tacky_ty>) -> Self {
+                        pub fn #method_name(self, buf: &mut impl WriteBuf, value: impl ProtoEncode<#tacky_ty>) -> Self {
                             let t = const { EncodedTag::new(#number, <#tacky_ty as ProtobufScalar>::WIRE_TYPE) };
                             t.write(buf);
                             <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
@@ -417,7 +417,7 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                 PbType::Enum((name, _)) => {
                     let enum_ident = format_ident!("{}", name);
                     quote! {
-                        pub fn #method_name(self, buf: &mut Vec<u8>, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
+                        pub fn #method_name(self, buf: &mut impl WriteBuf, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::VARINT) };
                             t.write(buf);
                             <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
@@ -429,7 +429,7 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                     let msg_ident = parse_ty(msg);
                     let method_name = format_ident!("write_{}_msg", f.name);
                     quote! {
-                        pub fn #method_name(self, buf: &mut Vec<u8>, mut f: impl FnMut(&mut Vec<u8>, #msg_ident)) -> Self {
+                        pub fn #method_name<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, #msg_ident)) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::LEN) };
                             t.write(buf);
                             let t = tack::Tack::new(buf);

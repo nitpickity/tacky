@@ -877,6 +877,34 @@ mod tests {
         );
     }
 
+    /// A message containing a oneof must encode into a `SliceBuf`, not just a `Vec`.
+    /// The generated oneof writers hardcoded `&mut Vec<u8>`, which silently ruled out the
+    /// documented no-alloc path for every oneof-bearing message.
+    #[test]
+    fn test_oneof_into_slice_buf() {
+        let mut backing = [0u8; 128];
+        let mut sb = tacky::SliceBuf::new(&mut backing);
+        let schema = ApiResponse::schema();
+        ApiResponse {
+            request_id: schema.request_id.write(&mut sb, Some("req-3")),
+            cached: schema.cached.write(&mut sb, None::<bool>),
+            result: schema.result.write_data_msg(&mut sb, |buf, scm| {
+                scm.normal_int.write(buf, Some(7));
+                scm.astring.write(buf, Some("no-alloc"));
+            }),
+        };
+
+        let prost_msg = crate::prost_proto::ApiResponse::decode(sb.written()).unwrap();
+        assert_eq!(prost_msg.request_id, Some("req-3".to_string()));
+        match prost_msg.result {
+            Some(crate::prost_proto::api_response::Result::Data(d)) => {
+                assert_eq!(d.normal_int, Some(7));
+                assert_eq!(d.astring, Some("no-alloc".to_string()));
+            }
+            other => panic!("expected the data variant, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_oneof_with_message_variant() {
         // Test encoding with the message variant
