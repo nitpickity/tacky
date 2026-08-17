@@ -13,8 +13,15 @@
 //!   elements in reverse. Map entries are exempt: their order is unspecified by protobuf,
 //!   so they are written in iteration order either way.
 //!
-//! Direction is a compile-time property ([`WriteBuf::REVERSE`]), so the writers' two arms
-//! fold away per buffer type and the forward path pays nothing for the reverse one.
+//! Direction is a compile-time property — [`WriteBuf::REVERSE`] as a value and
+//! [`WriteBuf::Order`] as a type — so the writers' two arms fold away per buffer type and
+//! the forward path pays nothing for the reverse one. The type is what carries the one
+//! requirement direction places on callers: [`RevBuf`] has to walk a repeated field's
+//! elements backwards, so there they must be double-ended, while a forward buffer takes any
+//! iterator — a `HashSet`'s included — since appending reorders nothing. Code that has not
+//! picked a buffer writes through [`AnyDir`], which erases the direction to [`Both`] and asks
+//! for double-ended iterators because it might turn out to be a [`RevBuf`]. See
+//! [`OrderedIter`].
 
 /// A contiguous byte buffer that supports both appending and random-access patching.
 ///
@@ -22,13 +29,19 @@
 /// used by [`Tack`](`crate::Tack`) to patch length placeholders. `grow` and `copy_within`
 /// are only called on Tack's overflow cold path — fixed-size buffers can panic there.
 pub trait WriteBuf {
+    /// This buffer's direction as a type — [`Forward`] or [`Reverse`]. What [`OrderedIter`]
+    /// dispatches on to decide whether a repeated field's elements need reversing, and
+    /// whether a one-way iterator is acceptable here at all.
+    type Order: Order;
+
     /// True for buffers that grow *downward*, where every write prepends. Composite
     /// writes — tag then value, length then payload — have to be emitted in the opposite
     /// order so they land correctly, and this is what lets the writers pick. It is an
     /// associated const, so each branch folds away per buffer type at compile time.
     ///
-    /// `WriteBuf` is never used as a trait object, so the const costs no flexibility.
-    const REVERSE: bool = false;
+    /// Derived from [`WriteBuf::Order`], so the two cannot disagree — set the type, never
+    /// this. `WriteBuf` is never used as a trait object, so the const costs no flexibility.
+    const REVERSE: bool = <Self::Order as Order>::REVERSE;
 
     fn put_u8(&mut self, val: u8);
     fn put_slice(&mut self, src: &[u8]);
@@ -109,6 +122,223 @@ pub trait WriteBuf {
     }
 }
 
+// --- Direction ---
+
+/// Marker for a buffer that grows upward: writes append, so a repeated field's elements
+/// land in the order they were written.
+pub struct Forward;
+/// Marker for a buffer that grows downward: writes prepend, so a repeated field's elements
+/// have to be emitted back-to-front.
+pub struct Reverse;
+/// Marker for a buffer whose direction is not known where the write is type-checked — the
+/// direction [`AnyDir`] presents. Repeated fields then require a [`DoubleEndedIterator`],
+/// because the buffer may turn out to grow downward.
+pub struct Both;
+
+/// A buffer's direction, as a type. Implemented only by [`Forward`] and [`Reverse`], and
+/// carried by [`WriteBuf::Order`] so that [`OrderedIter`] can select on it.
+pub trait Order {
+    /// Mirrors [`WriteBuf::REVERSE`], which is derived from this.
+    const REVERSE: bool;
+}
+
+impl Order for Forward {
+    const REVERSE: bool = false;
+}
+
+impl Order for Reverse {
+    const REVERSE: bool = true;
+}
+
+impl Order for Both {
+    /// Never read: a buffer viewed through [`AnyDir`] overrides [`WriteBuf::REVERSE`] with
+    /// the real direction, which is what the writers branch on. This value exists only
+    /// because the trait requires one.
+    const REVERSE: bool = false;
+}
+
+/// What the repeated and packed writers take: an iterable they can walk in wire order, given
+/// the buffer's direction. One impl per direction, and the asymmetry between them is the
+/// whole point:
+///
+/// - [`Forward`] takes **any** [`IntoIterator`], since appending reorders nothing. A
+///   `HashSet`, a `HashMap`, a `take_while`, a hand-written one-way `Iterator` — all fine.
+/// - [`Reverse`] takes one whose iterator is [`DoubleEndedIterator`] and walks it backwards.
+///   A one-way iterator there is a compile error rather than a silently reversed list, which
+///   is the one combination that cannot work.
+///
+/// Selecting on the direction is what keeps the forward path unconstrained, and it means the
+/// direction has to be *known* where the call is type-checked — from a concrete buffer, or
+/// from a `WriteBuf<Order = ..>` bound. A body generic over the buffer has neither, and no
+/// bare impl can cover it: one blanket over the direction would have to be strict, and
+/// coherence rejects it beside the lax [`Forward`] impl, since `DoubleEndedIterator` is also
+/// `Iterator` and where-clauses do not make impls disjoint. Such a body writes through
+/// [`AnyDir`] instead, whose [`Both`] direction is the third impl below.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot be written to a buffer whose direction is `{O}`",
+    label = "not writable in `{O}` order",
+    note = "a `Reverse` buffer walks a repeated field's elements backwards, so it needs a `DoubleEndedIterator`",
+    note = "if `{O}` is a generic parameter or projection, this body has not picked a direction — take a `&mut AnyDir<B>` instead, or bound the buffer as `WriteBuf<Order = Forward>`"
+)]
+pub trait OrderedIter<O>: IntoIterator {
+    type Ordered: Iterator<Item = Self::Item>;
+    /// The elements in the order the buffer needs them written. Walk it front-to-back
+    /// either way: for a downward buffer, whose writes prepend, that lands list order.
+    ///
+    /// `reverse` is [`WriteBuf::REVERSE`], and only [`Both`] reads it — the other two know
+    /// their direction from the type. It stays a compile-time constant at every call site, so
+    /// the arm it selects folds away per monomorphization.
+    fn ordered(self, reverse: bool) -> Self::Ordered;
+}
+
+impl<I: IntoIterator> OrderedIter<Forward> for I {
+    type Ordered = I::IntoIter;
+    #[inline]
+    fn ordered(self, _reverse: bool) -> Self::Ordered {
+        self.into_iter()
+    }
+}
+
+impl<I: IntoIterator> OrderedIter<Reverse> for I
+where
+    I::IntoIter: DoubleEndedIterator,
+{
+    type Ordered = core::iter::Rev<I::IntoIter>;
+    #[inline]
+    fn ordered(self, _reverse: bool) -> Self::Ordered {
+        self.into_iter().rev()
+    }
+}
+
+impl<I: IntoIterator> OrderedIter<Both> for I
+where
+    I::IntoIter: DoubleEndedIterator,
+{
+    type Ordered = EitherIter<I::IntoIter>;
+    #[inline]
+    fn ordered(self, reverse: bool) -> Self::Ordered {
+        if reverse {
+            EitherIter::Reverse(self.into_iter().rev())
+        } else {
+            EitherIter::Forward(self.into_iter())
+        }
+    }
+}
+
+/// [`Both`]'s ordered iterator: the caller's, or [`Rev`](`core::iter::Rev`) of it, decided by
+/// the [`WriteBuf::REVERSE`] passed to [`OrderedIter::ordered`]. That is a `const` per
+/// buffer type, so the variant is known at compile time and the match folds — the tag exists
+/// only because the *type* cannot name a direction the body has not picked.
+pub enum EitherIter<I> {
+    Forward(I),
+    Reverse(core::iter::Rev<I>),
+}
+
+impl<I: DoubleEndedIterator> Iterator for EitherIter<I> {
+    type Item = I::Item;
+    #[inline]
+    fn next(&mut self) -> Option<I::Item> {
+        match self {
+            EitherIter::Forward(i) => i.next(),
+            EitherIter::Reverse(i) => i.next(),
+        }
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            EitherIter::Forward(i) => i.size_hint(),
+            EitherIter::Reverse(i) => i.size_hint(),
+        }
+    }
+}
+
+impl<I: DoubleEndedIterator + ExactSizeIterator> ExactSizeIterator for EitherIter<I> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            EitherIter::Forward(i) => i.len(),
+            EitherIter::Reverse(i) => i.len(),
+        }
+    }
+}
+
+/// A view of any buffer for code that has not picked a direction — the shape
+/// `fn encode(buf: &mut impl WriteBuf)` wanted to be:
+///
+/// ```ignore
+/// fn write_file<B: WriteBuf>(buf: &mut AnyDir<B>, f: &FileDescriptorProto) {
+///     schema.dependency.write(buf, &f.dependency);          // iterators stay bare
+/// }
+/// write_file(AnyDir::from_mut(&mut vec), &f);               // wrapped once, here
+/// write_file(AnyDir::from_mut(&mut rev_buf), &f);
+/// ```
+///
+/// It forwards every write to `B` unchanged, including [`WriteBuf::REVERSE`], so the bytes
+/// and the codegen are the buffer's own. The one thing it changes is [`WriteBuf::Order`],
+/// which becomes [`Both`]: repeated fields then take any double-ended iterator and are walked
+/// in whichever order `B` turns out to need. That is the price of not naming the direction —
+/// a one-way iterator, which a forward buffer would otherwise accept bare, is rejected here.
+#[repr(transparent)]
+pub struct AnyDir<B>(B);
+
+impl<B: WriteBuf> AnyDir<B> {
+    /// Views `buf` as direction-erased. Free — a `repr(transparent)` reference cast.
+    ///
+    /// This takes `&mut B` rather than `B` so that the view has no lifetime of its own:
+    /// `put_msg` has to hand the closure a `&mut Self` built from a shorter-lived `&mut B`,
+    /// and `&mut AnyDir<'a, B>` would be invariant in `'a`, which does not typecheck.
+    #[inline]
+    pub fn from_mut(buf: &mut B) -> &mut AnyDir<B> {
+        // SAFETY: `repr(transparent)` gives `AnyDir<B>` the layout of `B`, and the view adds
+        // no invariants of its own, so the two references are interchangeable.
+        unsafe { &mut *(buf as *mut B as *mut AnyDir<B>) }
+    }
+}
+
+impl<B: WriteBuf> WriteBuf for AnyDir<B> {
+    type Order = Both;
+    /// `B`'s own direction, still a compile-time constant: only the *iterator* bound is
+    /// erased by this view, never the tag/value ordering the writers branch on.
+    const REVERSE: bool = B::REVERSE;
+
+    #[inline]
+    fn put_u8(&mut self, val: u8) {
+        self.0.put_u8(val);
+    }
+    #[inline]
+    fn put_slice(&mut self, src: &[u8]) {
+        self.0.put_slice(src);
+    }
+    #[inline]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    #[inline]
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.0.as_mut_slice()
+    }
+    #[inline]
+    fn grow(&mut self, additional: usize) {
+        self.0.grow(additional);
+    }
+    #[inline]
+    fn copy_within(&mut self, src: core::ops::Range<usize>, dest: usize) {
+        self.0.copy_within(src, dest);
+    }
+    #[inline]
+    fn put_varint(&mut self, value: u64) {
+        self.0.put_varint(value);
+    }
+    #[inline]
+    fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self)) {
+        self.0.put_msg(tag, |inner| f(AnyDir::from_mut(inner)));
+    }
+    #[inline]
+    fn put_len_delimited(&mut self, payload: &[u8]) {
+        self.0.put_len_delimited(payload);
+    }
+}
+
 // --- Vec<u8> impl ---
 
 #[cfg(feature = "alloc")]
@@ -119,6 +349,8 @@ mod alloc_impls {
     use super::*;
 
     impl WriteBuf for Vec<u8> {
+        type Order = Forward;
+
         #[inline]
         fn put_u8(&mut self, val: u8) {
             self.push(val);
@@ -156,8 +388,12 @@ mod alloc_impls {
 /// the order they are written. Protobuf allows any field order, with two exceptions that
 /// are the caller's responsibility:
 ///
-/// - **elements of a repeated field must be written in reverse**, since their wire order is
-///   their list order;
+/// - **repeated fields must be written back-to-front**, since their wire order is their list
+///   order. Within one writer call this is handled for you — [`OrderedIter`] walks the
+///   iterator backwards here, which is why a one-way iterator is rejected. *Across* calls it
+///   cannot be: every write to the same repeated field prepends its whole block, so two
+///   `write_msgs` calls, or a loop of `write_msg`/`write_single`, land in reverse call order.
+///   Let one call own the whole list where you can; otherwise call them tail-first;
 /// - **duplicate map keys** follow last-one-wins, so their relative order matters too.
 ///
 /// Writing a message's fields in descending field order therefore reproduces exactly the
@@ -194,7 +430,7 @@ impl<'a> RevBuf<'a> {
 }
 
 impl WriteBuf for RevBuf<'_> {
-    const REVERSE: bool = true;
+    type Order = Reverse;
 
     /// Runs `f`, then prepends the exact length and the tag — [`Tack`](`crate::Tack`)'s job
     /// without any of its machinery, since the length is already known when it is needed.
@@ -435,6 +671,8 @@ where
 }
 
 impl WriteBuf for SliceBuf<'_> {
+    type Order = Forward;
+
     #[inline]
     fn put_u8(&mut self, val: u8) {
         assert!(self.pos < self.buf.len(), "SliceBuf overflow");

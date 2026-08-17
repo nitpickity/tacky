@@ -64,13 +64,19 @@ const FDS_TESTING_PROTOS: &[u8] = include_bytes!("../data/testing_protos.fds");
 // Every writer emits fields in ascending tag order, which is the order prost and
 // protoc emit, so the two outputs differ only where tacky pads a length prefix.
 
-fn tacky_encode(buf: &mut impl tacky::WriteBuf, set: &prost_types::FileDescriptorSet) {
+fn tacky_encode<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    set: &prost_types::FileDescriptorSet,
+) {
     let s = td::FileDescriptorSet::schema();
     s.file
         .write_msgs(buf, &set.file, |buf, _, f| write_file(buf, f));
 }
 
-fn write_file(buf: &mut impl tacky::WriteBuf, f: &prost_types::FileDescriptorProto) {
+fn write_file<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    f: &prost_types::FileDescriptorProto,
+) {
     let s = td::FileDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.package.write(buf, f.package.as_deref());
@@ -115,7 +121,7 @@ fn write_file(buf: &mut impl tacky::WriteBuf, f: &prost_types::FileDescriptorPro
 
 /// Recursive: `nested_type` is a `DescriptorProto` again, which is most of what
 /// makes this corpus different from a flat message.
-fn write_message(buf: &mut impl tacky::WriteBuf, m: &prost_types::DescriptorProto) {
+fn write_message<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_types::DescriptorProto) {
     let s = td::DescriptorProto::schema();
     s.name.write(buf, m.name.as_deref());
     s.field
@@ -152,7 +158,10 @@ fn write_message(buf: &mut impl tacky::WriteBuf, m: &prost_types::DescriptorProt
     s.reserved_name.write(buf, &m.reserved_name);
 }
 
-fn write_field(buf: &mut impl tacky::WriteBuf, f: &prost_types::FieldDescriptorProto) {
+fn write_field<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    f: &prost_types::FieldDescriptorProto,
+) {
     let s = td::FieldDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.extendee.write(buf, f.extendee.as_deref());
@@ -179,7 +188,10 @@ fn write_field(buf: &mut impl tacky::WriteBuf, f: &prost_types::FieldDescriptorP
     s.proto3_optional.write(buf, f.proto3_optional);
 }
 
-fn write_enum(buf: &mut impl tacky::WriteBuf, e: &prost_types::EnumDescriptorProto) {
+fn write_enum<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    e: &prost_types::EnumDescriptorProto,
+) {
     let s = td::EnumDescriptorProto::schema();
     s.name.write(buf, e.name.as_deref());
     s.value.write_msgs(buf, &e.value, |buf, t, v| {
@@ -431,7 +443,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     // Tacky's padded length prefixes rule out a byte compare, so check the
     // stronger thing: prost must decode tacky's output back to the same message.
     let mut tacky_wire = Vec::with_capacity(fixture.len() * 2);
-    tacky_encode(&mut tacky_wire, &set);
+    tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), &set);
     assert_eq!(
         prost_types::FileDescriptorSet::decode(tacky_wire.as_slice()).unwrap(),
         set,
@@ -452,7 +464,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode(&mut buf, &set);
+            tacky_encode(tacky::AnyDir::from_mut(&mut buf), &set);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -472,7 +484,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
         let mut backing = vec![0u8; cap + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode(&mut sb, &set);
+            tacky_encode(tacky::AnyDir::from_mut(&mut sb), &set);
             black_box(sb.written());
         });
     });
@@ -481,7 +493,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     // legal, so this is checked by decoding rather than by comparing bytes.
     let mut rev_backing = vec![0u8; cap + 1024];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode(&mut rb, &set);
+    tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
     assert_eq!(
         prost_types::FileDescriptorSet::decode(rb.written()).unwrap(),
         set,
@@ -491,7 +503,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
         let mut backing = vec![0u8; cap + 1024];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(&mut rb, &set);
+            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
             black_box(rb.written());
         });
     });
@@ -503,7 +515,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
         let mut out = Vec::with_capacity(cap + 1024);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(&mut rb, &set);
+            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());

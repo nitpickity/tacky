@@ -286,7 +286,10 @@ fn corpus(value_len: (usize, usize)) -> pcol::ExportTraceServiceRequest {
 // Fields go out in ascending tag order, which is the order prost emits, so the two
 // outputs differ only where tacky pads a length prefix.
 
-fn tacky_encode(buf: &mut impl tacky::WriteBuf, req: &pcol::ExportTraceServiceRequest) {
+fn tacky_encode<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    req: &pcol::ExportTraceServiceRequest,
+) {
     let s = t::ExportTraceServiceRequest::schema();
     s.resource_spans
         .write_msgs(buf, &req.resource_spans, |buf, s, rs| {
@@ -318,7 +321,7 @@ fn tacky_encode(buf: &mut impl tacky::WriteBuf, req: &pcol::ExportTraceServiceRe
         });
 }
 
-fn write_span(buf: &mut impl tacky::WriteBuf, span: &ptrace::Span) {
+fn write_span<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, span: &ptrace::Span) {
     let s = t::Span::schema();
     s.trace_id.write(buf, span.trace_id.as_slice());
     s.span_id.write(buf, span.span_id.as_slice());
@@ -361,7 +364,7 @@ fn write_span(buf: &mut impl tacky::WriteBuf, span: &ptrace::Span) {
     s.flags.write(buf, span.flags);
 }
 
-fn write_kv(buf: &mut impl tacky::WriteBuf, kv: &pcommon::KeyValue) {
+fn write_kv<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, kv: &pcommon::KeyValue) {
     let s = t::KeyValue::schema();
     s.key.write(buf, kv.key.as_str());
     if let Some(v) = &kv.value {
@@ -371,7 +374,7 @@ fn write_kv(buf: &mut impl tacky::WriteBuf, kv: &pcommon::KeyValue) {
 
 /// Recursive through `ArrayValue`/`KeyValueList`. An unset `AnyValue.value` writes
 /// nothing, matching prost.
-fn write_any(buf: &mut impl tacky::WriteBuf, v: &pcommon::AnyValue) {
+fn write_any<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, v: &pcommon::AnyValue) {
     use pcommon::any_value::Value;
     let s = t::AnyValue::schema();
     match &v.value {
@@ -596,7 +599,7 @@ fn bench_otlp(c: &mut Criterion) {
     let mut prost_wire = Vec::with_capacity(req.encoded_len());
     req.encode(&mut prost_wire).unwrap();
     let mut tacky_wire = Vec::with_capacity(prost_wire.len() * 2);
-    tacky_encode(&mut tacky_wire, &req);
+    tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), &req);
 
     // Tacky's padded length prefixes rule out a byte compare, so check the
     // stronger thing: prost must decode tacky's output back to the same message.
@@ -625,7 +628,7 @@ fn bench_otlp(c: &mut Criterion) {
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode(&mut buf, &req);
+            tacky_encode(tacky::AnyDir::from_mut(&mut buf), &req);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -645,7 +648,7 @@ fn bench_otlp(c: &mut Criterion) {
         let mut backing = vec![0u8; cap + 4096];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode(&mut sb, &req);
+            tacky_encode(tacky::AnyDir::from_mut(&mut sb), &req);
             black_box(sb.written());
         });
     });
@@ -654,7 +657,7 @@ fn bench_otlp(c: &mut Criterion) {
     // legal, so this is checked by decoding rather than by comparing bytes.
     let mut rev_backing = vec![0u8; cap + 4096];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode(&mut rb, &req);
+    tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
     assert_eq!(
         pcol::ExportTraceServiceRequest::decode(rb.written()).unwrap(),
         req,
@@ -664,7 +667,7 @@ fn bench_otlp(c: &mut Criterion) {
         let mut backing = vec![0u8; cap + 4096];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(&mut rb, &req);
+            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
             black_box(rb.written());
         });
     });
@@ -676,7 +679,7 @@ fn bench_otlp(c: &mut Criterion) {
         let mut out = Vec::with_capacity(cap + 4096);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(&mut rb, &req);
+            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());
@@ -723,7 +726,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
         let mut prost_wire = Vec::with_capacity(req.encoded_len());
         req.encode(&mut prost_wire).unwrap();
         let mut tacky_wire = Vec::with_capacity(prost_wire.len() * 2);
-        tacky_encode(&mut tacky_wire, &req);
+        tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), &req);
         assert_eq!(
             pcol::ExportTraceServiceRequest::decode(tacky_wire.as_slice()).unwrap(),
             req,
@@ -738,7 +741,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
         group.bench_function("tacky", |b| {
             let mut buf = Vec::with_capacity(cap);
             b.iter(|| {
-                tacky_encode(&mut buf, &req);
+                tacky_encode(tacky::AnyDir::from_mut(&mut buf), &req);
                 black_box(buf.as_slice());
                 buf.clear();
             });
@@ -758,7 +761,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
             let mut backing = vec![0u8; cap + 4096];
             b.iter(|| {
                 let mut sb = tacky::SliceBuf::new(&mut backing);
-                tacky_encode(&mut sb, &req);
+                tacky_encode(tacky::AnyDir::from_mut(&mut sb), &req);
                 black_box(sb.written());
             });
         });
@@ -767,7 +770,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
         // legal, so this is checked by decoding rather than by comparing bytes.
         let mut rev_backing = vec![0u8; cap + 4096];
         let mut rb = tacky::RevBuf::new(&mut rev_backing);
-        tacky_encode(&mut rb, &req);
+        tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
         assert_eq!(
             pcol::ExportTraceServiceRequest::decode(rb.written()).unwrap(),
             req,
@@ -777,7 +780,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
             let mut backing = vec![0u8; cap + 4096];
             b.iter(|| {
                 let mut rb = tacky::RevBuf::new(&mut backing);
-                tacky_encode(&mut rb, &req);
+                tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
                 black_box(rb.written());
             });
         });
@@ -789,7 +792,7 @@ fn bench_otlp_value_len(c: &mut Criterion) {
             let mut out = Vec::with_capacity(cap + 4096);
             b.iter(|| {
                 let mut rb = tacky::RevBuf::new(&mut backing);
-                tacky_encode(&mut rb, &req);
+                tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
                 out.clear();
                 out.extend_from_slice(rb.written());
                 black_box(out.as_slice());

@@ -110,42 +110,32 @@ MsgWithNesting {
 };
 ```
 
-For repeated message fields, call `write_msg` multiple times — once per message you want to write. The nested schema works the same way as the outer one, including exhaustiveness checks if you want them:
-
-```rust
-schema.events.write_msg(&mut buf, |buf, scm| {
-    Event {
-        name: scm.name.write(buf, Some("click")),
-        ..scm
-    }
-});
-schema.events.write_msg(&mut buf, |buf, scm| {
-    Event {
-        name: scm.name.write(buf, Some("scroll")),
-        ..scm
-    }
-});
-```
-
-Or, if you're writing from a collection:
+For repeated message fields, hand the whole list to `write_msgs`. The closure runs once per element and receives it as a third argument, and the call returns the field, so it drops straight into a struct literal like any other write:
 
 ```rust
 let events = ["scroll", "click"];
 Message {
-    events: {
-        for e in events {
-            schema.events.write_msg(&mut buf, |buf, scm| {
-                Event {
-                    name: scm.name.write(buf, Some(e)),
-                    ..scm
-                }
-            });
-        }
-        schema.events // mark as written; a for loop returns (), not the field
-    },
+    events: schema.events.write_msgs(&mut buf, events, |buf, scm, e| {
+        scm.name.write(buf, Some(e));
+    }),
     ..Message::schema()
 };
 ```
+
+`scm` is the nested schema, so the same struct-literal exhaustiveness check works inside the closure if you want it. Letting the writer own the iteration is what keeps the list in order for every buffer: `RevBuf` fills backwards, so it has to emit the elements back-to-front, and only a call that owns the loop can do that.
+
+When the entries have no single Rust type — several unrelated values that each map to the same protobuf message — write them one at a time instead:
+
+```rust
+schema.events.write_msg(&mut buf, |buf, scm| {
+    scm.name.write(buf, Some(click.label()));
+});
+schema.events.write_msg(&mut buf, |buf, scm| {
+    scm.name.write(buf, Some(&scroll_event.name));
+});
+```
+
+Entries land in call order — except through a downward-growing buffer, where every write prepends, so repeated calls land in reverse call order and it is on you to make them tail-first. `write_single` is the same escape hatch for repeated *scalar* fields, with the same caveat.
 
 ## Maps
 

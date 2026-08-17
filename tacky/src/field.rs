@@ -8,7 +8,7 @@
 //! All of these are zero-sized. A generated message schema struct composed entirely
 //! of `Field` types has `size_of::<T>() == 0`.
 
-use crate::buf::WriteBuf;
+use crate::buf::{OrderedIter, WriteBuf};
 use crate::{scalars::*, tack::Tack};
 use core::marker::PhantomData;
 
@@ -108,8 +108,11 @@ pub mod repeated {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Repeated<P>> {
         /// Writes each element with its own tag. For non-packed repeated fields.
-        /// The `DoubleEndedIterator` bound is what lets a downward-growing buffer keep list
-        /// order: there, elements have to be emitted back-to-front, since each one prepends.
+        ///
+        /// [`OrderedIter`] hands the elements over in the order this buffer needs them,
+        /// which for a downward-growing one is back-to-front, since each write prepends.
+        /// Only that direction constrains the iterator: a forward buffer takes any of them,
+        /// a `HashSet`'s included.
         #[inline]
         pub fn write<B: WriteBuf, V: ProtoEncode<P>, I: IntoIterator<Item = V>>(
             self,
@@ -117,24 +120,33 @@ pub mod repeated {
             values: I,
         ) -> Field<N, Repeated<P>>
         where
-            I::IntoIter: DoubleEndedIterator,
+            I: OrderedIter<B::Order>,
         {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            if B::REVERSE {
-                for value in values.into_iter().rev() {
+            for value in values.ordered(B::REVERSE) {
+                if B::REVERSE {
                     V::encode(buf, &value);
                     t.write(buf);
-                }
-            } else {
-                for value in values {
+                } else {
                     t.write(buf);
                     V::encode(buf, &value);
                 }
             }
             Field::new()
         }
-        /// Writes a single element to a repeated field. Convenience for appending
-        /// one value without wrapping it in an iterator.
+        /// Writes one element of a repeated field, tag included.
+        ///
+        /// For a homogeneous list prefer `write`, which takes any iterator — `Some(v)` and
+        /// `core::iter::once(v)` cover the single-element case. This exists for the
+        /// *heterogeneous* one: `write` fixes one `I::Item` for the whole list, whereas each
+        /// call here picks its own `V`, so a repeated string field can take a `&str`, then a
+        /// `String`, then a [`PbDisplay`](`crate::PbDisplay`).
+        ///
+        /// Elements land in call order through a forward buffer and in **reverse** call order
+        /// through a downward-growing one, since each call prepends — see [`RevBuf`]'s
+        /// ordering contract.
+        ///
+        /// [`RevBuf`]: crate::RevBuf
         #[inline]
         pub fn write_single<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
@@ -150,8 +162,20 @@ pub mod repeated {
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
-        /// Writes one nested message to a repeated message field. Call multiple times
-        /// to write multiple messages — each call produces one entry.
+        /// Writes one entry of a repeated message field.
+        ///
+        /// Reach for `write_msgs` when the entries come from one list; it owns the iteration
+        /// and so gets the order right in either direction. This one is for entries that have
+        /// no single Rust type — several unrelated values can each map to the same protobuf
+        /// message, and one closure per call can capture whatever it likes, where `write_msgs`
+        /// fixes one `I::Item` for all of them.
+        ///
+        /// Entries land in call order through a forward buffer and in **reverse** call order
+        /// through a downward-growing one, since each call prepends its whole entry. That is
+        /// [`RevBuf`]'s standing contract for repeated fields, not a quirk of this method:
+        /// two `write_msgs` calls against the same field invert the same way.
+        ///
+        /// [`RevBuf`]: crate::RevBuf
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             buf.put_msg(t, |buf| f(buf, M::schema()));
@@ -174,17 +198,11 @@ pub mod repeated {
             mut f: impl FnMut(&mut B, M, I::Item),
         ) -> Self
         where
-            I::IntoIter: DoubleEndedIterator,
+            I: OrderedIter<B::Order>,
         {
             let tag = const { EncodedTag::new(N, WireType::LEN) };
-            if B::REVERSE {
-                for value in values.into_iter().rev() {
-                    buf.put_msg(tag, |buf| f(buf, M::schema(), value));
-                }
-            } else {
-                for value in values {
-                    buf.put_msg(tag, |buf| f(buf, M::schema(), value));
-                }
+            for value in values.ordered(B::REVERSE) {
+                buf.put_msg(tag, |buf| f(buf, M::schema(), value));
             }
             Field::new()
         }
@@ -204,25 +222,19 @@ pub mod packed {
             values: I,
         ) -> Field<N, Packed<P>>
         where
-            I::IntoIter: DoubleEndedIterator,
+            I: OrderedIter<B::Order>,
         {
-            let mut iter = values.into_iter();
+            let mut iter = values.ordered(B::REVERSE);
             let Some(first) = iter.next() else {
                 return Field::new();
             };
             let t = const { EncodedTag::new(N, WireType::LEN) };
+            // One arm for both directions: a reverse buffer's `ordered()` already yields the
+            // list's tail first, so writing front-to-back prepends it into list order.
             buf.put_msg(t, |buf| {
-                if B::REVERSE {
-                    // The tail back-to-front, then `first` last so it lands leftmost.
-                    for value in iter.rev() {
-                        P::write_value(value.as_scalar(), buf);
-                    }
-                    P::write_value(first.as_scalar(), buf);
-                } else {
-                    P::write_value(first.as_scalar(), buf);
-                    for value in iter {
-                        P::write_value(value.as_scalar(), buf);
-                    }
+                P::write_value(first.as_scalar(), buf);
+                for value in iter {
+                    P::write_value(value.as_scalar(), buf);
                 }
             });
             Field::new()
@@ -235,33 +247,26 @@ pub mod packed {
         #[inline]
         pub fn write_exact<B: WriteBuf, I>(self, buf: &mut B, values: I) -> Field<N, Packed<P>>
         where
-            I: IntoIterator<Item: ProtoEncode<P>>,
-            I::IntoIter: ExactSizeIterator + DoubleEndedIterator,
+            I: IntoIterator<Item: ProtoEncode<P>> + OrderedIter<B::Order>,
+            I::Ordered: ExactSizeIterator,
         {
-            let it = values.into_iter();
+            let it = values.ordered(B::REVERSE);
             if it.len() == 0 {
                 return Field::new();
             }
-            if B::REVERSE {
-                // The exact length is no use to a downward buffer — `put_msg` already knows
-                // it by the time it writes it — so both element kinds take one path.
-                let t = const { EncodedTag::new(N, WireType::LEN) };
-                buf.put_msg(t, |buf| {
-                    for value in it.rev() {
+            // The exact length is no use to a downward buffer — `put_msg` already knows it by
+            // the time it writes it — so there both element kinds take the path below.
+            if !B::REVERSE {
+                if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
+                    let data_len = it.len() * fixed_size;
+                    let tag = const { EncodedTag::new(N, WireType::LEN) };
+                    tag.write(buf);
+                    write_varint(data_len as u64, buf);
+                    for value in it {
                         P::write_value(value.as_scalar(), buf);
                     }
-                });
-                return Field::new();
-            }
-            if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
-                let data_len = it.len() * fixed_size;
-                let tag = const { EncodedTag::new(N, WireType::LEN) };
-                tag.write(buf);
-                write_varint(data_len as u64, buf);
-                for value in it {
-                    P::write_value(value.as_scalar(), buf);
+                    return Field::new();
                 }
-                return Field::new();
             }
             // Varint types: the encoded size depends on the values, so this needs the
             // placeholder `put_msg` reserves.

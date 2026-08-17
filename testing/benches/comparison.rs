@@ -80,7 +80,7 @@ fn bench_ffi_overhead(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 /// Encode a full MixedUsageMessage with tacky, all fields set.
-fn tacky_encode_mixed_all(buf: &mut impl tacky::WriteBuf) {
+fn tacky_encode_mixed_all<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>) {
     let schema = TMixedUsageMessage::schema();
     schema
         .session_id
@@ -205,14 +205,14 @@ fn bench_encode_realistic(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode_realistic");
 
     let mut ref_buf = Vec::with_capacity(2048);
-    tacky_encode_mixed_all(&mut ref_buf);
+    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut ref_buf));
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_mixed_all(&mut buf);
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut buf));
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -238,7 +238,7 @@ fn bench_encode_realistic(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_mixed_all(&mut sb);
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut sb));
             black_box(sb.written());
         });
     });
@@ -248,7 +248,7 @@ fn bench_encode_realistic(c: &mut Criterion) {
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
     let mut rev_backing = vec![0u8; size as usize + 1024];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_mixed_all(&mut rb);
+    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
     assert_eq!(
         PMixedUsageMessage::decode(rb.written()).unwrap(),
         prost_msg,
@@ -258,7 +258,7 @@ fn bench_encode_realistic(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_mixed_all(&mut rb);
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
             black_box(rb.written());
         });
     });
@@ -270,7 +270,7 @@ fn bench_encode_realistic(c: &mut Criterion) {
         let mut out = Vec::with_capacity(size as usize + 1024);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_mixed_all(&mut rb);
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());
@@ -378,7 +378,7 @@ fn bench_decode_realistic(c: &mut Criterion) {
 
     // Encode a reference message (all fields) — wire bytes are identical
     let mut wire = Vec::with_capacity(512);
-    tacky_encode_mixed_all(&mut wire);
+    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut wire));
     group.throughput(Throughput::Bytes(wire.len() as u64));
 
     // Verify both decoders produce the same result
@@ -580,7 +580,7 @@ fn pprof_encode_data() -> PprofEncodeData {
     }
 }
 
-fn tacky_encode_pprof(buf: &mut impl tacky::WriteBuf, data: &PprofEncodeData) {
+fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, data: &PprofEncodeData) {
     use tacky_pprof::perftools::profiles::Profile;
 
     let s = Profile::schema();
@@ -750,14 +750,14 @@ fn bench_encode_pprof(c: &mut Criterion) {
 
     let data = pprof_encode_data();
     let mut ref_buf = Vec::with_capacity(16384);
-    tacky_encode_pprof(&mut ref_buf, &data);
+    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut ref_buf), &data);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_pprof(&mut buf, &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut buf), &data);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -784,7 +784,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_pprof(&mut sb, &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut sb), &data);
             black_box(sb.written());
         });
     });
@@ -794,7 +794,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
     let mut rev_backing = vec![0u8; size as usize + 1024];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_pprof(&mut rb, &data);
+    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
     assert_eq!(
         prost_pprof::Profile::decode(rb.written()).unwrap(),
         prost_msg,
@@ -804,7 +804,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(&mut rb, &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
             black_box(rb.written());
         });
     });
@@ -816,7 +816,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
         let mut out = Vec::with_capacity(size as usize + 1024);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(&mut rb, &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());
@@ -1102,7 +1102,10 @@ fn accesslog_encode_data() -> AccessLogEncodeData {
     }
 }
 
-fn tacky_encode_accesslog(buf: &mut impl tacky::WriteBuf, data: &AccessLogEncodeData) {
+fn tacky_encode_accesslog<B: tacky::WriteBuf>(
+    buf: &mut tacky::AnyDir<B>,
+    data: &AccessLogEncodeData,
+) {
     use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
 
     const BASE_HEADERS: [(&str, &str); 2] = [
@@ -1201,14 +1204,14 @@ fn bench_encode_accesslog(c: &mut Criterion) {
 
     let data = accesslog_encode_data();
     let mut ref_buf = Vec::with_capacity(32768);
-    tacky_encode_accesslog(&mut ref_buf, &data);
+    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut ref_buf), &data);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_accesslog(&mut buf, &data);
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &data);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -1235,7 +1238,7 @@ fn bench_encode_accesslog(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_accesslog(&mut sb, &data);
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut sb), &data);
             black_box(sb.written());
         });
     });
@@ -1245,7 +1248,7 @@ fn bench_encode_accesslog(c: &mut Criterion) {
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
     let mut rev_backing = vec![0u8; size as usize + 1024];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_accesslog(&mut rb, &data);
+    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
     assert_eq!(
         prost_accesslog::AccessLog::decode(rb.written()).unwrap(),
         prost_msg,
@@ -1255,7 +1258,7 @@ fn bench_encode_accesslog(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_accesslog(&mut rb, &data);
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
             black_box(rb.written());
         });
     });
@@ -1267,7 +1270,7 @@ fn bench_encode_accesslog(c: &mut Criterion) {
         let mut out = Vec::with_capacity(size as usize + 1024);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_accesslog(&mut rb, &data);
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());

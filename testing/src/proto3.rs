@@ -256,6 +256,65 @@ mod tests {
         assert_eq!(decoded.byte_arrays, vec![b"x".to_vec(), b"y".to_vec()]);
     }
 
+    /// Iterators that cannot be walked backwards — a `HashSet`'s, a `take_while` — written
+    /// bare. A forward buffer appends, so nothing needs reordering and no bound applies; a
+    /// `RevBuf` rejects these same calls at compile time, since it would have to emit the
+    /// elements back-to-front.
+    #[test]
+    fn test_repeated_from_one_way_iters() {
+        use std::collections::HashSet;
+
+        let nums: HashSet<i32> = HashSet::from_iter([1, 2, 3]);
+        let strings: HashSet<&str> = HashSet::from_iter(["a", "b"]);
+
+        let mut buf = Vec::new();
+        let s = RepeatedMessage::schema();
+        s.nums.write(&mut buf, &nums);
+        s.strings.write(&mut buf, &strings);
+        s.unums
+            .write(&mut buf, [1u64, 7, 0, 2].iter().take_while(|v| **v > 0));
+
+        let decoded = prost_proto3::RepeatedMessage::decode(&*buf).unwrap();
+        assert_eq!(HashSet::from_iter(decoded.nums), nums);
+        assert_eq!(
+            decoded
+                .strings
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            strings
+        );
+        assert_eq!(decoded.unums, vec![1, 7]);
+    }
+
+    /// One encode routine, written once against `AnyDir` because it does not know its
+    /// buffer's direction, run through both a forward buffer and a `RevBuf`. Both have to come
+    /// out in list order — the reverse arm walks the elements backwards so that prepending
+    /// lands them ascending. This is the shape the benches use.
+    #[test]
+    fn test_any_dir_through_both_directions() {
+        fn encode<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, strings: &[&str], nums: &[i32]) {
+            let s = RepeatedMessage::schema();
+            s.nums.write(buf, nums);
+            s.strings.write(buf, strings);
+        }
+
+        let strings = ["a", "b", "c"];
+        let nums = [1, 2, 3];
+
+        let mut fwd = Vec::new();
+        encode(tacky::AnyDir::from_mut(&mut fwd), &strings, &nums);
+        let mut backing = [0u8; 128];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        encode(tacky::AnyDir::from_mut(&mut rb), &strings, &nums);
+
+        for wire in [fwd.as_slice(), rb.written()] {
+            let decoded = prost_proto3::RepeatedMessage::decode(wire).unwrap();
+            assert_eq!(decoded.strings, vec!["a", "b", "c"]);
+            assert_eq!(decoded.nums, vec![1, 2, 3]);
+        }
+    }
+
     #[test]
     fn test_repeated_prost_to_tacky() {
         let prost_msg = prost_proto3::RepeatedMessage {

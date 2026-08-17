@@ -71,7 +71,7 @@ fn payloads(dataset: &[u8]) -> Vec<Vec<u8>> {
 
 /// Writes one `GoogleMessage1` in ascending tag order, which is the order prost
 /// emits, so the two outputs differ only where tacky pads a length prefix.
-fn tacky_encode_p2(buf: &mut impl tacky::WriteBuf, m: &prost_p2::GoogleMessage1) {
+fn tacky_encode_p2<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_p2::GoogleMessage1) {
     let s = tacky_p2::benchmarks::proto2::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -227,7 +227,7 @@ fn tacky_decode_p2(wire: &[u8]) -> prost_p2::GoogleMessage1 {
 
 /// Same message with implicit presence. `Field<_, Plain<_>>::write` skips
 /// default-valued fields, which is exactly what prost does, so no `if` needed.
-fn tacky_encode_p3(buf: &mut impl tacky::WriteBuf, m: &prost_p3::GoogleMessage1) {
+fn tacky_encode_p3<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_p3::GoogleMessage1) {
     let s = tacky_p3::benchmarks::proto3::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -398,7 +398,7 @@ macro_rules! encode_group {
         let mut prost_wire = Vec::with_capacity(4096);
         for m in &msgs {
             let mut one = Vec::with_capacity(1024);
-            $encode(&mut one, m);
+            $encode(tacky::AnyDir::from_mut(&mut one), m);
             assert_eq!(
                 &<$msg>::decode(one.as_slice()).unwrap(),
                 m,
@@ -418,7 +418,7 @@ macro_rules! encode_group {
             let mut backing = vec![0u8; cap + 1024];
             for m in &msgs {
                 let mut rb = tacky::RevBuf::new(&mut backing);
-                $encode(&mut rb, m);
+                $encode(tacky::AnyDir::from_mut(&mut rb), m);
                 assert_eq!(
                     &<$msg>::decode(rb.written()).unwrap(),
                     m,
@@ -431,7 +431,7 @@ macro_rules! encode_group {
             b.iter(|| {
                 let mut sb = tacky::SliceBuf::new(&mut backing);
                 for m in &msgs {
-                    $encode(&mut sb, m);
+                    $encode(tacky::AnyDir::from_mut(&mut sb), m);
                 }
                 black_box(sb.written());
             });
@@ -443,7 +443,7 @@ macro_rules! encode_group {
                 // Reversed, so the concatenation lands in the same order as the forward
                 // arm's — each message prepends ahead of the previous one.
                 for m in msgs.iter().rev() {
-                    $encode(&mut rb, m);
+                    $encode(tacky::AnyDir::from_mut(&mut rb), m);
                 }
                 black_box(rb.written());
             });
@@ -453,7 +453,7 @@ macro_rules! encode_group {
             let mut buf = Vec::with_capacity(cap);
             b.iter(|| {
                 for m in &msgs {
-                    $encode(&mut buf, m);
+                    $encode(tacky::AnyDir::from_mut(&mut buf), m);
                 }
                 black_box(buf.as_slice());
                 buf.clear();
