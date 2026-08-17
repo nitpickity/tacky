@@ -218,6 +218,59 @@ mod tests {
         assert_eq!(opt_bytes, Some([0xAB].as_slice()));
     }
 
+    // --- Malformed input ---
+
+    /// A `*Fields` iterator must stop at the first error. It used to return the error without
+    /// advancing or emptying its cursor, so the next call re-read the same bytes and failed
+    /// identically: `for field in Msg::decode(bytes)` never terminated on malformed input —
+    /// a hang on anything hostile, which is the normal case for a decoder.
+    ///
+    /// Each case below is a distinct error path in the generated `next`: the key, a field's
+    /// own decode, and `skip_field` for an unknown tag.
+    #[test]
+    fn test_malformed_input_terminates() {
+        // (name, wire) — every one is invalid somewhere after byte 0.
+        let cases: [(&str, &[u8]); 5] = [
+            // key itself is a truncated varint
+            ("truncated key", &[0x80]),
+            // field 1 (varint) with a truncated value
+            ("truncated varint value", &[0x08, 0x80]),
+            // field 14 (string) claims 5 bytes, supplies 1
+            ("truncated length-delimited", &[0x72, 0x05, b'a']),
+            // field 1 is a varint field, but the key says I64
+            ("wire type mismatch", &[0x09, 0, 0, 0, 0, 0, 0, 0, 0]),
+            // unknown field 99 with a truncated LEN payload — the `skip_field` path
+            ("unknown field, bad payload", &[0x9A, 0x06, 0x7F]),
+        ];
+
+        for (name, wire) in cases {
+            // `take` bounds the damage if this regresses: without it, a failure hangs the
+            // test run instead of reporting.
+            let yields: Vec<_> = ScalarMessage::decode(wire).take(4).collect();
+            let errors = yields.iter().filter(|r| r.is_err()).count();
+            assert_eq!(
+                errors, 1,
+                "{name}: expected exactly one Err, got {yields:?}"
+            );
+            assert!(
+                yields.last().is_some_and(|r| r.is_err()),
+                "{name}: the Err must be the final yield, got {yields:?}"
+            );
+        }
+    }
+
+    /// The counterpart: a *valid* prefix still yields its fields before the error, so stopping
+    /// early does not discard what was already parsed.
+    #[test]
+    fn test_valid_prefix_survives_trailing_garbage() {
+        // field 1 = 42, then a truncated key
+        let wire = [0x08u8, 42, 0x80];
+        let yields: Vec<_> = ScalarMessage::decode(&wire).take(4).collect();
+        assert_eq!(yields.len(), 2, "got {yields:?}");
+        assert!(matches!(yields[0], Ok(ScalarMessageField::AInt32(42))));
+        assert!(yields[1].is_err());
+    }
+
     // --- Repeated (packed by default in proto3) ---
 
     #[test]
