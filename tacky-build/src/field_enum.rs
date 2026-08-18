@@ -261,7 +261,7 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
                 quote! {
                     #tag => {
-                        return Some((|| {
+                        let decoded = (|| {
                             if wire_type == tacky::WireType::LEN {
                                 let data = tacky::decode_len(buf)?;
                                 Ok(#enum_name::#variant_name(#packed_value))
@@ -272,7 +272,11 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
                                 let data = &start[..start.len() - buf.len()];
                                 Ok(#enum_name::#variant_name(#unpacked_value))
                             }
-                        })())
+                        })();
+                        if decoded.is_err() {
+                            self.buf = &[];
+                        }
+                        return Some(decoded);
                     }
                 }
             } else {
@@ -282,12 +286,15 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
                 quote! {
                     #tag => {
-                        return Some((
-                            || {
-                             tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
-                        #decode
-                        Ok(#enum_name::#variant_name(#value))
-                        })())
+                        let decoded = (|| {
+                            tacky::check_wire_type(wire_type, #wt, #field_name_str)?;
+                            #decode
+                            Ok(#enum_name::#variant_name(#value))
+                        })();
+                        if decoded.is_err() {
+                            self.buf = &[];
+                        }
+                        return Some(decoded);
                     }
                 }
             }
@@ -320,6 +327,11 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
         impl<'a> Iterator for #fields_iterator_name<'a> {
             type Item = Result<#enum_name #lt_token, tacky::DecodeError>;
 
+            /// Yields one field per call, and **stops at the first error**: a malformed
+            /// field leaves the cursor mid-value, so there is nothing to resync to, and
+            /// re-reading the same bytes would fail identically forever. Every error path
+            /// therefore empties the cursor first, so the `Err` is followed by `None` and a
+            /// `for` loop over hostile input terminates.
             fn next(&mut self) -> Option<Self::Item> {
                 loop {
                     if self.buf.is_empty() {
@@ -328,14 +340,20 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
                     let buf = &mut self.buf;
                     let (tag, wire_type) = match tacky::decode_key(buf) {
                         Ok(t) => t,
-                        Err(e) => return Some(Err(e)),
+                        Err(e) => {
+                            self.buf = &[];
+                            return Some(Err(e));
+                        }
                     };
                     match tag {
                         #(#match_arms)*
                         _ => {
                             match tacky::skip_field(wire_type, buf) {
                                 Ok(()) => continue,
-                                Err(e) => return Some(Err(e)),
+                                Err(e) => {
+                                    self.buf = &[];
+                                    return Some(Err(e));
+                                }
                             }
                         }
                     }
