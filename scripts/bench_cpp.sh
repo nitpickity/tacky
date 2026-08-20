@@ -3,6 +3,8 @@
 #
 #   scripts/bench_cpp.sh                                  # all encode groups
 #   scripts/bench_cpp.sh --groups 'encode_fds_*'          # glob over group names
+#   scripts/bench_cpp.sh --groups 'encode_fds_*,encode_otlp_*'     # several, comma separated
+#   scripts/bench_cpp.sh --groups 'encode_fds_*' --groups 'enc*1'  # or a repeated flag
 #   scripts/bench_cpp.sh --bench comparison -- '^encode_realistic'
 #
 # criterion's own filter is an unanchored regex, so a glob typed straight at it either
@@ -80,10 +82,12 @@ else
     echo "=== reusing static protobuf at $PREFIX ($("$PREFIX/bin/protoc" --version))"
 fi
 
-# Glob -> anchored regex. Character classes pass through; the rest of regex's metacharacters
-# are escaped so a group name containing `.` cannot act as a wildcard.
+# Glob -> regex body, unanchored so several can be alternated. Character classes pass
+# through; the rest of regex's metacharacters are escaped so a group name containing `.`
+# cannot act as a wildcard. `,` is not a metacharacter, so it survives to become the `|`
+# separator below.
 glob_to_re() {
-    local g=$1 out='^' i c
+    local g=$1 out='' i c
     for ((i = 0; i < ${#g}; i++)); do
         c=${g:i:1}
         case $c in
@@ -101,7 +105,11 @@ args=()
 while [ $# -gt 0 ]; do
     case $1 in
         --groups)
-            GROUP_GLOB=${2:?--groups needs a pattern}
+            if [ -z "$GROUP_GLOB" ]; then
+                GROUP_GLOB=${2:?--groups needs a pattern}
+            else
+                GROUP_GLOB="$GROUP_GLOB,${2:?--groups needs a pattern}"
+            fi
             shift 2
             ;;
         # Everything from `--` on belongs to criterion verbatim, including a literal
@@ -121,7 +129,8 @@ set -- ${args[@]+"${args[@]}"}
 if [ -n "$GROUP_GLOB" ]; then
     # The filter is criterion's first positional, so slot it in right after `--` when the
     # caller supplied one; that way --groups composes with --measurement-time and friends.
-    re=$(glob_to_re "$GROUP_GLOB")
+    body=$(glob_to_re "$GROUP_GLOB")
+    re="^(${body//,/|})"
     out=()
     put=""
     for a in "$@"; do
