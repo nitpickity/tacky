@@ -1,0 +1,187 @@
+name: Encode A/B (x86_64)
+
+# Targeted A/B of two commits on an x86_64 runner. Encode groups only, and only the
+# `tacky` arm — the forward `Vec<u8>` writer. No decode groups, no `prost`/`cpp` arms,
+# no `tacky-slice`/`tacky-rev`. The question this answers is "did this commit change
+# forward-Vec encode throughput on x86", which is not answerable on an arm64 dev box.
+#
+# Manual dispatch only, deliberately: this is a ~10 minute job and has no business
+# running on every push. Dispatch it against the branch you want measured and leave
+# `base` blank to get HEAD~1 — which is exactly right when the branch is "baseline,
+# then the one change". `git push` uploads the parent commit too, so the baseline is
+# always reachable. Note that `workflow_dispatch` requires this file to be on the
+# default branch before it appears in the UI, even though the ref you dispatch
+# against (and the workflow body that runs) can be any branch.
+#
+# Each side is built ONCE and its bench binaries copied aside; the rounds then only
+# re-run the measurement. Checking out between commits invalidates `tacky` and
+# `testing`, so building per round would spend most of the job compiling.
+#
+# A shared runner is noisier than a local box (expect ~5% rather than ~1-2%), so both
+# sides are measured back-to-back in the SAME job and the pair repeats `rounds`
+# times. Read the rounds together: an effect that flips sign between rounds is runner
+# noise, not the commit. The codegen step at the end is deterministic — trust it over
+# the timings when they disagree.
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline ref (branch, tag or SHA). Blank = HEAD~1 of the dispatched ref."
+        required: false
+      head:
+        description: "Ref under test. Blank = the dispatched ref."
+        required: false
+      rounds:
+        description: "How many base/head measurement pairs to run"
+        required: false
+        default: "3"
+      measurement_time:
+        description: "Criterion measurement seconds per benchmark"
+        required: false
+        default: "3"
+
+jobs:
+  encode-ab:
+    runs-on: ubuntu-latest
+    # The platform cap is 6 hours, which would hide a hang for most of a working day.
+    timeout-minutes: 45
+    env:
+      # Every encode group's forward-Vec arm. `tacky-slice`, `tacky-rev`,
+      # `tacky-rev-owned`, `tacky-walk` and `prost` all fail this anchor. The
+      # `encode_otlp_vlen_*` sweeps DO match — they use a plain `tacky` arm per
+      # spread — which is wanted: they are the same writer at other string lengths.
+      FILTER: '^encode_.*/tacky$'
+      BENCH_NAMES: "comparison descriptor_set google_message1 otlp_traces regression"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # HEAD~1 and any named ref have to be reachable
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Dependencies (criterion, prost, serde) are shared by both sides and dominate
+      # a cold build. Only the two project rebuilds are unavoidable.
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: Record the machine
+        run: |
+          grep -m1 'model name' /proc/cpuinfo
+          nproc
+          uname -m
+
+      # `actions/checkout` leaves a detached HEAD with no local branches, so a bare
+      # `git checkout main` fails — resolve everything to SHAs once, up front.
+      - name: Resolve refs
+        run: |
+          set -euo pipefail
+          base_in="${{ inputs.base }}"
+          head_in="${{ inputs.head }}"
+          [ -n "$base_in" ] || base_in=$(git rev-parse HEAD~1)
+          [ -n "$head_in" ] || head_in=$(git rev-parse HEAD)
+
+          for pair in "BASE:$base_in" "HEAD:$head_in"; do
+            side=${pair%%:*}; ref=${pair#*:}
+            sha=$(git rev-parse --verify "origin/$ref^{commit}" 2>/dev/null \
+                  || git rev-parse --verify "$ref^{commit}")
+            echo "${side}_SHA=$sha" >> "$GITHUB_ENV"
+            echo "$side $ref -> $sha"
+          done
+
+          rounds="${{ inputs.rounds }}"; echo "ROUNDS=${rounds:-3}" >> "$GITHUB_ENV"
+          mt="${{ inputs.measurement_time }}"; echo "MT=${mt:-3}" >> "$GITHUB_ENV"
+
+      - name: Build both sides once
+        run: |
+          set -euo pipefail
+          for side in base head; do
+            sha=$([ "$side" = base ] && echo "$BASE_SHA" || echo "$HEAD_SHA")
+            echo "::group::build $side ($sha)"
+            git checkout --detach --quiet "$sha"
+            mkdir -p "/tmp/bin/$side"
+            # Ask cargo where it put the binaries rather than globbing target/deps,
+            # which by now holds both sides' hashes.
+            cargo build --release -p testing --benches --message-format=json \
+              | jq -r 'select(.executable != null and (.target.kind | index("bench")))
+                       | "\(.target.name) \(.executable)"' \
+              | while read -r name path; do cp "$path" "/tmp/bin/$side/$name"; done
+            ls -l "/tmp/bin/$side"
+            echo "::endgroup::"
+          done
+
+      # A filter that matches nothing leaves criterion exiting 0 having measured
+      # nothing, which reads as a clean run. Fail loudly instead.
+      - name: Check the filter selects something
+        run: |
+          set -euo pipefail
+          n=0
+          for b in $BENCH_NAMES; do
+            found=$("/tmp/bin/base/$b" --bench "$FILTER" --list 2>/dev/null \
+                    | grep -c ': benchmark' || true)
+            echo "$b: $found"
+            n=$((n + found))
+          done
+          echo "total selected: $n"
+          test "$n" -gt 0 || { echo "::error::FILTER '$FILTER' matched no benchmarks"; exit 1; }
+
+      - name: Interleaved A/B
+        run: |
+          set -euo pipefail
+          for r in $(seq 1 "$ROUNDS"); do
+            for b in $BENCH_NAMES; do
+              echo "::group::round $r — $b"
+              # Criterion keeps baselines under ./target/criterion, so both sides must
+              # run from the repo root for `--baseline` to find what `--save-baseline`
+              # wrote. Nothing is rebuilt here.
+              "/tmp/bin/base/$b" --bench "$FILTER" \
+                --warm-up-time 1 --measurement-time "$MT" --save-baseline ab-base
+              "/tmp/bin/head/$b" --bench "$FILTER" \
+                --warm-up-time 1 --measurement-time "$MT" --baseline ab-base 2>&1 \
+                | tee -a "round-$r.txt"
+              echo "::endgroup::"
+            done
+          done
+
+      - name: Deterministic codegen signal
+        run: |
+          set -euo pipefail
+          for side in base head; do
+            sha=$([ "$side" = base ] && echo "$BASE_SHA" || echo "$HEAD_SHA")
+            bin="/tmp/bin/$side/otlp_traces"
+            text=$(size -A "$bin" | awk '$1==".text"{print $2}')
+            calls=$(objdump -d "$bin" | grep -cE 'call.*<memcpy' || true)
+            echo "$side ($sha): .text=$text bytes, memcpy call sites=$calls" | tee -a codegen.txt
+          done
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "## Encode A/B — \`$BASE_SHA\` → \`$HEAD_SHA\`"
+            echo
+            grep -m1 'model name' /proc/cpuinfo || true
+            echo
+            echo '### Codegen (deterministic)'
+            echo '```'
+            cat codegen.txt 2>/dev/null || echo 'not produced'
+            echo '```'
+            for f in round-*.txt; do
+              [ -e "$f" ] || continue
+              echo "### $f"
+              echo '```'
+              grep -E 'Benchmarking .*: Analyzing|time: +\[|change:|Performance|No change' "$f" || true
+              echo '```'
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: encode-ab
+          path: |
+            round-*.txt
+            codegen.txt
