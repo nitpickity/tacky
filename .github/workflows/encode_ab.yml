@@ -32,8 +32,12 @@ on:
       head:
         description: "Ref under test. Blank = the dispatched ref."
         required: false
+      benches:
+        description: "Which bench binaries to run, space separated. Narrow this to spend the whole budget on the arms you care about."
+        required: false
+        default: "comparison descriptor_set google_message1 otlp_traces regression"
       rounds:
-        description: "How many base/head measurement pairs to run"
+        description: "How many base/head measurement pairs to run. Prefer many short pairs over few long ones — see the note on drift."
         required: false
         default: "3"
       measurement_time:
@@ -51,8 +55,11 @@ jobs:
       # `tacky-rev-owned`, `tacky-walk` and `prost` all fail this anchor. The
       # `encode_otlp_vlen_*` sweeps DO match — they use a plain `tacky` arm per
       # spread — which is wanted: they are the same writer at other string lengths.
+      #
+      # Note these sweeps are NOT a negative control for a short-string change:
+      # only the attribute *values* scale with the sweep parameter, while the keys,
+      # span names and trace/span ids stay short in every one of them.
       FILTER: '^encode_.*/tacky$'
-      BENCH_NAMES: "comparison descriptor_set google_message1 otlp_traces regression"
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +101,8 @@ jobs:
 
           rounds="${{ inputs.rounds }}"; echo "ROUNDS=${rounds:-3}" >> "$GITHUB_ENV"
           mt="${{ inputs.measurement_time }}"; echo "MT=${mt:-3}" >> "$GITHUB_ENV"
+          b="${{ inputs.benches }}"
+          echo "BENCH_NAMES=${b:-comparison descriptor_set google_message1 otlp_traces regression}" >> "$GITHUB_ENV"
 
       - name: Build both sides once
         run: |
@@ -128,22 +137,57 @@ jobs:
           echo "total selected: $n"
           test "$n" -gt 0 || { echo "::error::FILTER '$FILTER' matched no benchmarks"; exit 1; }
 
+      # This runner drifts on the timescale of a single benchmark: a 3-round run showed
+      # one round's *head* 6% slower in absolute terms than the other two rounds'
+      # heads, which is enough to flip a 4% win into a 2% loss for that pair. Hence
+      # the shape here: pin to one core to stop migration, alternate base/head
+      # immediately so both sides sit in the same patch of time, and take a median
+      # over many pairs rather than trusting any single one. More short rounds beats
+      # fewer long ones — a longer measurement just straddles more drift.
       - name: Interleaved A/B
         run: |
           set -euo pipefail
+          # Core 0 tends to take interrupts; 1 is quieter. Harmless if unavailable.
+          PIN="taskset -c 1"
+          command -v taskset >/dev/null || PIN=""
           for r in $(seq 1 "$ROUNDS"); do
             for b in $BENCH_NAMES; do
               echo "::group::round $r — $b"
               # Criterion keeps baselines under ./target/criterion, so both sides must
               # run from the repo root for `--baseline` to find what `--save-baseline`
               # wrote. Nothing is rebuilt here.
-              "/tmp/bin/base/$b" --bench "$FILTER" \
+              $PIN "/tmp/bin/base/$b" --bench "$FILTER" \
                 --warm-up-time 1 --measurement-time "$MT" --save-baseline ab-base
-              "/tmp/bin/head/$b" --bench "$FILTER" \
+              $PIN "/tmp/bin/head/$b" --bench "$FILTER" \
                 --warm-up-time 1 --measurement-time "$MT" --baseline ab-base 2>&1 \
                 | tee -a "round-$r.txt"
               echo "::endgroup::"
             done
+          done
+
+      # One round's change% is not an answer on this hardware — the median across
+      # rounds is, and the min/max spread is what says whether to believe it. A
+      # median whose sign disagrees with either extreme means the run was too noisy,
+      # so print all three rather than just the middle.
+      - name: Aggregate rounds
+        run: |
+          set -euo pipefail
+          awk '
+            /\/tacky/ { for (i = 1; i <= NF; i++) if ($i ~ /\/tacky$/) bench = $i; next }
+            /^ *change:/ { getline; if (match($0, /-?[0-9]+\.[0-9]+%/)) {
+                # criterion prints [lower point upper]; the middle one is the estimate
+                n = split($0, f, /[][ ]+/); c = 0
+                for (i in f) if (f[i] ~ /%$/) { c++; v[c] = f[i] + 0 }
+                if (c >= 2) vals[bench] = vals[bench] " " v[2]
+            } }
+            END { for (b in vals) print b vals[b] }
+          ' round-*.txt | while read -r bench rest; do
+            echo "$rest" | tr ' ' '\n' | grep -v '^$' | sort -g > /tmp/v
+            n=$(wc -l < /tmp/v)
+            med=$(awk -v n="$n" 'NR==int((n+1)/2)' /tmp/v)
+            lo=$(head -1 /tmp/v); hi=$(tail -1 /tmp/v)
+            printf '%-42s median %7s%%   spread %7s%% .. %7s%%   (n=%s)\n' \
+              "$bench" "$med" "$lo" "$hi" "$n" | tee -a aggregate.txt
           done
 
       - name: Deterministic codegen signal
@@ -154,6 +198,8 @@ jobs:
             bin="/tmp/bin/$side/otlp_traces"
             text=$(size -A "$bin" | awk '$1==".text"{print $2}')
             calls=$(objdump -d "$bin" | grep -cE 'call.*<memcpy' || true)
+            # Note: this count cannot tell you whether an inline small-copy path
+            # engaged — a fallback `memcpy` stays at every call site either way.
             echo "$side ($sha): .text=$text bytes, memcpy call sites=$calls" | tee -a codegen.txt
           done
 
@@ -165,6 +211,10 @@ jobs:
             echo
             grep -m1 'model name' /proc/cpuinfo || true
             echo
+            echo '### Median change across rounds'
+            echo '```'
+            cat aggregate.txt 2>/dev/null || echo 'not produced'
+            echo '```'
             echo '### Codegen (deterministic)'
             echo '```'
             cat codegen.txt 2>/dev/null || echo 'not produced'
@@ -184,4 +234,5 @@ jobs:
           name: encode-ab
           path: |
             round-*.txt
+            aggregate.txt
             codegen.txt
