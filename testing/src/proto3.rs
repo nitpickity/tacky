@@ -506,6 +506,42 @@ mod tests {
         assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
     }
 
+    /// The companion to [`test_revbuf_descending_matches_prost`] for lengths that do *not*
+    /// fit in one byte. That test's fields are all short, so it exercises neither
+    /// `RevBuf::put_msg`'s nor `put_len_delimited`'s `>= 0x80` branch — a reversed or
+    /// off-by-one multi-byte varint would slip straight through it.
+    ///
+    /// Here the inner `label` is 300 bytes (2-byte length), which pushes the enclosing
+    /// `Nested` past 127 too (a second 2-byte length), and `value` is a 3-byte varint. Bytes
+    /// are compared against prost rather than decoded, since decoding would re-absorb any
+    /// mistake the encoder made in the length prefix.
+    #[test]
+    fn test_revbuf_multibyte_lengths_match_prost() {
+        let label = "x".repeat(300);
+        let value = 1_000_000i32; // 0xc0 0x84 0x3d — three varint bytes
+
+        let mut backing = [0u8; 1024];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        let s = WithNesting::schema();
+        // Descending field order: name is 3, single is 1.
+        s.name.write(&mut rb, "outer");
+        s.single.write_msg(&mut rb, |buf, s| {
+            // And descending within the nested message: value is 2, label is 1.
+            s.value.write(buf, value);
+            s.label.write(buf, label.as_str());
+        });
+
+        let prost_msg = prost_proto3::WithNesting {
+            single: Some(prost_proto3::Nested {
+                label: label.clone(),
+                value,
+            }),
+            many: vec![],
+            name: "outer".into(),
+        };
+        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+    }
+
     #[test]
     fn test_nesting_tacky_to_prost() {
         let mut buf = Vec::new();

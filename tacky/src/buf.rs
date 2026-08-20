@@ -133,13 +133,29 @@ pub struct Reverse;
 /// Marker for a buffer whose direction is not known where the write is type-checked — the
 /// direction [`AnyDir`] presents. Repeated fields then require a [`DoubleEndedIterator`],
 /// because the buffer may turn out to grow downward.
+///
+/// **Any `WriteBuf` with `type Order = Both` must override [`WriteBuf::REVERSE`] itself.**
+/// `Both`'s own `REVERSE` is a placeholder — see the note on its [`Order`] impl. This is
+/// the trap for anyone writing a transparent wrapper (a tracing or counting buffer) around
+/// a [`RevBuf`] by copying [`AnyDir`]'s shape: inheriting `Both`'s value silently produces
+/// forward tag/value ordering into a prepending buffer.
 pub struct Both;
 
-/// A buffer's direction, as a type. Implemented only by [`Forward`] and [`Reverse`], and
-/// carried by [`WriteBuf::Order`] so that [`OrderedIter`] can select on it.
-pub trait Order {
+/// A buffer's direction, as a type. Implemented only by [`Forward`], [`Reverse`] and
+/// [`Both`], and carried by [`WriteBuf::Order`] so that [`OrderedIter`] can select on it.
+///
+/// Sealed: a fourth direction would have no meaning to the writers, which branch on exactly
+/// these three.
+pub trait Order: private::Sealed {
     /// Mirrors [`WriteBuf::REVERSE`], which is derived from this.
     const REVERSE: bool;
+}
+
+mod private {
+    pub trait Sealed {}
+    impl Sealed for super::Forward {}
+    impl Sealed for super::Reverse {}
+    impl Sealed for super::Both {}
 }
 
 impl Order for Forward {
@@ -151,9 +167,10 @@ impl Order for Reverse {
 }
 
 impl Order for Both {
-    /// Never read: a buffer viewed through [`AnyDir`] overrides [`WriteBuf::REVERSE`] with
-    /// the real direction, which is what the writers branch on. This value exists only
-    /// because the trait requires one.
+    /// A placeholder, not an answer: `false` is *not* a claim that a `Both` buffer is
+    /// forward. It is never read for [`AnyDir`], which overrides [`WriteBuf::REVERSE`] with
+    /// the real direction, and that override is what the writers branch on. Any other
+    /// `Both` buffer must do the same — see [`Both`].
     const REVERSE: bool = false;
 }
 
@@ -612,10 +629,20 @@ impl<'a> SliceBuf<'a> {
 /// Adapter that implements [`core::fmt::Write`] for any [`WriteBuf`].
 ///
 /// Allows writing `Display` types directly into a protobuf buffer via `write!`.
+///
+/// **Forward buffers only.** This is append-only by construction — one `put_slice` per
+/// `write_str` — so against a [`RevBuf`] every call prepends and a multi-chunk write comes
+/// out chunk-reversed. `Display for Ipv4Addr` alone emits several `write_str` calls.
 pub struct FmtWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        // `debug_assert` rather than `assert`: this fires per chunk, and `B::REVERSE` is
+        // const-known, so it costs nothing in release and next to nothing in debug.
+        debug_assert!(
+            !B::REVERSE,
+            "FmtWriter appends; a reverse buffer would emit chunks backwards"
+        );
         self.0.put_slice(s.as_bytes());
         Ok(())
     }
@@ -627,6 +654,12 @@ impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
 /// ```ignore
 /// schema.name.write(&mut buf, Some(PbDisplay(&my_ip)));
 /// ```
+///
+/// **Forward buffers only: panics on a [`RevBuf`].** A reverse buffer cannot
+/// length-prefix a payload it has not seen yet, and this streams its payload through a
+/// [`Tack`](`crate::Tack`) placeholder. Note also that `as_scalar` returns `""` while the
+/// real bytes are written in `encode`, so this must not be used as a map key or value —
+/// `write_entry` precomputes the entry length from `as_scalar` and would understate it.
 pub struct PbDisplay<'a, T: core::fmt::Display + ?Sized>(pub &'a T);
 
 impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_, T> {
@@ -648,12 +681,20 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 /// Adapter that implements [`std::io::Write`] for any [`WriteBuf`].
 ///
 /// Useful for integrations like `serde_json::to_writer` that expect an `io::Write` sink.
+///
+/// **Forward buffers only**, for the same reason as [`FmtWriter`]: one `put_slice` per
+/// `write`, so a reverse buffer emits the chunks backwards. `serde_json::to_writer` — the
+/// documented use case — would produce its JSON in reverse chunk order.
 #[cfg(feature = "std")]
 pub struct IoWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 #[cfg(feature = "std")]
 impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        debug_assert!(
+            !B::REVERSE,
+            "IoWriter appends; a reverse buffer would emit chunks backwards"
+        );
         self.0.put_slice(buf);
         Ok(buf.len())
     }
@@ -669,6 +710,9 @@ impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
 /// ```ignore
 /// schema.json_field.write(&mut buf, Some(PbWrite(|w| serde_json::to_writer(w, &val))));
 /// ```
+///
+/// **Forward buffers only: panics on a [`RevBuf`]**, and must not be used as a map key or
+/// value — see [`PbDisplay`] for both reasons.
 #[cfg(feature = "std")]
 pub struct PbWrite<F>(pub F);
 
@@ -800,6 +844,49 @@ mod tests {
 
     use crate::tack::Tack;
     use crate::{scalars::*, ProtoEncode};
+
+    // --- Reverse-buffer guards ---
+    //
+    // Each of these used to produce a silently wrong byte stream rather than a panic, which
+    // is the whole reason the guards exist. `PbDisplay`/`PbWrite` go through `Tack`, whose
+    // `start`-relative patch lands inside the payload when the buffer grows downward; the
+    // two adapters are append-only, so a multi-chunk write comes out chunk-reversed.
+
+    #[test]
+    #[should_panic(expected = "Tack is forward-only")]
+    fn pb_display_into_rev_buf_panics() {
+        let mut backing = [0u8; 64];
+        let mut rb = crate::RevBuf::new(&mut backing);
+        <PbDisplay<'_, u32> as ProtoEncode<PbString>>::encode(&mut rb, &PbDisplay(&42u32));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[should_panic(expected = "Tack is forward-only")]
+    fn pb_write_into_rev_buf_panics() {
+        let mut backing = [0u8; 64];
+        let mut rb = crate::RevBuf::new(&mut backing);
+        let w = PbWrite(|w: &mut dyn std::io::Write| w.write_all(b"payload"));
+        <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut rb, &w);
+    }
+
+    #[test]
+    #[should_panic(expected = "FmtWriter appends")]
+    fn fmt_writer_into_rev_buf_panics() {
+        let mut backing = [0u8; 64];
+        let mut rb = crate::RevBuf::new(&mut backing);
+        write!(FmtWriter(&mut rb), "{}", 42).unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[should_panic(expected = "IoWriter appends")]
+    fn io_writer_into_rev_buf_panics() {
+        use std::io::Write as _;
+        let mut backing = [0u8; 64];
+        let mut rb = crate::RevBuf::new(&mut backing);
+        IoWriter(&mut rb).write_all(b"chunk").unwrap();
+    }
 
     /// `put_slice`'s ladder writes overlapping fixed-width blocks rather than `n` bytes,
     /// so every arm boundary and the fallback edge have to be pinned exactly. Appends onto
