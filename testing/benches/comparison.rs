@@ -8,9 +8,9 @@
 //! tacky pads nested-message length prefixes to a fixed width, so its output can
 //! be a little larger.
 //!
-//! `--features cpp` adds arms for the official C++ protobuf runtime. Requires
-//! `protoc` and a protobuf C++ install (`brew install protobuf pkg-config`). Each
-//! C++ workload gets up to four arms:
+//! `--features cpp` adds arms for the official C++ protobuf runtime; run
+//! `scripts/bench_cpp.sh`, which sets it up statically. Each C++ workload gets up to four
+//! arms:
 //!
 //! - `cpp` — public API equivalent: size pass, then write pass.
 //! - `cpp-cached` — write pass only, sizes precomputed. Not a legal steady state

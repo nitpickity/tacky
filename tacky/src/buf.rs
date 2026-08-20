@@ -134,18 +134,13 @@ pub struct Reverse;
 /// direction [`AnyDir`] presents. Repeated fields then require a [`DoubleEndedIterator`],
 /// because the buffer may turn out to grow downward.
 ///
-/// **Any `WriteBuf` with `type Order = Both` must override [`WriteBuf::REVERSE`] itself.**
-/// `Both`'s own `REVERSE` is a placeholder — see the note on its [`Order`] impl. This is
-/// the trap for anyone writing a transparent wrapper (a tracing or counting buffer) around
-/// a [`RevBuf`] by copying [`AnyDir`]'s shape: inheriting `Both`'s value silently produces
-/// forward tag/value ordering into a prepending buffer.
+/// A `WriteBuf` using this **must** override [`WriteBuf::REVERSE`]; `Both`'s own value is a
+/// placeholder. Inheriting it gives a wrapper around a [`RevBuf`] forward ordering.
 pub struct Both;
 
 /// A buffer's direction, as a type. Implemented only by [`Forward`], [`Reverse`] and
 /// [`Both`], and carried by [`WriteBuf::Order`] so that [`OrderedIter`] can select on it.
-///
-/// Sealed: a fourth direction would have no meaning to the writers, which branch on exactly
-/// these three.
+/// Sealed: the writers branch on exactly these three.
 pub trait Order: private::Sealed {
     /// Mirrors [`WriteBuf::REVERSE`], which is derived from this.
     const REVERSE: bool;
@@ -167,10 +162,8 @@ impl Order for Reverse {
 }
 
 impl Order for Both {
-    /// A placeholder, not an answer: `false` is *not* a claim that a `Both` buffer is
-    /// forward. It is never read for [`AnyDir`], which overrides [`WriteBuf::REVERSE`] with
-    /// the real direction, and that override is what the writers branch on. Any other
-    /// `Both` buffer must do the same — see [`Both`].
+    /// A placeholder, not a claim of forwardness: [`AnyDir`] overrides
+    /// [`WriteBuf::REVERSE`], and any other `Both` buffer must too. See [`Both`].
     const REVERSE: bool = false;
 }
 
@@ -374,8 +367,8 @@ mod alloc_impls {
         }
         #[inline]
         fn put_slice(&mut self, src: &[u8]) {
-            // EXPERIMENT: overlapping fixed-width stores for short slices, to skip the
-            // out-of-line `_memcpy` stub call that `extend_from_slice` lowers to.
+            // Overlapping fixed-width stores for short slices, skipping the out-of-line
+            // `memcpy` call `extend_from_slice` lowers to. Worth 5-10% on encode.
             let n = src.len();
             if n == 0 || n > 48 {
                 self.extend_from_slice(src);
@@ -387,13 +380,10 @@ mod alloc_impls {
                 let d = self.as_mut_ptr().add(len);
                 let s = src.as_ptr();
                 if n >= 16 {
-                    // Three overlapping 16-byte pairs, no size branch between them. The two
-                    // ends are always [0,16) and [n-16,n); the middle one at n/2-8 closes
-                    // whatever gap is left. 48 is exactly how far this form reaches — the
-                    // middle has to satisfy both n/2-8 <= 16 and n/2+8 >= n-16 — and n >= 16
-                    // is exactly what keeps it in bounds, since n/2+8 <= n there. The middle
-                    // store is redundant for n <= 32 and left unconditional anyway: two
-                    // instructions beat the mispredicting branch that would skip them.
+                    // Three overlapping 16-byte pairs, branchless. Ends cover [0,16) and
+                    // [n-16,n), middle closes the gap. 48 is the reach of this form
+                    // (n/2-8 <= 16 and n/2+8 >= n-16) and n >= 16 keeps it in bounds.
+                    // Redundant below 32, still unconditional: cheaper than a branch.
                     let mid = n / 2 - 8;
                     (d as *mut u128).write_unaligned((s as *const u128).read_unaligned());
                     (d.add(mid) as *mut u128)
@@ -630,15 +620,13 @@ impl<'a> SliceBuf<'a> {
 ///
 /// Allows writing `Display` types directly into a protobuf buffer via `write!`.
 ///
-/// **Forward buffers only.** This is append-only by construction — one `put_slice` per
-/// `write_str` — so against a [`RevBuf`] every call prepends and a multi-chunk write comes
-/// out chunk-reversed. `Display for Ipv4Addr` alone emits several `write_str` calls.
+/// Forward buffers only: append-only, so a multi-chunk write into a prepending buffer comes
+/// out chunk-reversed.
 pub struct FmtWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        // `debug_assert` rather than `assert`: this fires per chunk, and `B::REVERSE` is
-        // const-known, so it costs nothing in release and next to nothing in debug.
+        // Per chunk, and const-known, so free in release.
         debug_assert!(
             !B::REVERSE,
             "FmtWriter appends; a reverse buffer would emit chunks backwards"
@@ -655,11 +643,9 @@ impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
 /// schema.name.write(&mut buf, Some(PbDisplay(&my_ip)));
 /// ```
 ///
-/// **Forward buffers only: panics on a [`RevBuf`].** A reverse buffer cannot
-/// length-prefix a payload it has not seen yet, and this streams its payload through a
-/// [`Tack`](`crate::Tack`) placeholder. Note also that `as_scalar` returns `""` while the
-/// real bytes are written in `encode`, so this must not be used as a map key or value —
-/// `write_entry` precomputes the entry length from `as_scalar` and would understate it.
+/// Panics on a [`RevBuf`]: streams through a [`Tack`](`crate::Tack`) placeholder. Also
+/// unusable as a map key or value — `as_scalar` returns `""` while `encode` writes the real
+/// bytes, so `write_entry`'s precomputed length understates it.
 pub struct PbDisplay<'a, T: core::fmt::Display + ?Sized>(pub &'a T);
 
 impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_, T> {
@@ -682,9 +668,8 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 ///
 /// Useful for integrations like `serde_json::to_writer` that expect an `io::Write` sink.
 ///
-/// **Forward buffers only**, for the same reason as [`FmtWriter`]: one `put_slice` per
-/// `write`, so a reverse buffer emits the chunks backwards. `serde_json::to_writer` — the
-/// documented use case — would produce its JSON in reverse chunk order.
+/// Forward buffers only, as [`FmtWriter`]: `serde_json::to_writer` would emit its JSON in
+/// reverse chunk order.
 #[cfg(feature = "std")]
 pub struct IoWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
@@ -711,8 +696,7 @@ impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
 /// schema.json_field.write(&mut buf, Some(PbWrite(|w| serde_json::to_writer(w, &val))));
 /// ```
 ///
-/// **Forward buffers only: panics on a [`RevBuf`]**, and must not be used as a map key or
-/// value — see [`PbDisplay`] for both reasons.
+/// Panics on a [`RevBuf`], and unusable as a map key or value — see [`PbDisplay`].
 #[cfg(feature = "std")]
 pub struct PbWrite<F>(pub F);
 
@@ -845,12 +829,7 @@ mod tests {
     use crate::tack::Tack;
     use crate::{scalars::*, ProtoEncode};
 
-    // --- Reverse-buffer guards ---
-    //
-    // Each of these used to produce a silently wrong byte stream rather than a panic, which
-    // is the whole reason the guards exist. `PbDisplay`/`PbWrite` go through `Tack`, whose
-    // `start`-relative patch lands inside the payload when the buffer grows downward; the
-    // two adapters are append-only, so a multi-chunk write comes out chunk-reversed.
+    // --- Reverse-buffer guards: each of these silently corrupted output before ---
 
     #[test]
     #[should_panic(expected = "Tack is forward-only")]
@@ -888,10 +867,9 @@ mod tests {
         IoWriter(&mut rb).write_all(b"chunk").unwrap();
     }
 
-    /// `put_slice`'s ladder writes overlapping fixed-width blocks rather than `n` bytes,
-    /// so every arm boundary and the fallback edge have to be pinned exactly. Appends onto
-    /// a non-empty buffer with a sentinel tail, so a store running past `n` — or landing at
-    /// the wrong offset — shows up as corruption rather than as a silently equal prefix.
+    /// The ladder writes overlapping fixed-width blocks, not `n` bytes, so every arm
+    /// boundary needs pinning. Appends onto a non-empty buffer so a wrong offset or a store
+    /// past `n` shows as corruption rather than an equal prefix.
     #[test]
     fn put_slice_ladder_all_lengths() {
         for n in 0..=80usize {

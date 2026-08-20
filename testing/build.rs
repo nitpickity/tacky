@@ -209,19 +209,31 @@ fn derive_noutf8_proto(src: &str, out_dir: &str) -> String {
     rel
 }
 
-/// Compiles the official C++ protobuf runtime's generated code plus `cpp/shim.cc`
-/// into a static lib the benches link against. Requires `protoc` and a protobuf
-/// C++ install discoverable by pkg-config (`brew install protobuf pkg-config`).
-///
-/// Set `TACKY_PROTOBUF_PREFIX` to a from-source install prefix (see
-/// `scripts/build_cpp_static.sh`) to link the runtime statically instead. A
-/// Homebrew dylib routes every cross-library call through a DYLD stub and blocks
-/// inlining at the library boundary, which understates the C++ arms.
+/// Compiles the C++ runtime's generated code plus `cpp/shim.cc` into a static lib the
+/// benches link against. Needs `protoc` and a pkg-config-discoverable protobuf;
+/// `scripts/bench_cpp.sh` sets both up. A *shared* protobuf also satisfies the probe but
+/// understates the C++ arms, so it is fine for a smoke test and not for published numbers.
 #[cfg(feature = "cpp")]
 fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     println!("cargo:rerun-if-changed=cpp/shim.cc");
     println!("cargo:rerun-if-env-changed=TACKY_PROTOBUF_PREFIX");
-    let prefix = std::env::var("TACKY_PROTOBUF_PREFIX").ok();
+    println!("cargo:rerun-if-env-changed=TACKY_CPP_ROOT");
+    // Explicit prefix wins, else the cache `build_cpp_static.sh` writes, so there is no env
+    // var to remember. Tests for the lib, not the directory: a half-built tree isn't usable.
+    let prefix = std::env::var("TACKY_PROTOBUF_PREFIX").ok().or_else(|| {
+        let root = std::env::var("TACKY_CPP_ROOT").unwrap_or_else(|_| {
+            // Repo-relative: CARGO_MANIFEST_DIR is `testing/`.
+            format!(
+                "{}/../third_party/protobuf-cpp",
+                std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()
+            )
+        });
+        let p = format!("{root}/prefix");
+        std::path::Path::new(&p)
+            .join("lib/libprotobuf.a")
+            .exists()
+            .then_some(p)
+    });
 
     // protoc mirrors each input's include-relative path into `--cpp_out`, so track
     // these as paths rather than stems: the OTLP tree is nested, and `-Iprotos`
@@ -248,21 +260,18 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
         .args(&files)
         .current_dir(".")
         .status()
-        .expect("protoc not found; `brew install protobuf`");
+        .expect("protoc not found on PATH; install your platform's protobuf compiler");
     assert!(status.success(), "protoc --cpp_out failed");
 
-    let mut pkg = std::process::Command::new("pkg-config");
-    pkg.args(["--cflags-only-I", "--libs", "protobuf"]);
+    // The pkg-config crate emits the link directives itself. `statik` is what pulls in the
+    // whole abseil dependency graph, in link order.
     if let Some(p) = &prefix {
-        // `--static` pulls in the whole abseil dependency graph, in link order.
-        pkg.arg("--static")
-            .env("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig"));
+        std::env::set_var("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig"));
     }
-    let pkg = pkg
-        .output()
-        .expect("pkg-config not found; `brew install pkg-config`");
-    assert!(pkg.status.success(), "pkg-config --libs protobuf failed");
-    let flags = String::from_utf8(pkg.stdout).unwrap();
+    let protobuf = pkg_config::Config::new()
+        .statik(prefix.is_some())
+        .probe("protobuf")
+        .expect("protobuf not found; run scripts/bench_cpp.sh to build it");
 
     let mut build = cc::Build::new();
     build
@@ -283,15 +292,9 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
         build.file(format!("{out_dir}/{stem}.pb.cc"));
     }
 
-    // pkg-config emits -I/-L/-l in one blob; route each to the right consumer.
-    for flag in flags.split_whitespace() {
-        if let Some(dir) = flag.strip_prefix("-I") {
-            build.include(dir);
-        } else if let Some(dir) = flag.strip_prefix("-L") {
-            println!("cargo:rustc-link-search=native={dir}");
-        } else if let Some(lib) = flag.strip_prefix("-l") {
-            println!("cargo:rustc-link-lib={lib}");
-        }
+    // Link flags were emitted by the probe; only includes are ours to forward.
+    for dir in &protobuf.include_paths {
+        build.include(dir);
     }
 
     build.compile("tacky_cpp_shim");

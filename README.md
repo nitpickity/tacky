@@ -193,6 +193,26 @@ The first three benchmarks use realistic proto schemas (nested messages, packed 
 
 Decoding is roughly on par with prost when materializing into owned structs. Tacky's decode model is zero-copy for strings, bytes, and sub-messages, so real-world decode performance depends on how much copying your application actually needs.
 
+### Reproducing these numbers
+
+Against prost you only need `protoc` on `PATH` (`prost-build` shells out to it):
+
+```bash
+cargo bench -p testing -- '^encode_'
+cargo bench -p testing -- '^decode_'
+```
+
+Against the official C++ runtime, use the script. It checks your toolchain, naming the packages to install if any are missing, then builds protobuf from source as **static** libraries into `third_party/protobuf-cpp` (gitignored) — several minutes, first run only:
+
+```bash
+scripts/bench_cpp.sh                        # all encode groups
+scripts/bench_cpp.sh --bench otlp_traces    # one target
+```
+
+After that, `build.rs` finds the cache on its own, so plain `cargo bench -p testing --features cpp` is statically linked too. A shared system protobuf also satisfies the probe but understates the C++ side — a stub on every cross-library call, no inlining across it — so don't publish numbers from one. The feature is strict: if no runtime is found the build fails rather than dropping the arms, which also means `--all-features` fails without a C++ toolchain.
+
+Compare against `cpp-noutf8` for proto3 (the `cpp` arm also validates UTF-8, which tacky doesn't do) and `cpp` for proto2. Never `cpp-cached` — it reuses an already-populated message, which a real producer can't.
+
 ## Deserialization
 
 `tacky-build` generates an enum with a variant per field, and an iterator that yields them one at a time. You match on variants and build your domain object from primitives. You can either exhaustively match all the fields or just select what you care about. Unknown fields are skipped by the iterator.

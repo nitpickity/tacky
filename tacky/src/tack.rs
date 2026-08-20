@@ -76,19 +76,9 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
     /// make sure these are small: unconditional #[inline] hurts performance,
     /// and growing these and makiing them fall out of llvms inlining threshhold also hurts performance.
     pub fn new_with_width(buffer: &'b mut B, width: u32) -> Self {
-        // Every reverse-hostile path in the crate funnels through here, and this is the
-        // only one of them that can name `B`. A `Tack` records `start = buffer.len()` and
-        // later patches `as_mut_slice()[start - width..start]`; in a downward-growing
-        // buffer those indices are relative to a `pos` that keeps moving, so the
-        // placeholder ends up to the *right* of the payload and `close` overwrites the
-        // payload's first `width` bytes with the length. Wrong bytes, no diagnostic.
-        //
-        // Runtime `assert!`, not `const { assert!(..) }`: a const assert is a
-        // post-monomorphization error, and `maps::write_msg`'s forward branch *is*
-        // instantiated for `RevBuf` — it is guarded by a runtime `if B::REVERSE`, not by
-        // an instantiation guard, so a const assert would fail to compile a path that is
-        // never taken. `B::REVERSE` is an associated const, so this folds away to nothing
-        // for `Vec`/`SliceBuf` and to an unconditional panic for `RevBuf`.
+        // A Tack's `start`-relative patch lands inside the payload when the buffer grows
+        // downward. Not `const assert!`: `maps::write_msg` instantiates its forward branch
+        // for RevBuf behind a runtime guard. Folds away for forward buffers.
         assert!(
             !B::REVERSE,
             "Tack is forward-only: a reverse buffer knows its lengths — use WriteBuf::put_msg"
