@@ -233,6 +233,10 @@ impl ProtobufScalar for Uint64 {
 impl ProtobufScalar for Bool {
     type RustType<'a> = bool;
     const WIRE_TYPE: WireType = WireType::VARINT;
+    /// A varint by wire type, but never more than one byte: `write_value` stores
+    /// `value as u8`, which is 0 or 1. Declaring it lets packed `bool` take the exact-length
+    /// path instead of a placeholder.
+    const FIXED_WIRE_SIZE: Option<usize> = Some(1);
 
     #[inline]
     fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf) {

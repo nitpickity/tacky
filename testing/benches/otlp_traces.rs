@@ -588,6 +588,182 @@ fn read_any(fields: t::AnyValueFields<'_>) -> pcommon::AnyValue {
     any
 }
 
+/// Parse-only counterpart to `tacky_decode`: visits every field, folds each value into
+/// an accumulator, allocates nothing. The `tacky` arm measures parse *plus* building
+/// prost's owned structs, and that allocation dominates; this isolates the iterator and
+/// its tag dispatch. Borrowed strings and byte slices are measured, never copied.
+///
+/// No prost counterpart exists by construction. Correctness is gated by `tacky_decode`.
+fn tacky_walk(wire: &[u8]) -> u64 {
+    let mut acc = 0u64;
+    for field in t::ExportTraceServiceRequest::decode(wire) {
+        match field.unwrap() {
+            t::ExportTraceServiceRequestField::ResourceSpans(fields) => {
+                acc = acc.wrapping_add(walk_resource_spans(fields))
+            }
+        }
+    }
+    acc
+}
+
+fn walk_resource_spans(fields: t::ResourceSpansFields<'_>) -> u64 {
+    use t::ResourceSpansField as F;
+
+    let mut acc = 0u64;
+    for field in fields {
+        match field.unwrap() {
+            F::Resource(res) => {
+                use t::ResourceField as R;
+                for f in res {
+                    match f.unwrap() {
+                        R::Attributes(kv) => acc = acc.wrapping_add(walk_kv(kv)),
+                        R::DroppedAttributesCount(v) => acc = acc.wrapping_add(v as u64),
+                    }
+                }
+            }
+            F::ScopeSpans(ss) => acc = acc.wrapping_add(walk_scope_spans(ss)),
+            F::SchemaUrl(v) => acc = acc.wrapping_add(v.len() as u64),
+        }
+    }
+    acc
+}
+
+fn walk_scope_spans(fields: t::ScopeSpansFields<'_>) -> u64 {
+    use t::ScopeSpansField as F;
+
+    let mut acc = 0u64;
+    for field in fields {
+        match field.unwrap() {
+            F::Scope(scope) => {
+                use t::InstrumentationScopeField as S;
+                for f in scope {
+                    match f.unwrap() {
+                        S::Name(v) => acc = acc.wrapping_add(v.len() as u64),
+                        S::Version(v) => acc = acc.wrapping_add(v.len() as u64),
+                        S::Attributes(kv) => acc = acc.wrapping_add(walk_kv(kv)),
+                        S::DroppedAttributesCount(v) => acc = acc.wrapping_add(v as u64),
+                    }
+                }
+            }
+            F::Spans(span) => acc = acc.wrapping_add(walk_span(span)),
+            F::SchemaUrl(v) => acc = acc.wrapping_add(v.len() as u64),
+        }
+    }
+    acc
+}
+
+fn walk_span(fields: t::SpanFields<'_>) -> u64 {
+    use t::SpanField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::TraceId(v) => add!(v.len()),
+            F::SpanId(v) => add!(v.len()),
+            F::TraceState(v) => add!(v.len()),
+            F::ParentSpanId(v) => add!(v.len()),
+            F::Flags(v) => add!(v),
+            F::Name(v) => add!(v.len()),
+            F::Kind(v) => add!(i32::from(v)),
+            F::StartTimeUnixNano(v) => add!(v),
+            F::EndTimeUnixNano(v) => add!(v),
+            F::Attributes(kv) => add!(walk_kv(kv)),
+            F::DroppedAttributesCount(v) => add!(v),
+            F::Events(ev) => {
+                use t::SpanEventField as E;
+                for f in ev {
+                    match f.unwrap() {
+                        E::TimeUnixNano(v) => add!(v),
+                        E::Name(v) => add!(v.len()),
+                        E::Attributes(kv) => add!(walk_kv(kv)),
+                        E::DroppedAttributesCount(v) => add!(v),
+                    }
+                }
+            }
+            F::DroppedEventsCount(v) => add!(v),
+            F::Links(ln) => {
+                use t::SpanLinkField as L;
+                for f in ln {
+                    match f.unwrap() {
+                        L::TraceId(v) => add!(v.len()),
+                        L::SpanId(v) => add!(v.len()),
+                        L::TraceState(v) => add!(v.len()),
+                        L::Attributes(kv) => add!(walk_kv(kv)),
+                        L::DroppedAttributesCount(v) => add!(v),
+                        L::Flags(v) => add!(v),
+                    }
+                }
+            }
+            F::DroppedLinksCount(v) => add!(v),
+            F::Status(st) => {
+                use t::StatusField as S;
+                for f in st {
+                    match f.unwrap() {
+                        S::Message(v) => add!(v.len()),
+                        S::Code(v) => add!(i32::from(v)),
+                    }
+                }
+            }
+        }
+    }
+    acc
+}
+
+fn walk_kv(fields: t::KeyValueFields<'_>) -> u64 {
+    use t::KeyValueField as F;
+
+    let mut acc = 0u64;
+    for field in fields {
+        match field.unwrap() {
+            F::Key(v) => acc = acc.wrapping_add(v.len() as u64),
+            F::Value(v) => acc = acc.wrapping_add(walk_any(v)),
+        }
+    }
+    acc
+}
+
+fn walk_any(fields: t::AnyValueFields<'_>) -> u64 {
+    use t::AnyValueField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::StringValue(v) => add!(v.len()),
+            F::BoolValue(v) => add!(v),
+            F::IntValue(v) => add!(v),
+            F::DoubleValue(v) => add!(v.to_bits()),
+            F::BytesValue(v) => add!(v.len()),
+            F::ArrayValue(inner) => {
+                use t::ArrayValueField as A;
+                for f in inner {
+                    match f.unwrap() {
+                        A::Values(v) => add!(walk_any(v)),
+                    }
+                }
+            }
+            F::KvlistValue(inner) => {
+                use t::KeyValueListField as K;
+                for f in inner {
+                    match f.unwrap() {
+                        K::Values(v) => add!(walk_kv(v)),
+                    }
+                }
+            }
+        }
+    }
+    acc
+}
+
 // ---------------------------------------------------------------------------
 // Benches
 // ---------------------------------------------------------------------------
@@ -698,6 +874,10 @@ fn bench_otlp(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(prost_wire.len() as u64));
     group.bench_function("tacky", |b| {
         b.iter(|| black_box(tacky_decode(black_box(prost_wire.as_slice()))));
+    });
+    assert!(tacky_walk(&prost_wire) != 0, "walker folded nothing");
+    group.bench_function("tacky-walk", |b| {
+        b.iter(|| black_box(tacky_walk(black_box(prost_wire.as_slice()))));
     });
     group.bench_function("prost", |b| {
         b.iter(|| {

@@ -52,21 +52,14 @@ pub fn write_wide_varint(width: usize, value: u64, buf: &mut impl WriteBuf) {
 ///
 /// A placeholder holds lengths below `2^(7*WIDTH)`: 1 byte covers 128 B, 2 covers 16 KB,
 /// 3 covers 2 MB. It is a straight trade and not a size/speed dial in one direction:
+/// every nested message past the limit takes the [`Tack::fix_overflow`]
+/// path, which grows the buffer and `copy_within`s that message's whole payload — a cost
+/// proportional to payload size, compounding with nesting depth.
+/// 1 byte is still chosen because even with memcpys, the result is only marginally slower than a longer tack width
+/// and results in a 'canonical' packed size.
 ///
-/// - **Too narrow** and every nested message past the limit takes the [`Tack::fix_overflow`]
-///   path, which grows the buffer and `copy_within`s that message's whole payload — a cost
-///   proportional to payload size, compounding with nesting depth.
-/// - **Too wide** and every message pays the difference in bytes, as a padded (valid but
-///   non-minimal) varint, plus the stores to write it. Only width 1 is guaranteed minimal,
-///   because `fix_overflow` rewrites the prefix to exactly the width the length needs.
-///
-/// Width 1 is the default because it is the only width that is *always* minimal: it is the
-/// one width where a message that does not fit gets its prefix rewritten to exactly the
-/// length it needs, so output is byte-identical to a two-pass encoder's. Wider settings buy
-/// time on deeply nested large payloads — measured at -30% on a 232 KB five-level OTLP batch
-/// — at the cost of padding every message (+25% output on a corpus of thousands of tiny
-/// ones). A downward-growing buffer ([`RevBuf`](`crate::RevBuf`)) avoids the trade entirely,
-/// since it knows each length before it writes it.
+/// A downward-growing buffer ([`RevBuf`](`crate::RevBuf`)) sidesteps all of this, since it knows
+/// each length before it writes it.
 pub const DEFAULT_WIDTH: u32 = 1;
 
 impl<'b, B: WriteBuf> Tack<'b, B> {
@@ -75,8 +68,13 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
     pub fn new(buffer: &'b mut B) -> Self {
         Self::new_with_width(buffer, DEFAULT_WIDTH)
     }
-    /// Creates a new Tack with a custom placeholder width.
-    /// Used for packed fields and map entries (width=2, ~16KB max).
+    /// Creates a new Tack with a custom placeholder width, for a caller that knows its payload
+    /// will not fit in [`DEFAULT_WIDTH`] bytes. Width 2 covers ~16 KB, 3 covers ~2 MB.
+    ///
+    /// This and `close` are specialised for a constant width; a computed one
+    /// turns both into loops over a variable, which slows things down.
+    /// make sure these are small: unconditional #[inline] hurts performance,
+    /// and growing these and makiing them fall out of llvms inlining threshhold also hurts performance.
     pub fn new_with_width(buffer: &'b mut B, width: u32) -> Self {
         write_wide_varint(width as usize, 0, buffer);
 

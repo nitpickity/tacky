@@ -213,7 +213,8 @@ pub mod packed {
     use super::*;
     impl<const N: u32, P: Packable> Field<N, Packed<P>> {
         /// Writes all elements under a single length-delimited tag.
-        /// Uses a [`Tack`] with width 2 (~16KB) to avoid a two-pass length calculation.
+        /// Uses a [`Tack`] at [`DEFAULT_WIDTH`](`crate::tack::DEFAULT_WIDTH`) to avoid a
+        /// two-pass length calculation, so a payload of 128 bytes or more is rescaled once.
         /// Skips the field entirely if the iterator is empty.
         #[inline]
         pub fn write<B: WriteBuf, V: ProtoEncode<P>, I: IntoIterator<Item = V>>(
@@ -562,9 +563,10 @@ pub mod maps {
                 return Field::new();
             }
 
-            // Forward: kept on explicit width-2 placeholders rather than routed through
-            // `put_msg`, so map entries' reserved width — and therefore their bytes — is
-            // unchanged by this.
+            // Forward: on explicit placeholders rather than routed through `put_msg`, because
+            // an entry is two nested lengths and the outer one has to be reserved before the
+            // inner value is written. Both are `DEFAULT_WIDTH`, so an entry of 128 bytes or
+            // more is rescaled like any other message.
             entry.write(buf);
             let t = Tack::new_with_width(buf, crate::tack::DEFAULT_WIDTH);
             key_tag.write(t.buffer);

@@ -373,6 +373,77 @@ fn tacky_decode_into_prost(wire: &[u8]) -> PMixedUsageMessage {
     msg
 }
 
+/// Parse-only counterpart to `tacky_decode_into_prost`. See `tacky_walk_pprof`.
+fn tacky_walk_mixed(wire: &[u8]) -> u64 {
+    use tacky_proto::example::{
+        MixedLargeMessageField, MixedSmallMessageField, MixedUsageMessageField,
+    };
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    macro_rules! small {
+        ($fields:expr) => {
+            for f in $fields {
+                match f.unwrap() {
+                    MixedSmallMessageField::Label(v) => add!(v.len()),
+                    MixedSmallMessageField::Count(v) => add!(v),
+                    MixedSmallMessageField::Active(v) => add!(v),
+                }
+            }
+        };
+    }
+
+    for field in TMixedUsageMessage::decode(wire) {
+        match field.unwrap() {
+            MixedUsageMessageField::SessionId(v) => add!(v.len()),
+            MixedUsageMessageField::UserId(v) => add!(v),
+            MixedUsageMessageField::ClientVersion(v) => add!(v.len()),
+            MixedUsageMessageField::SmallPayload(fields) => small!(fields),
+            MixedUsageMessageField::LargePayload(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        MixedLargeMessageField::Id(v) => add!(v.len()),
+                        MixedLargeMessageField::Name(v) => add!(v.len()),
+                        MixedLargeMessageField::Description(v) => add!(v.len()),
+                        MixedLargeMessageField::Timestamp(v) => add!(v),
+                        MixedLargeMessageField::Score(v) => add!(v.to_bits()),
+                        MixedLargeMessageField::IsVerified(v) => add!(v),
+                        MixedLargeMessageField::Tags(iter) => {
+                            for r in iter {
+                                add!(r.unwrap());
+                            }
+                        }
+                        MixedLargeMessageField::Permissions(v) => add!(v.len()),
+                        MixedLargeMessageField::Details(fields) => small!(fields),
+                        MixedLargeMessageField::Metrics(iter) => {
+                            for r in iter {
+                                add!(r.unwrap().to_bits());
+                            }
+                        }
+                        MixedLargeMessageField::Flags(iter) => {
+                            for r in iter {
+                                add!(r.unwrap());
+                            }
+                        }
+                    }
+                }
+            }
+            MixedUsageMessageField::History(fields) => small!(fields),
+            MixedUsageMessageField::RelatedIds(v) => add!(v.len()),
+            MixedUsageMessageField::CreatedAt(v) => add!(v),
+            MixedUsageMessageField::UpdatedAt(v) => add!(v),
+            MixedUsageMessageField::Priority(v) => add!(v),
+            MixedUsageMessageField::IsTest(v) => add!(v),
+            MixedUsageMessageField::Status(v) => add!(i32::from(v)),
+        }
+    }
+    acc
+}
+
 fn bench_decode_realistic(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_realistic");
 
@@ -401,6 +472,11 @@ fn bench_decode_realistic(c: &mut Criterion) {
             let msg = PMixedUsageMessage::decode(black_box(wire.as_slice())).unwrap();
             black_box(&msg);
         });
+    });
+
+    assert!(tacky_walk_mixed(&wire) != 0, "walker folded nothing");
+    group.bench_function("tacky-walk", |b| {
+        b.iter(|| black_box(tacky_walk_mixed(black_box(&wire))));
     });
 
     group.finish();
@@ -955,6 +1031,131 @@ fn tacky_decode_pprof_into_prost(wire: &[u8]) -> prost_pprof::Profile {
     msg
 }
 
+/// Walks every field of a pprof profile without materializing anything, folding each
+/// value into an accumulator so nothing can be optimized away.
+///
+/// The arm above measures parse *plus* building prost's owned structs, and that
+/// allocation dominates — which is why tacky and prost land within a few percent of
+/// each other there. This one isolates the iterator and its tag dispatch, the part an
+/// optimization would actually move. Borrowed strings are only measured, never copied.
+///
+/// No prost counterpart exists by construction: prost cannot decode without
+/// materializing. Correctness is gated by `tacky_decode_pprof_into_prost`; this walker
+/// only has to visit the same fields.
+fn tacky_walk_pprof(wire: &[u8]) -> u64 {
+    use tacky_pprof::perftools::profiles::{
+        FunctionField, LabelField, LineField, LocationField, MappingField, Profile, ProfileField,
+        SampleField, ValueTypeField,
+    };
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+
+    for field in Profile::decode(wire) {
+        match field.unwrap() {
+            ProfileField::SampleType(fields) | ProfileField::PeriodType(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        ValueTypeField::Type(v) => add!(v),
+                        ValueTypeField::Unit(v) => add!(v),
+                    }
+                }
+            }
+            ProfileField::Sample(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        SampleField::LocationId(iter) => {
+                            for r in iter {
+                                add!(r.unwrap());
+                            }
+                        }
+                        SampleField::Value(iter) => {
+                            for r in iter {
+                                add!(r.unwrap());
+                            }
+                        }
+                        SampleField::Label(fields) => {
+                            for f in fields {
+                                match f.unwrap() {
+                                    LabelField::Key(v) => add!(v),
+                                    LabelField::Str(v) => add!(v),
+                                    LabelField::Num(v) => add!(v),
+                                    LabelField::NumUnit(v) => add!(v),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ProfileField::Mapping(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        MappingField::Id(v) => add!(v),
+                        MappingField::MemoryStart(v) => add!(v),
+                        MappingField::MemoryLimit(v) => add!(v),
+                        MappingField::FileOffset(v) => add!(v),
+                        MappingField::Filename(v) => add!(v),
+                        MappingField::BuildId(v) => add!(v),
+                        MappingField::HasFunctions(v) => add!(v),
+                        MappingField::HasFilenames(v) => add!(v),
+                        MappingField::HasLineNumbers(v) => add!(v),
+                        MappingField::HasInlineFrames(v) => add!(v),
+                    }
+                }
+            }
+            ProfileField::Location(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        LocationField::Id(v) => add!(v),
+                        LocationField::MappingId(v) => add!(v),
+                        LocationField::Address(v) => add!(v),
+                        LocationField::Line(fields) => {
+                            for f in fields {
+                                match f.unwrap() {
+                                    LineField::FunctionId(v) => add!(v),
+                                    LineField::Line(v) => add!(v),
+                                    LineField::Column(v) => add!(v),
+                                }
+                            }
+                        }
+                        LocationField::IsFolded(v) => add!(v),
+                    }
+                }
+            }
+            ProfileField::Function(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        FunctionField::Id(v) => add!(v),
+                        FunctionField::Name(v) => add!(v),
+                        FunctionField::SystemName(v) => add!(v),
+                        FunctionField::Filename(v) => add!(v),
+                        FunctionField::StartLine(v) => add!(v),
+                    }
+                }
+            }
+            // Borrowed: measured, not copied.
+            ProfileField::StringTable(v) => add!(v.len()),
+            ProfileField::DropFrames(v) => add!(v),
+            ProfileField::KeepFrames(v) => add!(v),
+            ProfileField::TimeNanos(v) => add!(v),
+            ProfileField::DurationNanos(v) => add!(v),
+            ProfileField::Period(v) => add!(v),
+            ProfileField::Comment(iter) => {
+                for r in iter {
+                    add!(r.unwrap());
+                }
+            }
+            ProfileField::DefaultSampleType(v) => add!(v),
+            ProfileField::DocUrl(v) => add!(v),
+        }
+    }
+    acc
+}
+
 fn bench_decode_pprof(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_pprof");
 
@@ -983,6 +1184,16 @@ fn bench_decode_pprof(c: &mut Criterion) {
             let msg = prost_pprof::Profile::decode(black_box(wire.as_slice())).unwrap();
             black_box(&msg);
         });
+    });
+
+    // Parse only, no materialization — see `tacky_walk_pprof`. Not comparable to the
+    // arms above; it is the baseline a dispatch change would move.
+    assert!(
+        tacky_walk_pprof(&wire) != 0,
+        "walker folded nothing; it is not visiting the profile"
+    );
+    group.bench_function("tacky-walk", |b| {
+        b.iter(|| black_box(tacky_walk_pprof(black_box(&wire))));
     });
 
     group.finish();
@@ -1332,6 +1543,52 @@ fn tacky_decode_accesslog_into_prost(wire: &[u8]) -> prost_accesslog::AccessLog 
     msg
 }
 
+/// Parse-only counterpart to `tacky_decode_accesslog_into_prost`. See `tacky_walk_pprof`.
+fn tacky_walk_accesslog(wire: &[u8]) -> u64 {
+    use tacky_accesslog::accesslog::{AccessLog, AccessLogField, EntryField, HeaderField};
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+
+    for field in AccessLog::decode(wire) {
+        match field.unwrap() {
+            AccessLogField::Entries(fields) => {
+                for f in fields {
+                    match f.unwrap() {
+                        EntryField::RemoteAddr(v) => add!(v.len()),
+                        EntryField::Method(v) => add!(i32::from(v)),
+                        EntryField::Path(v) => add!(v.len()),
+                        EntryField::Query(v) => add!(v.len()),
+                        EntryField::Status(v) => add!(v),
+                        EntryField::ResponseBytes(v) => add!(v),
+                        EntryField::DurationMicros(v) => add!(v),
+                        EntryField::UserAgent(v) => add!(v.len()),
+                        EntryField::Referer(v) => add!(v.len()),
+                        EntryField::Timestamp(v) => add!(v),
+                        EntryField::Host(v) => add!(v.len()),
+                        EntryField::Protocol(v) => add!(v.len()),
+                        EntryField::RequestHeaders(fields) => {
+                            for f in fields {
+                                match f.unwrap() {
+                                    HeaderField::Name(v) => add!(v.len()),
+                                    HeaderField::Value(v) => add!(v.len()),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            AccessLogField::ServerId(v) => add!(v.len()),
+            AccessLogField::BatchTimestamp(v) => add!(v),
+        }
+    }
+    acc
+}
+
 fn bench_decode_accesslog(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_accesslog");
 
@@ -1360,6 +1617,11 @@ fn bench_decode_accesslog(c: &mut Criterion) {
             let msg = prost_accesslog::AccessLog::decode(black_box(wire.as_slice())).unwrap();
             black_box(&msg);
         });
+    });
+
+    assert!(tacky_walk_accesslog(&wire) != 0, "walker folded nothing");
+    group.bench_function("tacky-walk", |b| {
+        b.iter(|| black_box(tacky_walk_accesslog(black_box(&wire))));
     });
 
     group.finish();

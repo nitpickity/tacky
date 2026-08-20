@@ -432,6 +432,231 @@ fn read_enum(fields: td::EnumDescriptorProtoFields<'_>) -> prost_types::EnumDesc
     e
 }
 
+/// Parse-only counterpart to `tacky_decode`: visits every field, folds each value into an
+/// accumulator, allocates nothing. The `tacky` arm measures parse *plus* building
+/// prost-types' owned structs, and that allocation dominates; this isolates the iterator
+/// and its tag dispatch, which for descriptor.proto is the widest match in the corpus.
+///
+/// No prost counterpart exists by construction. Correctness is gated by `tacky_decode`.
+/// The `unimplemented!` arms mirror that function's — those fields are absent from both
+/// fixtures, so the traversal is identical.
+fn tacky_walk(wire: &[u8]) -> u64 {
+    let mut acc = 0u64;
+    for field in td::FileDescriptorSet::decode(wire) {
+        match field.unwrap() {
+            td::FileDescriptorSetField::File(fields) => acc = acc.wrapping_add(walk_file(fields)),
+        }
+    }
+    acc
+}
+
+fn walk_file(fields: td::FileDescriptorProtoFields<'_>) -> u64 {
+    use td::FileDescriptorProtoField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::Name(v) => add!(v.len()),
+            F::Package(v) => add!(v.len()),
+            F::Dependency(v) => add!(v.len()),
+            F::PublicDependency(v) => add!(v),
+            F::WeakDependency(v) => add!(v),
+            F::MessageType(m) => add!(walk_message(m)),
+            F::EnumType(e) => add!(walk_enum(e)),
+            F::Extension(x) => add!(walk_field(x)),
+            F::Options(opts) => {
+                use td::FileOptionsField as O;
+                for opt in opts {
+                    match opt.unwrap() {
+                        O::JavaPackage(v) => add!(v.len()),
+                        O::JavaOuterClassname(v) => add!(v.len()),
+                        O::JavaMultipleFiles(v) => add!(v),
+                        O::JavaStringCheckUtf8(v) => add!(v),
+                        O::OptimizeFor(v) => add!(i32::from(v)),
+                        O::GoPackage(v) => add!(v.len()),
+                        O::CcGenericServices(v) => add!(v),
+                        O::JavaGenericServices(v) => add!(v),
+                        O::PyGenericServices(v) => add!(v),
+                        O::PhpGenericServices(v) => add!(v),
+                        O::Deprecated(v) => add!(v),
+                        O::CcEnableArenas(v) => add!(v),
+                        O::ObjcClassPrefix(v) => add!(v.len()),
+                        O::CsharpNamespace(v) => add!(v.len()),
+                        O::SwiftPrefix(v) => add!(v.len()),
+                        O::PhpClassPrefix(v) => add!(v.len()),
+                        O::PhpNamespace(v) => add!(v.len()),
+                        O::PhpMetadataNamespace(v) => add!(v.len()),
+                        O::RubyPackage(v) => add!(v.len()),
+                        O::JavaGenerateEqualsAndHash(_) | O::UninterpretedOption(_) => {
+                            unimplemented!("FileOptions field absent from both fixtures")
+                        }
+                    }
+                }
+            }
+            F::Syntax(v) => add!(v.len()),
+            F::Service(_) | F::SourceCodeInfo(_) => {
+                unimplemented!("FileDescriptorProto field absent from both fixtures")
+            }
+        }
+    }
+    acc
+}
+
+fn walk_message(fields: td::DescriptorProtoFields<'_>) -> u64 {
+    use td::DescriptorProtoField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::Name(v) => add!(v.len()),
+            F::Field(f) => add!(walk_field(f)),
+            F::Extension(x) => add!(walk_field(x)),
+            F::NestedType(n) => add!(walk_message(n)),
+            F::EnumType(e) => add!(walk_enum(e)),
+            F::ExtensionRange(r) => {
+                use td::DescriptorProtoExtensionRangeField as R;
+                for f in r {
+                    match f.unwrap() {
+                        R::Start(v) => add!(v),
+                        R::End(v) => add!(v),
+                        R::Options(_) => {
+                            unimplemented!("ExtensionRangeOptions absent from both fixtures")
+                        }
+                    }
+                }
+            }
+            F::OneofDecl(d) => {
+                use td::OneofDescriptorProtoField as D;
+                for f in d {
+                    match f.unwrap() {
+                        D::Name(v) => add!(v.len()),
+                        D::Options(_) => {
+                            unimplemented!("OneofOptions absent from both fixtures")
+                        }
+                    }
+                }
+            }
+            F::Options(opts) => {
+                use td::MessageOptionsField as O;
+                for opt in opts {
+                    match opt.unwrap() {
+                        O::MessageSetWireFormat(v) => add!(v),
+                        O::NoStandardDescriptorAccessor(v) => add!(v),
+                        O::Deprecated(v) => add!(v),
+                        O::MapEntry(v) => add!(v),
+                        O::UninterpretedOption(_) => {
+                            unimplemented!("UninterpretedOption absent from both fixtures")
+                        }
+                    }
+                }
+            }
+            F::ReservedRange(r) => {
+                use td::DescriptorProtoReservedRangeField as R;
+                for f in r {
+                    match f.unwrap() {
+                        R::Start(v) => add!(v),
+                        R::End(v) => add!(v),
+                    }
+                }
+            }
+            F::ReservedName(v) => add!(v.len()),
+        }
+    }
+    acc
+}
+
+fn walk_field(fields: td::FieldDescriptorProtoFields<'_>) -> u64 {
+    use td::FieldDescriptorProtoField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::Name(v) => add!(v.len()),
+            F::Number(v) => add!(v),
+            F::Label(v) => add!(i32::from(v)),
+            F::Type(v) => add!(i32::from(v)),
+            F::TypeName(v) => add!(v.len()),
+            F::Extendee(v) => add!(v.len()),
+            F::DefaultValue(v) => add!(v.len()),
+            F::OneofIndex(v) => add!(v),
+            F::JsonName(v) => add!(v.len()),
+            F::Proto3Optional(v) => add!(v),
+            F::Options(opts) => {
+                use td::FieldOptionsField as O;
+                for opt in opts {
+                    match opt.unwrap() {
+                        O::Ctype(v) => add!(i32::from(v)),
+                        O::Packed(v) => add!(v),
+                        O::Jstype(v) => add!(i32::from(v)),
+                        O::Lazy(v) => add!(v),
+                        O::Deprecated(v) => add!(v),
+                        O::Weak(v) => add!(v),
+                        O::UnverifiedLazy(_) | O::UninterpretedOption(_) => {
+                            unimplemented!("FieldOptions field absent from both fixtures")
+                        }
+                    }
+                }
+            }
+        }
+    }
+    acc
+}
+
+fn walk_enum(fields: td::EnumDescriptorProtoFields<'_>) -> u64 {
+    use td::EnumDescriptorProtoField as F;
+
+    let mut acc = 0u64;
+    macro_rules! add {
+        ($v:expr) => {
+            acc = acc.wrapping_add($v as u64)
+        };
+    }
+    for field in fields {
+        match field.unwrap() {
+            F::Name(v) => add!(v.len()),
+            F::Value(vals) => {
+                use td::EnumValueDescriptorProtoField as V;
+                for f in vals {
+                    match f.unwrap() {
+                        V::Name(v) => add!(v.len()),
+                        V::Number(v) => add!(v),
+                        V::Options(_) => {
+                            unimplemented!("EnumValueOptions absent from both fixtures")
+                        }
+                    }
+                }
+            }
+            F::ReservedRange(r) => {
+                use td::EnumDescriptorProtoEnumReservedRangeField as R;
+                for f in r {
+                    match f.unwrap() {
+                        R::Start(v) => add!(v),
+                        R::End(v) => add!(v),
+                    }
+                }
+            }
+            F::ReservedName(v) => add!(v.len()),
+            F::Options(_) => unimplemented!("EnumOptions absent from both fixtures"),
+        }
+    }
+    acc
+}
+
 // ---------------------------------------------------------------------------
 // Benches
 // ---------------------------------------------------------------------------
@@ -539,6 +764,10 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     });
     group.bench_function("prost", |b| {
         b.iter(|| black_box(prost_types::FileDescriptorSet::decode(black_box(fixture)).unwrap()));
+    });
+    assert!(tacky_walk(fixture) != 0, "walker folded nothing");
+    group.bench_function("tacky-walk", |b| {
+        b.iter(|| black_box(tacky_walk(black_box(fixture))));
     });
     group.finish();
 }
