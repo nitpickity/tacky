@@ -357,7 +357,47 @@ mod alloc_impls {
         }
         #[inline]
         fn put_slice(&mut self, src: &[u8]) {
-            self.extend_from_slice(src);
+            // EXPERIMENT: overlapping fixed-width stores for short slices, to skip the
+            // out-of-line `_memcpy` stub call that `extend_from_slice` lowers to.
+            let n = src.len();
+            if n == 0 || n > 48 {
+                self.extend_from_slice(src);
+                return;
+            }
+            self.reserve(n);
+            let len = self.len();
+            unsafe {
+                let d = self.as_mut_ptr().add(len);
+                let s = src.as_ptr();
+                if n >= 16 {
+                    // Three overlapping 16-byte pairs, no size branch between them. The two
+                    // ends are always [0,16) and [n-16,n); the middle one at n/2-8 closes
+                    // whatever gap is left. 48 is exactly how far this form reaches — the
+                    // middle has to satisfy both n/2-8 <= 16 and n/2+8 >= n-16 — and n >= 16
+                    // is exactly what keeps it in bounds, since n/2+8 <= n there. The middle
+                    // store is redundant for n <= 32 and left unconditional anyway: two
+                    // instructions beat the mispredicting branch that would skip them.
+                    let mid = n / 2 - 8;
+                    (d as *mut u128).write_unaligned((s as *const u128).read_unaligned());
+                    (d.add(mid) as *mut u128)
+                        .write_unaligned((s.add(mid) as *const u128).read_unaligned());
+                    (d.add(n - 16) as *mut u128)
+                        .write_unaligned((s.add(n - 16) as *const u128).read_unaligned());
+                } else if n >= 8 {
+                    (d as *mut u64).write_unaligned((s as *const u64).read_unaligned());
+                    (d.add(n - 8) as *mut u64)
+                        .write_unaligned((s.add(n - 8) as *const u64).read_unaligned());
+                } else if n >= 4 {
+                    (d as *mut u32).write_unaligned((s as *const u32).read_unaligned());
+                    (d.add(n - 4) as *mut u32)
+                        .write_unaligned((s.add(n - 4) as *const u32).read_unaligned());
+                } else {
+                    *d = *s;
+                    *d.add(n / 2) = *s.add(n / 2);
+                    *d.add(n - 1) = *s.add(n - 1);
+                }
+                self.set_len(len + n);
+            }
         }
         #[inline]
         fn len(&self) -> usize {
@@ -760,6 +800,23 @@ mod tests {
 
     use crate::tack::Tack;
     use crate::{scalars::*, ProtoEncode};
+
+    /// `put_slice`'s ladder writes overlapping fixed-width blocks rather than `n` bytes,
+    /// so every arm boundary and the fallback edge have to be pinned exactly. Appends onto
+    /// a non-empty buffer with a sentinel tail, so a store running past `n` — or landing at
+    /// the wrong offset — shows up as corruption rather than as a silently equal prefix.
+    #[test]
+    fn put_slice_ladder_all_lengths() {
+        for n in 0..=80usize {
+            let src: Vec<u8> = (0..n).map(|i| (i as u8) ^ 0xA5).collect();
+            let mut buf = Vec::with_capacity(0);
+            buf.extend_from_slice(b"prefix");
+            buf.put_slice(&src);
+            assert_eq!(buf.len(), 6 + n, "len wrong at n={n}");
+            assert_eq!(&buf[..6], b"prefix", "prefix clobbered at n={n}");
+            assert_eq!(&buf[6..], &src[..], "payload wrong at n={n}");
+        }
+    }
 
     #[test]
     fn fmt_writer_basic() {
