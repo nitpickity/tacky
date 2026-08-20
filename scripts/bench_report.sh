@@ -9,9 +9,14 @@
 #
 # Usage:
 #   scripts/bench_report.sh                       # per-group detail, every group
-#   scripts/bench_report.sh encode_otlp_traces    # groups matching any argument
+#   scripts/bench_report.sh encode_otlp_traces    # groups containing any argument
+#   scripts/bench_report.sh 'encode_otlp_*'       # or matching a glob, whole name
 #   scripts/bench_report.sh --table               # markdown grid, one row per group
 #   scripts/bench_report.sh --table --base prost  # ratios against another arm
+#
+# An argument with `*`, `?` or `[` is a glob matched against the whole group name; anything
+# else is a plain substring. Quote globs — otherwise the shell expands them against the
+# current directory first, and only leaves them alone because nothing there matches.
 #
 # `--table` reports each arm's time and its ratio to the base arm, where 2.2x means the
 # arm took 2.2x as long — i.e. the base was 2.2x faster. Cells are blank where an arm
@@ -30,7 +35,7 @@ cd "$(dirname "$0")/.."
 [ -d target/criterion ] || { echo "no target/criterion; run cargo bench first" >&2; exit 1; }
 
 python3 - "$@" <<'PY'
-import json, os, sys
+import fnmatch, json, os, sys
 
 args = sys.argv[1:]
 table = "--table" in args
@@ -41,6 +46,20 @@ if "--base" in args:
     base = args[i + 1]
     del args[i:i + 2]
 filters = args
+bad = [a for a in filters if a.startswith("-")]
+if bad:
+    print(f"unknown option(s): {' '.join(bad)}", file=sys.stderr)
+    sys.exit(2)
+
+
+def selected(group):
+    if not filters:
+        return True
+    return any(
+        fnmatch.fnmatchcase(group, f) if any(c in f for c in "*?[") else f in group
+        for f in filters
+    )
+
 
 rows = {}
 for dirpath, _, files in os.walk("target/criterion"):
@@ -51,7 +70,7 @@ for dirpath, _, files in os.walk("target/criterion"):
     with open(f"{dirpath}/estimates.json") as f:
         est = json.load(f)
     group = bench["group_id"]
-    if filters and not any(k in group for k in filters):
+    if not selected(group):
         continue
     ns = est["median"]["point_estimate"]
     lo = est["median"]["confidence_interval"]["lower_bound"]
