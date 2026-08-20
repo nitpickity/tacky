@@ -2,7 +2,14 @@
 # Benchmark against the C++ protobuf runtime, setting it up if needed.
 #
 #   scripts/bench_cpp.sh                                  # all encode groups
+#   scripts/bench_cpp.sh --groups 'encode_fds_*'          # glob over group names
 #   scripts/bench_cpp.sh --bench comparison -- '^encode_realistic'
+#
+# criterion's own filter is an unanchored regex, so a glob typed straight at it either
+# misbehaves quietly (`encode_fds_*` means "fds then any number of underscores") or fails
+# outright (`*otlp*` is not a valid regex). `--groups` takes a real glob and translates it,
+# anchored at the start, with the arm suffix left free. Use it or a raw `--` filter, not
+# both. Quote the glob, or the shell expands it against the cwd first.
 #
 # Always builds protobuf from source as static libs, because `cargo bench --features cpp`
 # alone links whatever the system has, dynamically, and that understates the C++ arms.
@@ -73,12 +80,74 @@ else
     echo "=== reusing static protobuf at $PREFIX ($("$PREFIX/bin/protoc" --version))"
 fi
 
-# Encode only by default: the decode groups have no C++ arms.
-if [ $# -eq 0 ]; then
+# Glob -> anchored regex. Character classes pass through; the rest of regex's metacharacters
+# are escaped so a group name containing `.` cannot act as a wildcard.
+glob_to_re() {
+    local g=$1 out='^' i c
+    for ((i = 0; i < ${#g}; i++)); do
+        c=${g:i:1}
+        case $c in
+            '*') out+='.*' ;;
+            '?') out+='.' ;;
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '\\') out+="\\$c" ;;
+            *) out+=$c ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+GROUP_GLOB="" # not GROUPS: bash owns that name (your group ids) and ignores assignment
+args=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --groups)
+            GROUP_GLOB=${2:?--groups needs a pattern}
+            shift 2
+            ;;
+        # Everything from `--` on belongs to criterion verbatim, including a literal
+        # `--groups` if it ever grows one.
+        --)
+            args+=("$@")
+            break
+            ;;
+        *)
+            args+=("$1")
+            shift
+            ;;
+    esac
+done
+set -- ${args[@]+"${args[@]}"}
+
+if [ -n "$GROUP_GLOB" ]; then
+    # The filter is criterion's first positional, so slot it in right after `--` when the
+    # caller supplied one; that way --groups composes with --measurement-time and friends.
+    re=$(glob_to_re "$GROUP_GLOB")
+    out=()
+    put=""
+    for a in "$@"; do
+        out+=("$a")
+        if [ -z "$put" ] && [ "$a" = "--" ]; then
+            out+=("$re")
+            put=1
+        fi
+    done
+    [ -z "$put" ] && out+=(-- "$re")
+    set -- ${out[@]+"${out[@]}"}
+elif [ $# -eq 0 ]; then
+    # Encode only by default: the decode groups have no C++ arms.
     set -- -- '^encode_'
 fi
 
-echo "=== cargo bench -p testing --features cpp $*"
+# A filter matching nothing leaves criterion exiting 0 having measured nothing, which reads
+# as a clean run. Build once via --list and count first; the real run then reuses the build.
+n=$(TACKY_PROTOBUF_PREFIX="$PREFIX" cargo bench -p testing --features cpp "$@" --list 2>/dev/null |
+    grep -c ': benchmark' || true)
+if [ "$n" -eq 0 ]; then
+    echo "filter matched no benchmarks: ${*}" >&2
+    exit 1
+fi
+
+echo "=== cargo bench -p testing --features cpp $* ($n benchmarks)"
 echo
 TACKY_PROTOBUF_PREFIX="$PREFIX" cargo bench -p testing --features cpp "$@"
 
