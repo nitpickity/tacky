@@ -54,12 +54,17 @@ fi
 # protobuf's install bakes its absolute prefix into ~190 files, so the tree cannot be moved
 # — renaming the checkout leaves a prefix that hands the compiler stale include paths and
 # fails deep inside cc-rs. Detect that and rebuild instead.
+# `lib` is what build_cpp_static.sh pins; `lib64` is GNUInstallDirs' default on Fedora and
+# RHEL x86_64, so an older prefix may be laid out that way.
+lib=$PREFIX/lib
+[ -f "$PREFIX/lib64/libprotobuf.a" ] && lib=$PREFIX/lib64
+
 stale=""
-pc=$PREFIX/lib/pkgconfig/protobuf.pc
+pc=$lib/pkgconfig/protobuf.pc
 [ -f "$pc" ] && ! grep -qxF "prefix=$PREFIX" "$pc" && stale=1
 
 if [ -n "${TACKY_CPP_FORCE:-}" ] || [ -n "$stale" ] \
-    || [ ! -f "$PREFIX/lib/libprotobuf.a" ] || [ ! -x "$PREFIX/bin/protoc" ]; then
+    || [ ! -f "$lib/libprotobuf.a" ] || [ ! -x "$PREFIX/bin/protoc" ]; then
     [ -n "$stale" ] && echo "=== prefix was built for another path; rebuilding" && rm -rf "$ROOT/protobuf/build-static" "$PREFIX"
     echo "=== building protobuf $VERSION as static libs into $PREFIX"
     echo "    (one time, several minutes)"

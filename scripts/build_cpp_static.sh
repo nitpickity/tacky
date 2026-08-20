@@ -43,6 +43,8 @@ cmake -G Ninja -B "$SRC/build-static" -S "$SRC" \
     ${NINJA_ARG[@]+"${NINJA_ARG[@]}"} ${OSX_ARG[@]+"${OSX_ARG[@]}"} \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    `# GNUInstallDirs would say lib64 on Fedora/RHEL x86_64; pin it so consumers need not guess` \
     -DBUILD_SHARED_LIBS=OFF \
     -Dprotobuf_BUILD_TESTS=OFF \
     -Dprotobuf_BUILD_LIBUPB=OFF \

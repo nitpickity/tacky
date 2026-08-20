@@ -13,9 +13,11 @@ fn cpp_prefix() -> Option<String> {
         )
     });
     let p = format!("{root}/prefix");
-    std::path::Path::new(&p)
-        .join("lib/libprotobuf.a")
-        .exists()
+    // `lib` is what build_cpp_static.sh pins, but tolerate a `lib64` tree: that is what
+    // CMake's GNUInstallDirs defaults to on Fedora/RHEL x86_64.
+    ["lib", "lib64"]
+        .iter()
+        .any(|d| std::path::Path::new(&p).join(d).join("libprotobuf.a").exists())
         .then_some(p)
 }
 
@@ -285,7 +287,7 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     // The pkg-config crate emits the link directives itself. `statik` is what pulls in the
     // whole abseil dependency graph, in link order.
     if let Some(p) = &prefix {
-        std::env::set_var("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig"));
+        std::env::set_var("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig:{p}/lib64/pkgconfig"));
     }
     let protobuf = pkg_config::Config::new()
         .statik(prefix.is_some())
