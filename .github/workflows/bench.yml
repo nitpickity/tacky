@@ -36,8 +36,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       # The exact list scripts/bench_cpp.sh prints for apt, so a wrong hint fails here.
+      # Deliberately no protobuf-compiler: the source build provides protoc and build.rs
+      # prefers it, so this job also proves a distro protobuf is not needed at all.
       - name: Install build deps
-        run: sudo apt-get install -y cmake ninja-build pkg-config protobuf-compiler git g++
+        run: sudo apt-get install -y cmake ninja-build pkg-config git g++
       - name: Cache protobuf C++ prefix
         uses: actions/cache@v4
         with:

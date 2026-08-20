@@ -195,14 +195,14 @@ Decoding is roughly on par with prost when materializing into owned structs. Tac
 
 ### Reproducing these numbers
 
-Against prost you only need `protoc` on `PATH` (`prost-build` shells out to it):
+Against prost you only need `protoc` on `PATH` (`prost-build` shells out to it). If your distro's is too old — Fedora still ships 3.19 — run the C++ script below once and `build.rs` will use the `protoc` it builds instead:
 
 ```bash
 cargo bench -p testing -- '^encode_'
 cargo bench -p testing -- '^decode_'
 ```
 
-Against the official C++ runtime, use the script. It checks your toolchain, naming the packages to install if any are missing, then builds protobuf from source as **static** libraries into `third_party/protobuf-cpp` (gitignored) — several minutes, first run only:
+Against the official C++ runtime, use the script. It needs no protobuf package at all — it builds its own, `protoc` included — and checks the rest of your toolchain, naming what to install if anything is missing; then builds protobuf from source as **static** libraries into `third_party/protobuf-cpp` (gitignored) — several minutes, first run only:
 
 ```bash
 scripts/bench_cpp.sh                        # all encode groups

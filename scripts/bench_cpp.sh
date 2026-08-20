@@ -21,10 +21,10 @@ PREFIX=$ROOT/prefix
 
 cd "$REPO"
 
-# protoc on PATH is for prost-build, which runs regardless of this feature; the C++ codegen
-# uses $PREFIX/bin/protoc. pkg-config is needed even with a prefix.
+# No protoc here: the source build produces one, and build.rs prefers it over the system
+# package, which on some distros is years old. pkg-config is needed even with a prefix.
 missing=()
-for tool in cmake git pkg-config protoc; do
+for tool in cmake git pkg-config; do
     command -v "$tool" >/dev/null || missing+=("$tool")
 done
 # Some distros ship the binary as `ninja-build` with no `ninja` alias.
@@ -36,17 +36,17 @@ if [ ${#missing[@]} -gt 0 ]; then
     echo "missing required tools: ${missing[*]}" >&2
     echo >&2
     if command -v brew >/dev/null; then
-        echo "  brew install cmake ninja pkg-config protobuf" >&2
+        echo "  brew install cmake ninja pkg-config" >&2
     elif command -v dnf >/dev/null; then
-        echo "  sudo dnf install -y cmake ninja-build pkgconf-pkg-config protobuf-compiler git gcc-c++" >&2
+        echo "  sudo dnf install -y cmake ninja-build pkgconf-pkg-config git gcc-c++" >&2
     elif command -v apt-get >/dev/null; then
-        echo "  sudo apt-get install -y cmake ninja-build pkg-config protobuf-compiler git g++" >&2
+        echo "  sudo apt-get install -y cmake ninja-build pkg-config git g++" >&2
     elif command -v pacman >/dev/null; then
-        echo "  sudo pacman -S --needed cmake ninja pkgconf protobuf git gcc" >&2
+        echo "  sudo pacman -S --needed cmake ninja pkgconf git gcc" >&2
     elif command -v zypper >/dev/null; then
-        echo "  sudo zypper install -y cmake ninja pkg-config protobuf-devel git gcc-c++" >&2
+        echo "  sudo zypper install -y cmake ninja pkg-config git gcc-c++" >&2
     else
-        echo "  need: cmake, ninja, pkg-config, protoc, git, and a C++17 compiler" >&2
+        echo "  need: cmake, ninja, pkg-config, git, and a C++17 compiler" >&2
     fi
     exit 1
 fi

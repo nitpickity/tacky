@@ -1,5 +1,39 @@
+/// The from-source C++ prefix, if one exists. `TACKY_PROTOBUF_PREFIX` wins, else the
+/// repo-local path `scripts/build_cpp_static.sh` installs to. Tests for the lib rather than
+/// the directory: a half-built tree isn't usable.
+fn cpp_prefix() -> Option<String> {
+    if let Ok(p) = std::env::var("TACKY_PROTOBUF_PREFIX") {
+        return Some(p);
+    }
+    let root = std::env::var("TACKY_CPP_ROOT").unwrap_or_else(|_| {
+        // CARGO_MANIFEST_DIR is `testing/`.
+        format!(
+            "{}/../third_party/protobuf-cpp",
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()
+        )
+    });
+    let p = format!("{root}/prefix");
+    std::path::Path::new(&p)
+        .join("lib/libprotobuf.a")
+        .exists()
+        .then_some(p)
+}
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // prost-build shells out to protoc, and distro packages run years behind — Fedora still
+    // ships 3.19. If the C++ prefix has been built, reuse its protoc so the system one stops
+    // mattering for both arms.
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if std::env::var_os("PROTOC").is_none() {
+        if let Some(prefix) = cpp_prefix() {
+            let protoc = std::path::Path::new(&prefix).join("bin/protoc");
+            if protoc.exists() {
+                std::env::set_var("PROTOC", protoc);
+            }
+        }
+    }
     let simple_file = "protos/simple_message.proto";
     let importing_file = "protos/importing.proto";
     let simple_out = format!("{out_dir}/simple.rs");
@@ -218,22 +252,7 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     println!("cargo:rerun-if-changed=cpp/shim.cc");
     println!("cargo:rerun-if-env-changed=TACKY_PROTOBUF_PREFIX");
     println!("cargo:rerun-if-env-changed=TACKY_CPP_ROOT");
-    // Explicit prefix wins, else the cache `build_cpp_static.sh` writes, so there is no env
-    // var to remember. Tests for the lib, not the directory: a half-built tree isn't usable.
-    let prefix = std::env::var("TACKY_PROTOBUF_PREFIX").ok().or_else(|| {
-        let root = std::env::var("TACKY_CPP_ROOT").unwrap_or_else(|_| {
-            // Repo-relative: CARGO_MANIFEST_DIR is `testing/`.
-            format!(
-                "{}/../third_party/protobuf-cpp",
-                std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()
-            )
-        });
-        let p = format!("{root}/prefix");
-        std::path::Path::new(&p)
-            .join("lib/libprotobuf.a")
-            .exists()
-            .then_some(p)
-    });
+    let prefix = cpp_prefix();
 
     // protoc mirrors each input's include-relative path into `--cpp_out`, so track
     // these as paths rather than stems: the OTLP tree is nested, and `-Iprotos`
@@ -253,7 +272,7 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     let protoc = prefix
         .as_ref()
         .map_or_else(|| "protoc".to_string(), |p| format!("{p}/bin/protoc"));
-    let status = std::process::Command::new(protoc)
+    let status = std::process::Command::new(&protoc)
         .arg("-Iprotos")
         .arg(format!("-I{out_dir}"))
         .arg(format!("--cpp_out={out_dir}"))
@@ -272,6 +291,26 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
         .statik(prefix.is_some())
         .probe("protobuf")
         .expect("protobuf not found; run scripts/bench_cpp.sh to build it");
+
+    // Codegen and runtime must share a protobuf major version. Mixing them is what produces
+    // the otherwise baffling `google/protobuf/runtime_version.h: No such file` — that header
+    // arrived in v27, so gencode from a newer protoc cannot find it in an older runtime's
+    // includes. Distro protobuf packages are a common way to end up here.
+    let major = |v: &str| v.trim().split('.').next().unwrap_or_default().to_string();
+    let protoc_ver = std::process::Command::new(&protoc)
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_default();
+    assert_eq!(
+        major(&protoc_ver),
+        major(&protobuf.version),
+        "protoc {protoc_ver} generates code the protobuf {} runtime cannot compile; \
+         run scripts/bench_cpp.sh to build a matching pair",
+        protobuf.version,
+    );
 
     let mut build = cc::Build::new();
     build
