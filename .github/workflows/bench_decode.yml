@@ -1,0 +1,28 @@
+name: Benchmarks (decode)
+
+on:
+  workflow_dispatch: # manual trigger only, so it doesn't run on every push
+
+# Split out of `bench.yml` so the encode run stays short. Needs no `--features cpp`: the
+# decode groups have no C++ arms.
+#
+# Most of what the `tacky`/`prost` arms measure is building the output structs, not parsing.
+# Use the `tacky-walk` arms for parser regressions — they materialise nothing.
+jobs:
+  bench-decode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install protoc
+        run: sudo apt-get install -y protobuf-compiler
+      - name: Run decode benchmarks
+        run: |
+          cargo bench -p testing \
+            --bench comparison --bench descriptor_set \
+            --bench google_message1 --bench otlp_traces \
+            -- '^decode_' 2>&1 | tee bench_decode_output.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results-decode
+          path: bench_decode_output.txt

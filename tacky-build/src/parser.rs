@@ -406,10 +406,15 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                 PbType::Scalar(s) => {
                     let tacky_ty = parse_ty(s.tacky_type());
                     quote! {
-                        pub fn #method_name(self, buf: &mut impl WriteBuf, value: impl ProtoEncode<#tacky_ty>) -> Self {
+                        pub fn #method_name<B: WriteBuf>(self, buf: &mut B, value: impl ProtoEncode<#tacky_ty>) -> Self {
                             let t = const { EncodedTag::new(#number, <#tacky_ty as ProtobufScalar>::WIRE_TYPE) };
-                            t.write(buf);
-                            <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            if B::REVERSE {
+                                <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                                t.write(buf);
+                            } else {
+                                t.write(buf);
+                                <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            }
                             Self
                         }
                     }
@@ -417,10 +422,15 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                 PbType::Enum((name, _)) => {
                     let enum_ident = format_ident!("{}", name);
                     quote! {
-                        pub fn #method_name(self, buf: &mut impl WriteBuf, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
+                        pub fn #method_name<B: WriteBuf>(self, buf: &mut B, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::VARINT) };
-                            t.write(buf);
-                            <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            if B::REVERSE {
+                                <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                                t.write(buf);
+                            } else {
+                                t.write(buf);
+                                <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
+                            }
                             Self
                         }
                     }
@@ -431,9 +441,7 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                     quote! {
                         pub fn #method_name<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, #msg_ident)) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::LEN) };
-                            t.write(buf);
-                            let t = tack::Tack::new(buf);
-                            f(t.buffer, #msg_ident::schema());
+                            buf.put_msg(t, |buf| f(buf, #msg_ident::schema()));
                             Self
                         }
                     }

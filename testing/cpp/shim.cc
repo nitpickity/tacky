@@ -15,8 +15,10 @@
 #include "benchmark_message1_proto3.pb.h"
 #include "noutf8/accesslog.pb.h"
 #include "noutf8/benchmark_message1_proto3.pb.h"
+#include "noutf8/opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 #include "noutf8/opentelemetry/proto/collector/trace/v1/trace_service.pb.h"
 #include "noutf8/pprof.pb.h"
+#include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
 #include "opentelemetry/proto/collector/trace/v1/trace_service.pb.h"
 #include "pprof.pb.h"
 #include "simple_message.pb.h"
@@ -51,6 +53,11 @@ MessageLite* make(int kind) {
         case 11:
             return new noutf8::opentelemetry::proto::collector::trace::v1::
                 ExportTraceServiceRequest();
+        case 12:
+            return new opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest();
+        case 13:
+            return new noutf8::opentelemetry::proto::collector::logs::v1::
+                ExportLogsServiceRequest();
         default:
             return nullptr;
     }

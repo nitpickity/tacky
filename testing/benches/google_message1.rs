@@ -21,9 +21,8 @@
 //! would be worse.
 //!
 //! Wire output is checked by decoding tacky's bytes with prost and comparing the
-//! messages, not by comparing byte strings: tacky pads nested length prefixes to a
-//! fixed width, so its output is semantically equal but can be a couple of bytes
-//! longer, so wire equivalence is checked by decoding rather than by comparing bytes.
+//! messages rather than by comparing byte strings, because a reverse writer emits fields in
+//! the opposite order — legal, but not byte-comparable.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use prost::Message;
@@ -70,8 +69,8 @@ fn payloads(dataset: &[u8]) -> Vec<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Writes one `GoogleMessage1` in ascending tag order, which is the order prost
-/// emits, so the two outputs differ only where tacky pads a length prefix.
-fn tacky_encode_p2(buf: &mut Vec<u8>, m: &prost_p2::GoogleMessage1) {
+/// emits.
+fn tacky_encode_p2<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_p2::GoogleMessage1) {
     let s = tacky_p2::benchmarks::proto2::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -227,7 +226,7 @@ fn tacky_decode_p2(wire: &[u8]) -> prost_p2::GoogleMessage1 {
 
 /// Same message with implicit presence. `Field<_, Plain<_>>::write` skips
 /// default-valued fields, which is exactly what prost does, so no `if` needed.
-fn tacky_encode_p3(buf: &mut Vec<u8>, m: &prost_p3::GoogleMessage1) {
+fn tacky_encode_p3<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_p3::GoogleMessage1) {
     let s = tacky_p3::benchmarks::proto3::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
     s.field2.write(buf, m.field2);
@@ -398,7 +397,7 @@ macro_rules! encode_group {
         let mut prost_wire = Vec::with_capacity(4096);
         for m in &msgs {
             let mut one = Vec::with_capacity(1024);
-            $encode(&mut one, m);
+            $encode(tacky::AnyDir::from_mut(&mut one), m);
             assert_eq!(
                 &<$msg>::decode(one.as_slice()).unwrap(),
                 m,
@@ -412,11 +411,39 @@ macro_rules! encode_group {
         group.throughput(Throughput::Bytes(prost_wire.len() as u64));
         let cap = tacky_wire.len().max(prost_wire.len());
 
+        // One message at a time, so the check is per message rather than over a
+        // concatenation whose order a prepending buffer reverses.
+        {
+            let mut backing = vec![0u8; cap + 1024];
+            for m in &msgs {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                $encode(tacky::AnyDir::from_mut(&mut rb), m);
+                assert_eq!(
+                    &<$msg>::decode(rb.written()).unwrap(),
+                    m,
+                    concat!($name, ": reverse writer output does not decode back")
+                );
+            }
+        }
+
+        group.bench_function("tacky-rev", |b| {
+            let mut backing = vec![0u8; cap + 1024];
+            b.iter(|| {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                // Reversed, so the concatenation lands in the same order as the forward
+                // arm's — each message prepends ahead of the previous one.
+                for m in msgs.iter().rev() {
+                    $encode(tacky::AnyDir::from_mut(&mut rb), m);
+                }
+                black_box(rb.written());
+            });
+        });
+
         group.bench_function("tacky", |b| {
             let mut buf = Vec::with_capacity(cap);
             b.iter(|| {
                 for m in &msgs {
-                    $encode(&mut buf, m);
+                    $encode(tacky::AnyDir::from_mut(&mut buf), m);
                 }
                 black_box(buf.as_slice());
                 buf.clear();
@@ -499,10 +526,7 @@ fn bench_message1(c: &mut Criterion) {
         DATASET_PROTO3,
         prost_p3::GoogleMessage1,
         tacky_encode_p3,
-        [
-            ("cpp", testing::cpp::MESSAGE1_PROTO3),
-            ("cpp-noutf8", testing::cpp::MESSAGE1_PROTO3_NO_UTF8),
-        ]
+        [("cpp-noutf8", testing::cpp::MESSAGE1_PROTO3_NO_UTF8),]
     );
     decode_group!(
         c,

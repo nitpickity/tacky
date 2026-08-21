@@ -1,1 +1,3 @@
 target/
+# C++ protobuf runtime built by scripts/bench_cpp.sh for the `cpp` bench arms.
+third_party/

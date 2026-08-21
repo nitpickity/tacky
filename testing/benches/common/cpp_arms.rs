@@ -18,16 +18,34 @@ pub fn bench_cpp_arms(
     kind: i32,
     prost_wire: &[u8],
 ) {
+    bench_cpp_arms_gated(group, label, kind, prost_wire, |cpp_wire| {
+        assert_eq!(
+            cpp_wire, prost_wire,
+            "{label}: C++ re-serialization differs from prost"
+        );
+    });
+}
+
+/// As [`bench_cpp_arms`], but with the gate supplied by the caller.
+///
+/// Byte equality is the right gate almost everywhere, and it is the strongest one, but
+/// it is not available for a message containing a `map` field: map entries have no
+/// canonical wire order, and the C++ runtime emits them in its own hash order while
+/// prost emits them in `BTreeMap` order. For those the caller decodes the C++ output and
+/// compares messages instead, which is the same standard the `tacky-rev` arms are held
+/// to for the same reason.
+pub fn bench_cpp_arms_gated(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    label: &str,
+    kind: i32,
+    prost_wire: &[u8],
+    gate: impl Fn(&[u8]),
+) {
     let msg = cpp::Msg::parse(kind, prost_wire);
 
-    // The C++ runtime must reproduce prost's bytes exactly, or the arms aren't
-    // encoding the same message.
     let mut check = Vec::with_capacity(msg.byte_size() + 64);
     msg.serialize(&mut check);
-    assert_eq!(
-        check, prost_wire,
-        "{label}: C++ re-serialization differs from prost"
-    );
+    gate(&check);
 
     let cap = check.len();
     group.bench_function(label.to_string(), |b| {

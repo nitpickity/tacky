@@ -431,6 +431,48 @@ mod tests {
         assert_eq!(map2, HashMap::from_iter([(1, 1.0), (2, 2.0)]));
     }
 
+    /// Maps through a `RevBuf`, both value kinds. An entry's length is exact in either
+    /// direction (it is the sum of two known field lengths), so this checks the *order*:
+    /// entry tag, length, key field, value field, with the key/value pair and the
+    /// tag/value pairs each flipped relative to the order they are written.
+    ///
+    /// Entry order across a multi-entry map is deliberately not reversed — see
+    /// `Field::<N, PbMap<K, V>>::write`— so a `BTreeMap` comes out in descending key order
+    /// here, which is legal and which prost is happy to decode.
+    #[test]
+    fn test_maps_into_rev_buf() {
+        use std::collections::BTreeMap;
+
+        // Scalar-valued map.
+        let map1: BTreeMap<&str, i32> = BTreeMap::from_iter([("one", 1), ("two", 2)]);
+        let mut backing = [0u8; 256];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        let schema = MsgWithMaps::schema();
+        MsgWithMaps {
+            map2: schema.map2.write(&mut rb, &HashMap::<i32, f64>::new()),
+            map1: schema.map1.write(&mut rb, &map1),
+        };
+        let decoded = PMsgWithMaps::decode(rb.written()).unwrap();
+        assert_eq!(
+            decoded.map1,
+            HashMap::from_iter([("one".to_string(), 1), ("two".to_string(), 2)])
+        );
+
+        // Message-valued map entry.
+        let mut backing = [0u8; 256];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        MapsWithMsg::schema()
+            .map1
+            .write_msg(&mut rb, "key", |buf, s| {
+                s.normal_int.write(buf, Some(42));
+                s.astring.write(buf, Some("hello"));
+            });
+        let decoded = crate::prost_proto::MapsWithMsg::decode(rb.written()).unwrap();
+        let v = decoded.map1.get("key").expect("entry present");
+        assert_eq!(v.normal_int, Some(42));
+        assert_eq!(v.astring, Some("hello".to_string()));
+    }
+
     #[test]
     fn test_maps_with_msg_values() {
         let s = MapsWithMsg::schema();

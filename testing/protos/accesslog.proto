@@ -21,12 +21,35 @@ message Entry {
   int64 timestamp = 10;
   string host = 11;
   string protocol = 12;
-  repeated Header request_headers = 13;
+  // Envoy's ALS carries headers as a map, and so does every access-log schema that
+  // gets written twice. This is the only comparative corpus in the suite with a map
+  // field, so it is the only place the map-entry encode path is measured against
+  // prost and C++ rather than only in `benches/regression.rs`.
+  map<string, string> request_headers = 13;
+  // The per-connection and per-upstream detail that the real thing (Envoy's
+  // `AccessLogCommon`) keeps in a submessage rather than inline. Timings are plain
+  // int64 micros, not well-known types: tacky has no `Duration`/`Timestamp`
+  // specialisation, and benching one that wraps a scalar in its own message would
+  // measure a gap we have not claimed to close.
+  Common common = 14;
 }
 
-message Header {
-  string name = 1;
-  string value = 2;
+message Common {
+  string upstream_host = 1;
+  string upstream_cluster = 2;
+  string route_name = 3;
+  int64 upstream_connect_micros = 4;
+  int64 time_to_first_byte_micros = 5;
+  int64 request_bytes = 6;
+  bool sampled = 7;
+  TlsProperties tls = 8;
+}
+
+message TlsProperties {
+  string version = 1;
+  string cipher_suite = 2;
+  string sni = 3;
+  bool resumed = 4;
 }
 
 enum HttpMethod {

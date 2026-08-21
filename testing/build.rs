@@ -1,5 +1,41 @@
+/// The from-source C++ prefix, if one exists. `TACKY_PROTOBUF_PREFIX` wins, else the
+/// repo-local path `scripts/build_cpp_static.sh` installs to. Tests for the lib rather than
+/// the directory: a half-built tree isn't usable.
+fn cpp_prefix() -> Option<String> {
+    if let Ok(p) = std::env::var("TACKY_PROTOBUF_PREFIX") {
+        return Some(p);
+    }
+    let root = std::env::var("TACKY_CPP_ROOT").unwrap_or_else(|_| {
+        // CARGO_MANIFEST_DIR is `testing/`.
+        format!(
+            "{}/../third_party/protobuf-cpp",
+            std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default()
+        )
+    });
+    let p = format!("{root}/prefix");
+    // `lib` is what build_cpp_static.sh pins, but tolerate a `lib64` tree: that is what
+    // CMake's GNUInstallDirs defaults to on Fedora/RHEL x86_64.
+    ["lib", "lib64"]
+        .iter()
+        .any(|d| std::path::Path::new(&p).join(d).join("libprotobuf.a").exists())
+        .then_some(p)
+}
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // prost-build shells out to protoc, and distro packages run years behind — Fedora still
+    // ships 3.19. If the C++ prefix has been built, reuse its protoc so the system one stops
+    // mattering for both arms.
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if std::env::var_os("PROTOC").is_none() {
+        if let Some(prefix) = cpp_prefix() {
+            let protoc = std::path::Path::new(&prefix).join("bin/protoc");
+            if protoc.exists() {
+                std::env::set_var("PROTOC", protoc);
+            }
+        }
+    }
     let simple_file = "protos/simple_message.proto";
     let importing_file = "protos/importing.proto";
     let simple_out = format!("{out_dir}/simple.rs");
@@ -46,19 +82,25 @@ fn main() {
         &format!("{out_dir}/tacky_descriptor.rs"),
     );
 
-    prost_build::compile_protos(
-        &[
-            simple_file,
-            proto3_file,
-            pprof_file,
-            accesslog_file,
-            m1p2_file,
-            m1p3_file,
-            dataset_file,
-        ],
-        &["."],
-    )
-    .unwrap();
+    // `btree_map` for the access log's headers: prost defaults a map field to `HashMap`,
+    // and then its encode arm is partly measuring hash iteration while tacky's writes
+    // from an ordered container. Both sides iterate a `BTreeMap` this way, and the
+    // output order is stable run to run.
+    prost_build::Config::new()
+        .btree_map(["accesslog.Entry.request_headers"])
+        .compile_protos(
+            &[
+                simple_file,
+                proto3_file,
+                pprof_file,
+                accesslog_file,
+                m1p2_file,
+                m1p3_file,
+                dataset_file,
+            ],
+            &["."],
+        )
+        .unwrap();
 
     // OTLP traces, for `benches/otlp_traces.rs`. Vendored from
     // open-telemetry/opentelemetry-proto tag v1.3.2, keeping the upstream
@@ -68,6 +110,8 @@ fn main() {
         "protos/opentelemetry/proto/resource/v1/resource.proto",
         "protos/opentelemetry/proto/trace/v1/trace.proto",
         "protos/opentelemetry/proto/collector/trace/v1/trace_service.proto",
+        "protos/opentelemetry/proto/logs/v1/logs.proto",
+        "protos/opentelemetry/proto/collector/logs/v1/logs_service.proto",
     ];
     for f in otlp {
         println!("cargo:rerun-if-changed={f}");
@@ -81,6 +125,13 @@ fn main() {
     tacky_build::write_proto_with_includes(
         otlp[3],
         &format!("{out_dir}/tacky_otlp.rs"),
+        &[protos_root.to_str().unwrap()],
+    );
+    // The logs signal, for `benches/otlp_logs.rs`. Same tree, same tag; a separate
+    // generated module because the two collector services share only common/resource.
+    tacky_build::write_proto_with_includes(
+        otlp[5],
+        &format!("{out_dir}/tacky_otlp_logs.rs"),
         &[protos_root.to_str().unwrap()],
     );
     // prost spreads one module per proto package and cross-references them with
@@ -108,6 +159,8 @@ fn main() {
             otlp[1],
             otlp[2],
             otlp[3],
+            otlp[4],
+            otlp[5],
         ],
         // proto3 only: proto2 schemas (simple_message, benchmark_message1_proto2,
         // descriptor) never hit `VerifyUtf8String`, so their `-cached` arm already
@@ -120,6 +173,8 @@ fn main() {
             otlp[1],
             otlp[2],
             otlp[3],
+            otlp[4],
+            otlp[5],
         ],
     );
 }
@@ -209,19 +264,16 @@ fn derive_noutf8_proto(src: &str, out_dir: &str) -> String {
     rel
 }
 
-/// Compiles the official C++ protobuf runtime's generated code plus `cpp/shim.cc`
-/// into a static lib the benches link against. Requires `protoc` and a protobuf
-/// C++ install discoverable by pkg-config (`brew install protobuf pkg-config`).
-///
-/// Set `TACKY_PROTOBUF_PREFIX` to a from-source install prefix (see
-/// `scripts/build_cpp_static.sh`) to link the runtime statically instead. A
-/// Homebrew dylib routes every cross-library call through a DYLD stub and blocks
-/// inlining at the library boundary, which understates the C++ arms.
+/// Compiles the C++ runtime's generated code plus `cpp/shim.cc` into a static lib the
+/// benches link against. Needs `protoc` and a pkg-config-discoverable protobuf;
+/// `scripts/bench_cpp.sh` sets both up. A *shared* protobuf also satisfies the probe but
+/// understates the C++ arms, so it is fine for a smoke test and not for published numbers.
 #[cfg(feature = "cpp")]
 fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     println!("cargo:rerun-if-changed=cpp/shim.cc");
     println!("cargo:rerun-if-env-changed=TACKY_PROTOBUF_PREFIX");
-    let prefix = std::env::var("TACKY_PROTOBUF_PREFIX").ok();
+    println!("cargo:rerun-if-env-changed=TACKY_CPP_ROOT");
+    let prefix = cpp_prefix();
 
     // protoc mirrors each input's include-relative path into `--cpp_out`, so track
     // these as paths rather than stems: the OTLP tree is nested, and `-Iprotos`
@@ -241,28 +293,48 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     let protoc = prefix
         .as_ref()
         .map_or_else(|| "protoc".to_string(), |p| format!("{p}/bin/protoc"));
-    let status = std::process::Command::new(protoc)
+    let status = std::process::Command::new(&protoc)
         .arg("-Iprotos")
         .arg(format!("-I{out_dir}"))
         .arg(format!("--cpp_out={out_dir}"))
         .args(&files)
         .current_dir(".")
         .status()
-        .expect("protoc not found; `brew install protobuf`");
+        .expect("protoc not found on PATH; install your platform's protobuf compiler");
     assert!(status.success(), "protoc --cpp_out failed");
 
-    let mut pkg = std::process::Command::new("pkg-config");
-    pkg.args(["--cflags-only-I", "--libs", "protobuf"]);
+    // The pkg-config crate emits the link directives itself. `statik` is what pulls in the
+    // whole abseil dependency graph, in link order.
     if let Some(p) = &prefix {
-        // `--static` pulls in the whole abseil dependency graph, in link order.
-        pkg.arg("--static")
-            .env("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig"));
+        std::env::set_var(
+            "PKG_CONFIG_PATH",
+            format!("{p}/lib/pkgconfig:{p}/lib64/pkgconfig"),
+        );
     }
-    let pkg = pkg
+    let protobuf = pkg_config::Config::new()
+        .statik(prefix.is_some())
+        .probe("protobuf")
+        .expect("protobuf not found; run scripts/bench_cpp.sh to build it");
+
+    // Codegen and runtime must share a protobuf major version. Mixing them is what produces
+    // the otherwise baffling `google/protobuf/runtime_version.h: No such file` — that header
+    // arrived in v27, so gencode from a newer protoc cannot find it in an older runtime's
+    // includes. Distro protobuf packages are a common way to end up here.
+    let major = |v: &str| v.trim().split('.').next().unwrap_or_default().to_string();
+    let protoc_ver = std::process::Command::new(&protoc)
+        .arg("--version")
         .output()
-        .expect("pkg-config not found; `brew install pkg-config`");
-    assert!(pkg.status.success(), "pkg-config --libs protobuf failed");
-    let flags = String::from_utf8(pkg.stdout).unwrap();
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.split_whitespace().nth(1).map(str::to_string))
+        .unwrap_or_default();
+    assert_eq!(
+        major(&protoc_ver),
+        major(&protobuf.version),
+        "protoc {protoc_ver} generates code the protobuf {} runtime cannot compile; \
+         run scripts/bench_cpp.sh to build a matching pair",
+        protobuf.version,
+    );
 
     let mut build = cc::Build::new();
     build
@@ -283,15 +355,9 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
         build.file(format!("{out_dir}/{stem}.pb.cc"));
     }
 
-    // pkg-config emits -I/-L/-l in one blob; route each to the right consumer.
-    for flag in flags.split_whitespace() {
-        if let Some(dir) = flag.strip_prefix("-I") {
-            build.include(dir);
-        } else if let Some(dir) = flag.strip_prefix("-L") {
-            println!("cargo:rustc-link-search=native={dir}");
-        } else if let Some(lib) = flag.strip_prefix("-l") {
-            println!("cargo:rustc-link-lib={lib}");
-        }
+    // Link flags were emitted by the probe; only includes are ours to forward.
+    for dir in &protobuf.include_paths {
+        build.include(dir);
     }
 
     build.compile("tacky_cpp_shim");

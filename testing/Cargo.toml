@@ -12,14 +12,16 @@ prost = "0.14"
 # descriptor.proto, so the comparison costs us no extra codegen.
 prost-types = "0.14"
 [features]
-# Adds the official C++ protobuf runtime as a third arm in `benches/comparison.rs`.
-# Needs `protoc`, pkg-config and a protobuf C++ install: `brew install protobuf pkg-config`.
-cpp = ["cc"]
+# Adds the official C++ protobuf runtime as extra arms in the benches. Run
+# `scripts/bench_cpp.sh`, which sets it up. Strict on purpose: a missing runtime fails the
+# build rather than silently dropping the arms.
+cpp = ["cc", "pkg-config"]
 
 [build-dependencies]
 prost-build = "0.14"
 tacky-build = { path = "../tacky-build" }
 cc = { version = "1", optional = true }
+pkg-config = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -42,4 +44,8 @@ harness = false
 
 [[bench]]
 name = "otlp_traces"
+harness = false
+
+[[bench]]
+name = "otlp_logs"
 harness = false

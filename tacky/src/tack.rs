@@ -48,15 +48,41 @@ pub fn write_wide_varint(width: usize, value: u64, buf: &mut impl WriteBuf) {
     buf.put_u8(((value >> (7 * (width - 1))) & 0x7F) as u8)
 }
 
+/// Width of the length placeholder every writer reserves, in bytes.
+///
+/// A placeholder holds lengths below `2^(7*WIDTH)`: 1 byte covers 128 B, 2 covers 16 KB,
+/// 3 covers 2 MB. It is a straight trade and not a size/speed dial in one direction:
+/// every nested message past the limit takes the [`Tack::fix_overflow`]
+/// path, which grows the buffer and `copy_within`s that message's whole payload — a cost
+/// proportional to payload size, compounding with nesting depth.
+/// 1 byte is still chosen because even with memcpys, the result is only marginally slower than a longer tack width
+/// and results in a 'canonical' packed size.
+///
+/// A downward-growing buffer ([`RevBuf`](`crate::RevBuf`)) sidesteps all of this, since it knows
+/// each length before it writes it.
+pub const DEFAULT_WIDTH: u32 = 1;
+
 impl<'b, B: WriteBuf> Tack<'b, B> {
-    /// Creates a new Tack with a 3-byte placeholder (~2MB max).
+    /// Creates a new Tack with a [`DEFAULT_WIDTH`]-byte placeholder.
     /// Used for nested messages. The caller must write the field tag first.
     pub fn new(buffer: &'b mut B) -> Self {
-        Self::new_with_width(buffer, 3)
+        Self::new_with_width(buffer, DEFAULT_WIDTH)
     }
-    /// Creates a new Tack with a custom placeholder width.
-    /// Used for packed fields and map entries (width=2, ~16KB max).
+    /// Creates a new Tack with a custom placeholder width, for a caller that knows its payload
+    /// will not fit in [`DEFAULT_WIDTH`] bytes. Width 2 covers ~16 KB, 3 covers ~2 MB.
+    ///
+    /// This and `close` are specialised for a constant width; a computed one
+    /// turns both into loops over a variable, which slows things down.
+    /// make sure these are small: unconditional #[inline] hurts performance,
+    /// and growing these and makiing them fall out of llvms inlining threshhold also hurts performance.
     pub fn new_with_width(buffer: &'b mut B, width: u32) -> Self {
+        // A Tack's `start`-relative patch lands inside the payload when the buffer grows
+        // downward. Not `const assert!`: `maps::write_msg` instantiates its forward branch
+        // for RevBuf behind a runtime guard. Folds away for forward buffers.
+        assert!(
+            !B::REVERSE,
+            "Tack is forward-only: a reverse buffer knows its lengths — use WriteBuf::put_msg"
+        );
         write_wide_varint(width as usize, 0, buffer);
 
         Tack {

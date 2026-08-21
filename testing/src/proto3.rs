@@ -309,6 +309,65 @@ mod tests {
         assert_eq!(decoded.byte_arrays, vec![b"x".to_vec(), b"y".to_vec()]);
     }
 
+    /// Iterators that cannot be walked backwards — a `HashSet`'s, a `take_while` — written
+    /// bare. A forward buffer appends, so nothing needs reordering and no bound applies; a
+    /// `RevBuf` rejects these same calls at compile time, since it would have to emit the
+    /// elements back-to-front.
+    #[test]
+    fn test_repeated_from_one_way_iters() {
+        use std::collections::HashSet;
+
+        let nums: HashSet<i32> = HashSet::from_iter([1, 2, 3]);
+        let strings: HashSet<&str> = HashSet::from_iter(["a", "b"]);
+
+        let mut buf = Vec::new();
+        let s = RepeatedMessage::schema();
+        s.nums.write(&mut buf, &nums);
+        s.strings.write(&mut buf, &strings);
+        s.unums
+            .write(&mut buf, [1u64, 7, 0, 2].iter().take_while(|v| **v > 0));
+
+        let decoded = prost_proto3::RepeatedMessage::decode(&*buf).unwrap();
+        assert_eq!(HashSet::from_iter(decoded.nums), nums);
+        assert_eq!(
+            decoded
+                .strings
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            strings
+        );
+        assert_eq!(decoded.unums, vec![1, 7]);
+    }
+
+    /// One encode routine, written once against `AnyDir` because it does not know its
+    /// buffer's direction, run through both a forward buffer and a `RevBuf`. Both have to come
+    /// out in list order — the reverse arm walks the elements backwards so that prepending
+    /// lands them ascending. This is the shape the benches use.
+    #[test]
+    fn test_any_dir_through_both_directions() {
+        fn encode<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, strings: &[&str], nums: &[i32]) {
+            let s = RepeatedMessage::schema();
+            s.nums.write(buf, nums);
+            s.strings.write(buf, strings);
+        }
+
+        let strings = ["a", "b", "c"];
+        let nums = [1, 2, 3];
+
+        let mut fwd = Vec::new();
+        encode(tacky::AnyDir::from_mut(&mut fwd), &strings, &nums);
+        let mut backing = [0u8; 128];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        encode(tacky::AnyDir::from_mut(&mut rb), &strings, &nums);
+
+        for wire in [fwd.as_slice(), rb.written()] {
+            let decoded = prost_proto3::RepeatedMessage::decode(wire).unwrap();
+            assert_eq!(decoded.strings, vec!["a", "b", "c"]);
+            assert_eq!(decoded.nums, vec![1, 2, 3]);
+        }
+    }
+
     #[test]
     fn test_repeated_prost_to_tacky() {
         let prost_msg = prost_proto3::RepeatedMessage {
@@ -452,6 +511,89 @@ mod tests {
     }
 
     // --- Nested messages ---
+
+    /// Pins the reverse buffer at the byte level: writing a message's fields in *descending*
+    /// order into a `RevBuf` must produce exactly the bytes an ascending forward writer
+    /// produces, since each write prepends. Decode-and-compare checks (what the benches use,
+    /// because they share one ascending encoder for both directions) would absorb an
+    /// off-by-one or a reversed varint; this does not.
+    #[test]
+    fn test_revbuf_descending_matches_prost() {
+        let mut backing = [0u8; 256];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        let s = ScalarMessage::schema();
+        // Descending field order: a_bytes is 15, a_int32 is 1.
+        s.a_bytes.write(&mut rb, [0xFFu8, 0x00].as_slice());
+        s.a_string.write(&mut rb, "hello");
+        s.a_double.write(&mut rb, 2.71828f64);
+        s.a_float.write(&mut rb, 3.14f32);
+        s.a_sfixed64.write(&mut rb, i64::MIN);
+        s.a_sfixed32.write(&mut rb, i32::MIN);
+        s.a_fixed64.write(&mut rb, 0xCAFE_BABE_DEAD_BEEFu64);
+        s.a_fixed32.write(&mut rb, 0xDEAD_BEEFu32);
+        s.a_bool.write(&mut rb, true);
+        s.a_sint64.write(&mut rb, i64::MIN);
+        s.a_sint32.write(&mut rb, -50);
+        s.a_uint64.write(&mut rb, u64::MAX);
+        s.a_uint32.write(&mut rb, 300u32);
+        s.a_int64.write(&mut rb, -100i64);
+        s.a_int32.write(&mut rb, 42);
+
+        let prost_msg = prost_proto3::ScalarMessage {
+            a_int32: 42,
+            a_int64: -100,
+            a_uint32: 300,
+            a_uint64: u64::MAX,
+            a_sint32: -50,
+            a_sint64: i64::MIN,
+            a_bool: true,
+            a_fixed32: 0xDEAD_BEEF,
+            a_fixed64: 0xCAFE_BABE_DEAD_BEEF,
+            a_sfixed32: i32::MIN,
+            a_sfixed64: i64::MIN,
+            a_float: 3.14,
+            a_double: 2.71828,
+            a_string: "hello".into(),
+            a_bytes: vec![0xFF, 0x00],
+        };
+        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+    }
+
+    /// The companion to [`test_revbuf_descending_matches_prost`] for lengths that do *not*
+    /// fit in one byte. That test's fields are all short, so it exercises neither
+    /// `RevBuf::put_msg`'s nor `put_len_delimited`'s `>= 0x80` branch — a reversed or
+    /// off-by-one multi-byte varint would slip straight through it.
+    ///
+    /// Here the inner `label` is 300 bytes (2-byte length), which pushes the enclosing
+    /// `Nested` past 127 too (a second 2-byte length), and `value` is a 3-byte varint. Bytes
+    /// are compared against prost rather than decoded, since decoding would re-absorb any
+    /// mistake the encoder made in the length prefix.
+    #[test]
+    fn test_revbuf_multibyte_lengths_match_prost() {
+        let label = "x".repeat(300);
+        let value = 1_000_000i32; // 0xc0 0x84 0x3d — three varint bytes
+
+        let mut backing = [0u8; 1024];
+        let mut rb = tacky::RevBuf::new(&mut backing);
+        let s = WithNesting::schema();
+        // Descending field order: name is 3, single is 1.
+        s.name.write(&mut rb, "outer");
+        s.single.write_msg(&mut rb, |buf, s| {
+            // And descending within the nested message: value is 2, label is 1.
+            s.value.write(buf, value);
+            s.label.write(buf, label.as_str());
+        });
+
+        let prost_msg = prost_proto3::WithNesting {
+            single: Some(prost_proto3::Nested {
+                label: label.clone(),
+                value,
+            }),
+            many: vec![],
+            name: "outer".into(),
+        };
+        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+    }
 
     #[test]
     fn test_nesting_tacky_to_prost() {

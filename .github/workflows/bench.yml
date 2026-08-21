@@ -13,12 +13,15 @@ jobs:
         run: sudo apt-get install -y protobuf-compiler
       # No `--features cpp` here, so this job needs nothing but protoc. The C++ arms get
       # their own job below, which has to build the runtime from source.
+      #
+      # Filtered to `^encode_` to match the C++ job, so both artifacts cover the same
+      # groups. Decode lives in `bench_decode.yml`.
       - name: Run benchmarks
         run: |
           cargo bench -p testing \
             --bench comparison --bench descriptor_set \
             --bench google_message1 --bench otlp_traces \
-            2>&1 | tee bench_output.txt
+            -- '^encode_' 2>&1 | tee bench_output.txt
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results
@@ -32,24 +35,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The exact list scripts/bench_cpp.sh prints for apt, so a wrong hint fails here.
+      # Deliberately no protobuf-compiler: the source build provides protoc and build.rs
+      # prefers it, so this job also proves a distro protobuf is not needed at all.
       - name: Install build deps
-        run: sudo apt-get install -y protobuf-compiler cmake ninja-build pkg-config
+        run: sudo apt-get install -y cmake ninja-build pkg-config git g++
       - name: Cache protobuf C++ prefix
-        id: cpp-prefix
         uses: actions/cache@v4
         with:
-          path: ~/.cache/tacky-cpp/prefix
+          path: third_party/protobuf-cpp/prefix
           key: protobuf-cpp-v28.1-${{ runner.os }}
-      - name: Build protobuf C++ from source
-        if: steps.cpp-prefix.outputs.cache-hit != 'true'
-        run: scripts/build_cpp_static.sh v28.1
+      # Through the script rather than around it, so this also proves the documented path
+      # works on Linux.
       - name: Run benchmarks against protobuf C++
         run: |
-          TACKY_PROTOBUF_PREFIX="$HOME/.cache/tacky-cpp/prefix" \
-            cargo bench -p testing --features cpp \
-              --bench comparison --bench descriptor_set \
-              --bench google_message1 --bench otlp_traces \
-              -- '^encode_' 2>&1 | tee bench_cpp_output.txt
+          scripts/bench_cpp.sh \
+            --bench comparison --bench descriptor_set \
+            --bench google_message1 --bench otlp_traces \
+            -- '^encode_' 2>&1 | tee bench_cpp_output.txt
+      # The script passes an explicit prefix, so check discovery separately.
+      - name: Prefix auto-discovery works without the env var
+        run: |
+          env -u TACKY_PROTOBUF_PREFIX -u TACKY_CPP_ROOT \
+            cargo bench -p testing --features cpp --bench comparison \
+            -- '^encode_realistic/cpp$' --warm-up-time 1 --measurement-time 1
+
       - uses: actions/upload-artifact@v4
         with:
           name: bench-results-cpp
