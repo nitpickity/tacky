@@ -27,6 +27,9 @@ pub const OTLP_TRACES: i32 = 9;
 pub const MESSAGE1_PROTO3_NO_UTF8: i32 = 10;
 /// Same, for [`OTLP_TRACES`].
 pub const OTLP_TRACES_NO_UTF8: i32 = 11;
+pub const OTLP_LOGS: i32 = 12;
+/// Same, for [`OTLP_LOGS`].
+pub const OTLP_LOGS_NO_UTF8: i32 = 13;
 
 extern "C" {
     fn tacky_cpp_new(kind: i32, wire: *const u8, len: usize) -> *mut core::ffi::c_void;

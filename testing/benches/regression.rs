@@ -387,12 +387,28 @@ fn bench_encode_maps(c: &mut Criterion) {
                 buf.clear();
             });
         });
+
+        // The same map through the reverse writer. A scalar-valued entry's length is the
+        // sum of two scalar field lengths, so `write_entry` computes it exactly in *both*
+        // directions and neither uses a `Tack` — there is nothing here for `RevBuf` to
+        // eliminate, which is why a map-heavy corpus is the one place its usual lead
+        // disappears (see `encode_accesslog`).
+        group.bench_with_input(BenchmarkId::new("string_int32-rev", name), count, |b, _| {
+            let mut backing = vec![0u8; count * 40 + 1024];
+            b.iter(|| {
+                let mut rb = tacky::RevBuf::new(&mut backing);
+                MsgWithMaps::schema().map1.write(&mut rb, &map);
+                black_box(rb.written());
+            });
+        });
     }
 
-    // Map with message values
-    group.bench_function("string_message/5", |b| {
-        let mut buf = Vec::with_capacity(512);
-        b.iter(|| {
+    // Map with *message* values, which is the opposite case: the value's length is not
+    // known until it has been written, so the forward writer needs two nested placeholders
+    // per entry — one for the entry, one for the value — while the reverse writer prepends
+    // two exact varints. This pair is what isolates that difference.
+    macro_rules! write_msg_map {
+        ($buf:expr) => {{
             let scm = MapsWithMsg::schema();
             for i in 0..5 {
                 let key: &str = match i {
@@ -402,13 +418,32 @@ fn bench_encode_maps(c: &mut Criterion) {
                     3 => "delta",
                     _ => "echo",
                 };
-                scm.map1.write_msg(&mut buf, key, |buf, scm| {
+                scm.map1.write_msg($buf, key, |buf, scm| {
                     scm.normal_int.write(buf, Some(i * 10));
                     scm.astring.write(buf, Some("map-value"));
                 });
             }
+        }};
+    }
+
+    // `BenchmarkId`, not a slashed name: criterion treats a slash as a group separator, so
+    // `"string_message/5"` would report as its own one-arm group instead of sitting beside
+    // the scalar-valued arms.
+    group.bench_with_input(BenchmarkId::new("string_message", 5), &5, |b, _| {
+        let mut buf = Vec::with_capacity(512);
+        b.iter(|| {
+            write_msg_map!(&mut buf);
             black_box(buf.as_slice());
             buf.clear();
+        });
+    });
+
+    group.bench_with_input(BenchmarkId::new("string_message-rev", 5), &5, |b, _| {
+        let mut backing = vec![0u8; 2048];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            write_msg_map!(&mut rb);
+            black_box(rb.written());
         });
     });
 

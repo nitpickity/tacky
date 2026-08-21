@@ -4,17 +4,27 @@
 //! gRPC reflection service, schema registry and dynamic-message runtime ships
 //! around. It is the opposite of GoogleMessage1: deeply nested (file → message →
 //! nested message → field → options), overwhelmingly short strings and small
-//! varints, and thousands of *absent* optional fields. That makes it the corpus
-//! where tacky's fixed-width length padding costs the most and where prost's
-//! `encoded_len` recursion costs the most, so it is worth measuring on its own.
+//! varints, and thousands of *absent* optional fields. That makes it the densest corpus
+//! in the suite in length prefixes per byte, which is where both tacky's placeholder
+//! patching and prost's `encoded_len` recursion cost the most.
 //!
-//! Two fixtures, both checked in so `cargo bench` needs no local `protoc`
+//! Three fixtures, all checked in so `cargo bench` needs no local `protoc`
 //! (regenerate with `scripts/gen_bench_fixtures.sh`):
 //!
-//! - `descriptor_proto` — the vendored `descriptor.proto` describing itself.
+//! - `descriptor_proto` — the vendored `descriptor.proto` describing itself, 7.6 KB.
 //!   Extension ranges, reserved ranges, nested enums, oneofs, custom defaults.
-//! - `testing_protos` — this repo's own protos, with imports. Flatter: mostly
-//!   names, field numbers and `json_name`s, plus map-entry messages.
+//! - `testing_protos` — this repo's own protos plus `descriptor.proto`, with imports,
+//!   20 KB. Flatter: mostly names, field numbers and `json_name`s, plus map-entry messages.
+//! - `registry` — `testing_protos`' files plus the vendored OTLP schema protos, with
+//!   `--include_source_info`, 126 KB. A superset rather than an independent corpus, which
+//!   makes the pair a controlled comparison: source info is the only variable. This is the
+//!   one that matches reality: a schema
+//!   registry, a gRPC reflection service or anything buf ships carries source info,
+//!   and a real service's descriptor set runs from ~100 KB into the megabytes. The
+//!   other two are an order of magnitude small and fit in L2 whole, which is the
+//!   cache-resident best case this suite otherwise takes care to avoid. Most of the
+//!   extra bytes are `SourceCodeInfo.location`: thousands of short packed `int32`
+//!   arrays, a work mix neither of the other fixtures contains at all.
 //!
 //! Arms are the same four as `benches/google_message1.rs`:
 //!
@@ -27,19 +37,19 @@
 //! this comparison costs no extra codegen. tacky's side is generated from
 //! `testing/protos/descriptor.proto` (protobuf v3.20.3) by the build script.
 //!
-//! The writer covers every field of the descriptor messages the fixtures contain.
-//! It does *not* cover `ServiceDescriptorProto`, `SourceCodeInfo`,
+//! The writer covers every field of the descriptor messages the fixtures contain,
+//! `SourceCodeInfo` included. It does *not* cover `ServiceDescriptorProto`,
 //! `UninterpretedOption`, or the option messages with no set fields here
-//! (`EnumOptions`, `EnumValueOptions`, `OneofOptions`, `ExtensionRangeOptions`):
-//! none appear in either fixture. That is not a silent gap — the round-trip assert
-//! below compares whole messages, so a fixture that grew one of them would fail
-//! rather than quietly measure less work.
+//! (`EnumOptions`, `EnumValueOptions`, `OneofOptions`, `ExtensionRangeOptions`): none
+//! appear in any fixture. Services are absent because tacky does not generate service
+//! definitions — RPC is not what it is for — not because they were overlooked. The rest
+//! is not a silent gap either: the round-trip assert below compares whole messages, so
+//! a fixture that grew one of them would fail rather than quietly measure less work.
 //!
-//! Wire output is checked by decoding tacky's bytes with prost and comparing
-//! messages, not by comparing byte strings: tacky pads nested length prefixes to a
-//! fixed width, so its output is semantically equal but longer. With this much
-//! nesting the delta is the interesting number, and it is printed next to the
-//! timings.
+//! Wire output is checked by decoding tacky's bytes with prost and comparing messages
+//! rather than by comparing byte strings, because a reverse writer emits fields in the
+//! opposite order. The two encoders' byte *counts* do match — a placeholder is grown, not
+//! padded — and each fixture prints both so that stays checked rather than assumed.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use prost::Message;
@@ -48,163 +58,15 @@ use prost::Message;
 #[path = "common/cpp_arms.rs"]
 mod cpp_arms;
 
-#[allow(dead_code)]
-mod tacky_descriptor {
-    include!(concat!(env!("OUT_DIR"), "/tacky_descriptor.rs"));
-}
-use tacky_descriptor::google::protobuf as td;
+// The writer and the generated module live in `common/` because `benches/comparison.rs`
+// needs them too, for its rotating group.
+#[path = "common/fds_writer.rs"]
+mod fds_writer;
+use fds_writer::{tacky_encode, td};
 
 const FDS_DESCRIPTOR_PROTO: &[u8] = include_bytes!("../data/descriptor_proto.fds");
 const FDS_TESTING_PROTOS: &[u8] = include_bytes!("../data/testing_protos.fds");
-
-// ---------------------------------------------------------------------------
-// Encode
-// ---------------------------------------------------------------------------
-//
-// Every writer emits fields in ascending tag order, which is the order prost and
-// protoc emit, so the two outputs differ only where tacky pads a length prefix.
-
-fn tacky_encode<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    set: &prost_types::FileDescriptorSet,
-) {
-    let s = td::FileDescriptorSet::schema();
-    s.file
-        .write_msgs(buf, &set.file, |buf, _, f| write_file(buf, f));
-}
-
-fn write_file<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    f: &prost_types::FileDescriptorProto,
-) {
-    let s = td::FileDescriptorProto::schema();
-    s.name.write(buf, f.name.as_deref());
-    s.package.write(buf, f.package.as_deref());
-    s.dependency.write(buf, &f.dependency);
-    s.message_type
-        .write_msgs(buf, &f.message_type, |buf, _, m| write_message(buf, m));
-    s.enum_type
-        .write_msgs(buf, &f.enum_type, |buf, _, e| write_enum(buf, e));
-    s.extension
-        .write_msgs(buf, &f.extension, |buf, _, x| write_field(buf, x));
-    if let Some(o) = &f.options {
-        s.options.write_msg(buf, |buf, t| {
-            t.java_package.write(buf, o.java_package.as_deref());
-            t.java_outer_classname
-                .write(buf, o.java_outer_classname.as_deref());
-            t.optimize_for
-                .write(buf, o.optimize_for.map(td::FileOptionsOptimizeMode::from));
-            t.java_multiple_files.write(buf, o.java_multiple_files);
-            t.go_package.write(buf, o.go_package.as_deref());
-            t.cc_generic_services.write(buf, o.cc_generic_services);
-            t.java_generic_services.write(buf, o.java_generic_services);
-            t.py_generic_services.write(buf, o.py_generic_services);
-            t.deprecated.write(buf, o.deprecated);
-            t.java_string_check_utf8
-                .write(buf, o.java_string_check_utf8);
-            t.cc_enable_arenas.write(buf, o.cc_enable_arenas);
-            t.objc_class_prefix
-                .write(buf, o.objc_class_prefix.as_deref());
-            t.csharp_namespace.write(buf, o.csharp_namespace.as_deref());
-            t.swift_prefix.write(buf, o.swift_prefix.as_deref());
-            t.php_class_prefix.write(buf, o.php_class_prefix.as_deref());
-            t.php_namespace.write(buf, o.php_namespace.as_deref());
-            t.php_metadata_namespace
-                .write(buf, o.php_metadata_namespace.as_deref());
-            t.ruby_package.write(buf, o.ruby_package.as_deref());
-        });
-    }
-    s.public_dependency.write(buf, &f.public_dependency);
-    s.weak_dependency.write(buf, &f.weak_dependency);
-    s.syntax.write(buf, f.syntax.as_deref());
-}
-
-/// Recursive: `nested_type` is a `DescriptorProto` again, which is most of what
-/// makes this corpus different from a flat message.
-fn write_message<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_types::DescriptorProto) {
-    let s = td::DescriptorProto::schema();
-    s.name.write(buf, m.name.as_deref());
-    s.field
-        .write_msgs(buf, &m.field, |buf, _, f| write_field(buf, f));
-    s.nested_type
-        .write_msgs(buf, &m.nested_type, |buf, _, n| write_message(buf, n));
-    s.enum_type
-        .write_msgs(buf, &m.enum_type, |buf, _, e| write_enum(buf, e));
-    s.extension_range
-        .write_msgs(buf, &m.extension_range, |buf, t, r| {
-            t.start.write(buf, r.start);
-            t.end.write(buf, r.end);
-        });
-    s.extension
-        .write_msgs(buf, &m.extension, |buf, _, x| write_field(buf, x));
-    if let Some(o) = &m.options {
-        s.options.write_msg(buf, |buf, t| {
-            t.message_set_wire_format
-                .write(buf, o.message_set_wire_format);
-            t.no_standard_descriptor_accessor
-                .write(buf, o.no_standard_descriptor_accessor);
-            t.deprecated.write(buf, o.deprecated);
-            t.map_entry.write(buf, o.map_entry);
-        });
-    }
-    s.oneof_decl.write_msgs(buf, &m.oneof_decl, |buf, t, d| {
-        t.name.write(buf, d.name.as_deref());
-    });
-    s.reserved_range
-        .write_msgs(buf, &m.reserved_range, |buf, t, r| {
-            t.start.write(buf, r.start);
-            t.end.write(buf, r.end);
-        });
-    s.reserved_name.write(buf, &m.reserved_name);
-}
-
-fn write_field<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    f: &prost_types::FieldDescriptorProto,
-) {
-    let s = td::FieldDescriptorProto::schema();
-    s.name.write(buf, f.name.as_deref());
-    s.extendee.write(buf, f.extendee.as_deref());
-    s.number.write(buf, f.number);
-    s.label
-        .write(buf, f.label.map(td::FieldDescriptorProtoLabel::from));
-    s.r#type
-        .write(buf, f.r#type.map(td::FieldDescriptorProtoType::from));
-    s.type_name.write(buf, f.type_name.as_deref());
-    s.default_value.write(buf, f.default_value.as_deref());
-    if let Some(o) = &f.options {
-        s.options.write_msg(buf, |buf, t| {
-            t.ctype.write(buf, o.ctype.map(td::FieldOptionsCType::from));
-            t.packed.write(buf, o.packed);
-            t.deprecated.write(buf, o.deprecated);
-            t.lazy.write(buf, o.lazy);
-            t.jstype
-                .write(buf, o.jstype.map(td::FieldOptionsJSType::from));
-            t.weak.write(buf, o.weak);
-        });
-    }
-    s.oneof_index.write(buf, f.oneof_index);
-    s.json_name.write(buf, f.json_name.as_deref());
-    s.proto3_optional.write(buf, f.proto3_optional);
-}
-
-fn write_enum<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    e: &prost_types::EnumDescriptorProto,
-) {
-    let s = td::EnumDescriptorProto::schema();
-    s.name.write(buf, e.name.as_deref());
-    s.value.write_msgs(buf, &e.value, |buf, t, v| {
-        t.name.write(buf, v.name.as_deref());
-        t.number.write(buf, v.number);
-    });
-    s.reserved_range
-        .write_msgs(buf, &e.reserved_range, |buf, t, r| {
-            t.start.write(buf, r.start);
-            t.end.write(buf, r.end);
-        });
-    s.reserved_name.write(buf, &e.reserved_name);
-}
+const FDS_REGISTRY: &[u8] = include_bytes!("../data/registry.fds");
 
 // ---------------------------------------------------------------------------
 // Decode
@@ -272,8 +134,36 @@ fn read_file(fields: td::FileDescriptorProtoFields<'_>) -> prost_types::FileDesc
                 }
             }
             F::Syntax(v) => f.syntax = Some(v.to_string()),
-            F::Service(_) | F::SourceCodeInfo(_) => {
-                unimplemented!("FileDescriptorProto field absent from both fixtures")
+            F::SourceCodeInfo(sci) => {
+                use td::SourceCodeInfoField as S;
+                let info = f.source_code_info.get_or_insert_with(Default::default);
+                for field in sci {
+                    match field.unwrap() {
+                        S::Location(loc) => {
+                            use td::SourceCodeInfoLocationField as L;
+                            let mut l = prost_types::source_code_info::Location::default();
+                            for field in loc {
+                                match field.unwrap() {
+                                    L::Path(iter) => l.path.extend(iter.map(|r| r.unwrap())),
+                                    L::Span(iter) => l.span.extend(iter.map(|r| r.unwrap())),
+                                    L::LeadingComments(v) => {
+                                        l.leading_comments = Some(v.to_string())
+                                    }
+                                    L::TrailingComments(v) => {
+                                        l.trailing_comments = Some(v.to_string())
+                                    }
+                                    L::LeadingDetachedComments(v) => {
+                                        l.leading_detached_comments.push(v.to_string())
+                                    }
+                                }
+                            }
+                            info.location.push(l);
+                        }
+                    }
+                }
+            }
+            F::Service(_) => {
+                unimplemented!("tacky does not generate service definitions; see the module docs")
             }
         }
     }
@@ -499,8 +389,30 @@ fn walk_file(fields: td::FileDescriptorProtoFields<'_>) -> u64 {
                 }
             }
             F::Syntax(v) => add!(v.len()),
-            F::Service(_) | F::SourceCodeInfo(_) => {
-                unimplemented!("FileDescriptorProto field absent from both fixtures")
+            F::SourceCodeInfo(sci) => {
+                use td::SourceCodeInfoField as S;
+                for field in sci {
+                    match field.unwrap() {
+                        S::Location(loc) => {
+                            use td::SourceCodeInfoLocationField as L;
+                            for field in loc {
+                                match field.unwrap() {
+                                    L::Path(iter) | L::Span(iter) => {
+                                        for r in iter {
+                                            add!(r.unwrap());
+                                        }
+                                    }
+                                    L::LeadingComments(v)
+                                    | L::TrailingComments(v)
+                                    | L::LeadingDetachedComments(v) => add!(v.len()),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            F::Service(_) => {
+                unimplemented!("tacky does not generate service definitions; see the module docs")
             }
         }
     }
@@ -683,6 +595,16 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
         "{name}: tacky and prost decode differently"
     );
 
+    // Throughput below is computed on prost's length for every arm, so the arms stay
+    // comparable. The percentage is what tacky's length prefixes cost in bytes over prost's.
+    println!(
+        "{name}: {} files, prost {} B, tacky {} B (+{:.2}%)",
+        set.file.len(),
+        prost_wire.len(),
+        tacky_wire.len(),
+        (tacky_wire.len() as f64 / prost_wire.len() as f64 - 1.0) * 100.0,
+    );
+
     let cap = tacky_wire.len().max(prost_wire.len());
     let mut group = c.benchmark_group(format!("encode_{name}"));
     group.throughput(Throughput::Bytes(prost_wire.len() as u64));
@@ -703,17 +625,6 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
         });
     });
 
-    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
-    // *direction* from the buffer kind.
-    group.bench_function("tacky-slice", |b| {
-        let mut backing = vec![0u8; cap + 1024];
-        b.iter(|| {
-            let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode(tacky::AnyDir::from_mut(&mut sb), &set);
-            black_box(sb.written());
-        });
-    });
-
     // A downward buffer emits fields in the reverse of the order they are written, which is
     // legal, so this is checked by decoding rather than by comparing bytes.
     let mut rev_backing = vec![0u8; cap + 1024];
@@ -730,20 +641,6 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
             let mut rb = tacky::RevBuf::new(&mut backing);
             tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
             black_box(rb.written());
-        });
-    });
-
-    // Handing the result over as an owned, index-0 buffer: the reverse output lives at the
-    // tail, so a `Vec<u8>`-shaped sink forces one compaction.
-    group.bench_function("tacky-rev-owned", |b| {
-        let mut backing = vec![0u8; cap + 1024];
-        let mut out = Vec::with_capacity(cap + 1024);
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
-            out.clear();
-            out.extend_from_slice(rb.written());
-            black_box(out.as_slice());
         });
     });
     // descriptor.proto is proto2, so the C++ runtime never validates its strings
@@ -775,6 +672,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
 fn bench_descriptor_set(c: &mut Criterion) {
     bench_fixture(c, "fds_descriptor_proto", FDS_DESCRIPTOR_PROTO);
     bench_fixture(c, "fds_testing_protos", FDS_TESTING_PROTOS);
+    bench_fixture(c, "fds_registry", FDS_REGISTRY);
 }
 
 criterion_group!(benches, bench_descriptor_set);

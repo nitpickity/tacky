@@ -1,8 +1,9 @@
 # Tacky
 
-A protobuf serializer and deserializer for Rust that gets out of the way of your domain types.
+A [fast](#performance) protobuf serializer and deserializer for Rust that gets out of the way of your domain types.
 
-Note: this is work-in-progress, APIs may change. The basic idea will not.
+AI disclaimer: the concept and implementation are home-grown artisanal code. 
+Benches, tests and docs were expanded upon with Claude Opus 4.8/5 because unlike code, they are not fun to write.
 
 ## Why this exists
 
@@ -124,18 +125,7 @@ Message {
 
 `scm` is the nested schema, so the same struct-literal exhaustiveness check works inside the closure if you want it. Letting the writer own the iteration is what keeps the list in order for every buffer: `RevBuf` fills backwards, so it has to emit the elements back-to-front, and only a call that owns the loop can do that.
 
-When the entries have no single Rust type — several unrelated values that each map to the same protobuf message — write them one at a time instead:
-
-```rust
-schema.events.write_msg(&mut buf, |buf, scm| {
-    scm.name.write(buf, Some(click.label()));
-});
-schema.events.write_msg(&mut buf, |buf, scm| {
-    scm.name.write(buf, Some(&scroll_event.name));
-});
-```
-
-Entries land in call order — except through a downward-growing buffer, where every write prepends, so repeated calls land in reverse call order and it is on you to make them tail-first. `write_single` is the same escape hatch for repeated *scalar* fields, with the same caveat.
+When the entries have no single Rust type, `write_msg` and `write_single` write one at a time instead — see their API docs, and the ordering caveat under [Buffers and write direction](#buffers-and-write-direction).
 
 ## Maps
 
@@ -155,12 +145,6 @@ schema.str_msg.write_msg(&mut buf, "key1", |buf, scm| {
 });
 ```
 
-You can also write individual entries with an explicit `None` value, which is useful for representing deletions in update messages:
-
-```rust
-schema.str_int.write_entry(&mut buf, "deleted_key", None::<i32>);
-```
-
 On the read side, each map entry comes back as a `(key, Option<value>)` tuple:
 
 ```rust
@@ -174,44 +158,63 @@ for field in MsgWithMaps::decode(&buf) {
 }
 ```
 
-The value is `Option` because protobuf technically allows a map entry with a key but no value — in proto3 that means the default value, but tacky gives you explicit presence and lets you decide.
+The value is `Option` because protobuf technically allows a map entry with a key but no value — in proto3 that means the default value, but tacky gives you explicit presence and lets you decide. `write_entry` takes the same `Option`, so you can write a key-only entry deliberately.
 
 ## Performance
 
 Tacky encodes in a single pass. Pre-computed tags and the [tack](#the-tack-primitive) length-patching strategy eliminate the size-calculation pass that prost and similar libraries need for nested messages and packed fields.
 
-Tacky encodes roughly ~2x faster than Prost 0.14 across realistic workloads:
+Encode, measured in one run on an M3 (ARM) across four real-world schemas. `tacky` writes into a `Vec<u8>`; `tacky-rev` into a caller-provided fixed slice, filled backwards, which needs no length placeholders at all — see [Buffers and write direction](#buffers-and-write-direction) for what that buys and what it costs. The C++ column is the fair arm: `cpp-noutf8` for proto3, `cpp` for proto2.
 
-| Benchmark | Description | ARM (M3) | x86 (GitHub CI) |
-| :--- | :--- | ---: | ---: |
-| **Single message** | Mixed fields, ~1.2 KB | **2.2x** | **1.9x** |
-| **Pprof profile** | Nested profiling data, ~8.5 KB | **2.1x** | **2.2x** |
-| **Access log batch** | 100 string-heavy entries, ~30 KB | **2.4x** | **2.0x** |
-| **Repeated strings** | 1000 flat strings, no nesting | **1.5x** | **1.8x** |
+Both ratio columns are for the default forward writer; `tacky-rev`'s own ratio against C++ is in the rightmost column.
 
-The first three benchmarks use realistic proto schemas (nested messages, packed arrays, varied field types). The last isolates the pre-computed tag advantage with no other tricks.
+| Corpus | Size | tacky | tacky-rev | prost | C++ | tacky vs prost | tacky vs C++ | rev vs C++ |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **pprof** — real Go heap profile | 847 KB | 490 µs | 449 | 1314 | 772 | **2.7x** | **1.6x** | **1.7x** |
+| **Descriptor set** — with source info | 126 KB | 48.4 µs | 38.8 | 174 | 63.0 | **3.6x** | **1.3x** | **1.6x** |
+| **Descriptor set** — schemas only | 20 KB | 11.2 µs | 8.9 | 24.5 | 13.5 | **2.2x** | **1.2x** | **1.5x** |
+| **OTLP traces** — 512 spans | 355 KB | 109 µs | 85.5 | 235 | 136 | **2.2x** | **1.3x** | **1.6x** |
+| **OTLP traces** — 200 spans | 145 KB | 42.8 µs | 34.0 | 90.4 | 51.5 | **2.1x** | **1.2x** | **1.5x** |
+| **OTLP logs** — 512 records | 233 KB | 66.8 µs | 48.3 | 120 | 68.2 | **1.8x** | **1.0x** | **1.4x** |
+| **Access log** — 100 entries, map headers | 62 KB | 11.4 µs | 12.3 | 28.7 | 19.2 | **2.5x** | **1.7x** | **1.6x** |
+
+Two things the spread shows, both worth knowing before you believe the good numbers:
+
+**The win tracks length prefixes per byte, not size.** A descriptor set with source info is thousands of tiny messages each carrying two packed `int32` arrays — three length prefixes per ~15 bytes of payload — and that is where the sizing pass costs prost most and tacky nothing. OTLP logs are the opposite: one ~120-byte body per record, so copying dominates and there is barely any prefix work to skip. Hence 3.6x down to 1.8x against prost on the same encoder.
+
+**`tacky-rev` is faster almost everywhere, but it asks for something.** It needs an upper bound on the output size and it constrains how you write repeated fields — see [Buffers and write direction](#buffers-and-write-direction). The access log is where it loses: that corpus is dominated by a scalar-valued `map`, whose entry lengths are computable in advance in *both* directions, so there is no placeholder for a reverse writer to eliminate.
+
+Output is byte-for-byte the same length as prost's on every corpus above; each bench prints both lengths so that stays checked.
+
+How to run these, which arms are a fair comparison, and where the corpora come from: [`testing/benches/README.md`](testing/benches/README.md).
 
 Decoding is roughly on par with prost when materializing into owned structs. Tacky's decode model is zero-copy for strings, bytes, and sub-messages, so real-world decode performance depends on how much copying your application actually needs.
 
-### Reproducing these numbers
+## Buffers and write direction
 
-Against prost you only need `protoc` on `PATH` (`prost-build` shells out to it). If your distro's is too old — Fedora still ships 3.19 — run the C++ script below once and `build.rs` will use the `protoc` it builds instead:
+Writes go through the `WriteBuf` trait, and three buffers implement it:
 
-```bash
-cargo bench -p testing -- '^encode_'
-cargo bench -p testing -- '^decode_'
-```
+| Buffer | Direction | Capacity | Use for |
+| :--- | :--- | :--- | :--- |
+| `Vec<u8>` | forward | grows | the default |
+| `SliceBuf` | forward | fixed | `no_std`, no allocator |
+| `RevBuf` | **backwards** | fixed | the fastest path, when you can bound the output |
 
-Against the official C++ runtime, use the script. It needs no protobuf package at all — it builds its own, `protoc` included — and checks the rest of your toolchain, naming what to install if anything is missing; then builds protobuf from source as **static** libraries into `third_party/protobuf-cpp` (gitignored) — several minutes, first run only:
+Direction is a compile-time property, not a runtime flag — it is an associated type on the buffer plus a `const REVERSE: bool` — so each writer's unused arm folds away and the forward path pays nothing for the reverse one.
 
-```bash
-scripts/bench_cpp.sh                        # all encode groups
-scripts/bench_cpp.sh --bench otlp_traces    # one target
-```
+**Why backwards is faster.** A forward writer meets a nested message's length prefix *before* it knows the length, so it reserves a placeholder and patches it afterwards, widening and memmoving the payload if the guess was too small. A backwards writer runs the body first and prepends the length once it is known: no placeholder, no reserved width, no shift, and always a minimal-width varint. That is where the 1.4–1.7x over the C++ runtime comes from, and it grows with how many length prefixes your messages have per byte of payload.
 
-After that, `build.rs` finds the cache on its own, so plain `cargo bench -p testing --features cpp` is statically linked too. A shared system protobuf also satisfies the probe but understates the C++ side — a stub on every cross-library call, no inlining across it — so don't publish numbers from one. The feature is strict: if no runtime is found the build fails rather than dropping the arms, which also means `--all-features` fails without a C++ toolchain.
+**What `RevBuf` asks of you in return:**
 
-Compare against `cpp-noutf8` for proto3 (the `cpp` arm also validates UTF-8, which tacky doesn't do) and `cpp` for proto2. Never `cpp-cached` — it reuses an already-populated message, which a real producer can't.
+- **An upper bound on the output size.** It cannot grow; exceeding the buffer panics. Over-provisioning costs only address space, and a bounded batch is normal for an exporter, but it is a real requirement. This is also why there is no cold-buffer story for it — you always hand it memory you already own.
+- **The output lives at the tail.** `written()` returns a slice from the middle of your buffer, not from index 0. If a sink demands an owned `Vec` starting at 0, that is one extra copy.
+- **Let the writers own repeated-field iteration.** Elements have to be emitted back-to-front, which only a call that owns the loop can do — so use `write` and `write_msgs` rather than a hand-rolled loop of `write_single`/`write_msg`. Those single-entry escape hatches still work, but through a reverse buffer you must call them tail-first. The iterator must also be double-ended, which rules out a `HashSet`'s (a forward buffer accepts it).
+- **`Display`-based writes are forward-only.** `PbDisplay`, `FmtWriter` and the `io::Write` adapter all stream in chunks, and chunks would land reversed, so they panic on a `RevBuf`. Format into a `String` first if you need this.
+- **Maps gain nothing.** A map entry's length is two scalar lengths, computable in advance, so the forward path needs no placeholder either — there is nothing for the reverse writer to eliminate, and it can come out slower on a map-dominated message. Map entry *order* is unspecified by protobuf, so entries are written in iteration order in both directions; the only visible consequence is that an iterator yielding a duplicate key resolves last-one-wins to the other value than it would forwards.
+
+`SliceBuf` shares the fixed-capacity constraint but nothing else: it appends, so every ordering caveat above is irrelevant to it, and a placeholder that needs widening still works as long as the buffer has room.
+
+Code that has not picked a buffer writes through `AnyDir`, which erases the direction. It asks for double-ended iterators on repeated fields, because the buffer it wraps might turn out to be a `RevBuf`.
 
 ## Deserialization
 
@@ -227,7 +230,7 @@ for field in SimpleMessage::decode(&buf) {
 }
 ```
 
-Fields come back as basic Rust primitives — `&str`, `i32`, `f64`, etc. Mapping those to your domain types is up to you. Only one enum variant lives on the stack at a time, regardless of how many fields the message has. The struct approach that prost and others use can lead to the stack size of the message alone being much larger than the serialized data, and it grows with every field.
+Fields come back as basic Rust primitives — `&str`, `i32`, `f64` — and mapping them to your domain types is up to you. Only one variant is on the stack at a time, however many fields the message has, where a generated struct costs you all of them at once.
 
 ### Repeated fields
 
@@ -258,41 +261,21 @@ for field in Message::decode(&buf) {
 }
 ```
 
-Protobuf permits the same repeated field to appear multiple times in a message — tacky surfaces that faithfully, so the loop above accumulates across all occurrences without any extra bookkeeping.
+Protobuf allows the same repeated field to appear more than once in a message, and the loop above accumulates across every occurrence without extra bookkeeping.
 
-### Mapping to custom types
+### Enums and nested messages
 
-Tacky stops at primitives on purpose: the variant gives you a `&str`, `&[u8]`, or integer, and you decide how it becomes a domain value. Validation, parsing, and enum coercion all happen at the match arm — no separate "generated struct → domain type" pass.
-
-```rust
-match field? {
-    UserField::Name(s) => {
-        user.name = Some(UserName::try_from_str(s)?);
-    }
-    UserField::AccountId(bytes) => {
-        user.account_id = Some(AccountId::from_bytes(bytes.try_into()?));
-    }
-    UserField::CreatedAt(secs) => {
-        user.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
-    }
-    // ...
-}
-```
-
-Generated proto enums come back as a Rust enum that includes an `__Unrecognized(i32)` variant for forward-compatibility, so you can map known values and ignore the rest:
+Proto enums come back as a Rust enum with an extra `__Unrecognized(i32)` variant, so a value added by a newer producer is something you handle rather than something that breaks you:
 
 ```rust
-UserField::Tier(t) => {
-    user.tier = match t {
-        proto::Tier::Free => Some(Tier::Free),
-        proto::Tier::Pro => Some(Tier::Pro),
-        proto::Tier::Enterprise => Some(Tier::Enterprise),
-        proto::Tier::__Unrecognized(_) => None,
-    };
-}
+UserField::Tier(t) => user.tier = match t {
+    proto::Tier::Free => Some(Tier::Free),
+    proto::Tier::Pro => Some(Tier::Pro),
+    proto::Tier::__Unrecognized(_) => None,
+},
 ```
 
-Nested messages give you a sub-decoder you iterate the same way, so you can build up a domain object field-by-field without ever materializing the proto's intermediate struct.
+Nested messages give you a sub-decoder you iterate exactly like the outer one, so a domain object gets built field-by-field the whole way down, without the proto's intermediate struct ever existing.
 
 ## Limitations
 
@@ -350,16 +333,14 @@ impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
 
 Protobuf's wire format requires the byte length of nested messages and packed repeated fields to be written *before* their contents. The standard approach is two passes: iterate once to calculate the length, then iterate again to write the data.
 
-Tacky uses a different strategy. The `Tack` struct reserves a fixed-width placeholder (3 bytes by default, enough for messages up to ~2MB), lets you write data past it, and then patches the real length in when it's done:
+Tacky uses a different strategy. The `Tack` struct reserves a byte, lets you write data past it, and then patches the real length in when it's done. if the length if greater than 1 byte can fit (128 bytes), you pay a memmove of that data to extend the prefix space. While this sounds wasteful, memmove is still order of magnitude faster than the serialization work, thus the good performance regardless.
 
 ```
 Buffer before Tack:  [... tag]
-After Tack::new():   [... tag | 00 00 00 ]  ← 3-byte placeholder
-After writing data:  [... tag | 00 00 00 | actual data bytes... ]
+After Tack::new():   [... tag | 00 ]  ← 1-byte placeholder
+After writing data:  [... tag | 00 | actual data bytes... ]
 After Tack closes:   [... tag | len len len | actual data bytes... ]
 ```
-
-The placeholder is a fixed-width varint — padded with continuation bits so that any length up to 2^21 fits without moving data. If the data happens to exceed that (the cold path), Tack shifts the data right and expands the length field. This almost never happens, and is marked `#[cold]` so the optimizer keeps it out of the hot path.
 
 `Tack` implements `Drop`, so the length is patched automatically when it goes out of scope. This is what makes the nested message closure API work — the caller never has to finalize anything:
 

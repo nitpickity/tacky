@@ -82,19 +82,25 @@ fn main() {
         &format!("{out_dir}/tacky_descriptor.rs"),
     );
 
-    prost_build::compile_protos(
-        &[
-            simple_file,
-            proto3_file,
-            pprof_file,
-            accesslog_file,
-            m1p2_file,
-            m1p3_file,
-            dataset_file,
-        ],
-        &["."],
-    )
-    .unwrap();
+    // `btree_map` for the access log's headers: prost defaults a map field to `HashMap`,
+    // and then its encode arm is partly measuring hash iteration while tacky's writes
+    // from an ordered container. Both sides iterate a `BTreeMap` this way, and the
+    // output order is stable run to run.
+    prost_build::Config::new()
+        .btree_map(["accesslog.Entry.request_headers"])
+        .compile_protos(
+            &[
+                simple_file,
+                proto3_file,
+                pprof_file,
+                accesslog_file,
+                m1p2_file,
+                m1p3_file,
+                dataset_file,
+            ],
+            &["."],
+        )
+        .unwrap();
 
     // OTLP traces, for `benches/otlp_traces.rs`. Vendored from
     // open-telemetry/opentelemetry-proto tag v1.3.2, keeping the upstream
@@ -104,6 +110,8 @@ fn main() {
         "protos/opentelemetry/proto/resource/v1/resource.proto",
         "protos/opentelemetry/proto/trace/v1/trace.proto",
         "protos/opentelemetry/proto/collector/trace/v1/trace_service.proto",
+        "protos/opentelemetry/proto/logs/v1/logs.proto",
+        "protos/opentelemetry/proto/collector/logs/v1/logs_service.proto",
     ];
     for f in otlp {
         println!("cargo:rerun-if-changed={f}");
@@ -117,6 +125,13 @@ fn main() {
     tacky_build::write_proto_with_includes(
         otlp[3],
         &format!("{out_dir}/tacky_otlp.rs"),
+        &[protos_root.to_str().unwrap()],
+    );
+    // The logs signal, for `benches/otlp_logs.rs`. Same tree, same tag; a separate
+    // generated module because the two collector services share only common/resource.
+    tacky_build::write_proto_with_includes(
+        otlp[5],
+        &format!("{out_dir}/tacky_otlp_logs.rs"),
         &[protos_root.to_str().unwrap()],
     );
     // prost spreads one module per proto package and cross-references them with
@@ -144,6 +159,8 @@ fn main() {
             otlp[1],
             otlp[2],
             otlp[3],
+            otlp[4],
+            otlp[5],
         ],
         // proto3 only: proto2 schemas (simple_message, benchmark_message1_proto2,
         // descriptor) never hit `VerifyUtf8String`, so their `-cached` arm already
@@ -156,6 +173,8 @@ fn main() {
             otlp[1],
             otlp[2],
             otlp[3],
+            otlp[4],
+            otlp[5],
         ],
     );
 }
@@ -287,7 +306,10 @@ fn build_cpp(out_dir: &str, protos: &[&str], noutf8: &[&str]) {
     // The pkg-config crate emits the link directives itself. `statik` is what pulls in the
     // whole abseil dependency graph, in link order.
     if let Some(p) = &prefix {
-        std::env::set_var("PKG_CONFIG_PATH", format!("{p}/lib/pkgconfig:{p}/lib64/pkgconfig"));
+        std::env::set_var(
+            "PKG_CONFIG_PATH",
+            format!("{p}/lib/pkgconfig:{p}/lib64/pkgconfig"),
+        );
     }
     let protobuf = pkg_config::Config::new()
         .statik(prefix.is_some())

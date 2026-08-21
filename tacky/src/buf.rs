@@ -65,6 +65,24 @@ pub trait WriteBuf {
         self.len() == 0
     }
 
+    /// Reserves `n` contiguous bytes to be filled in **wire order**, or `None` if this
+    /// buffer cannot hand out such a window.
+    ///
+    /// Only a downward-growing buffer says yes. Its backing store is already initialised,
+    /// and prepending a whole block leaves the bytes *inside* the block in order — so a
+    /// caller that knows an entire self-delimiting run up front can write it forwards and
+    /// skip the mirrored ordering [`WriteBuf::REVERSE`] otherwise forces. Wrap the window in
+    /// a [`SliceBuf`] and the forward code path works verbatim.
+    ///
+    /// Forward buffers return `None`: they have nothing to gain, and a window over `Vec`'s
+    /// uninitialised capacity would need `MaybeUninit` to be sound.
+    ///
+    /// Only useful where the total size is known before writing — a scalar map entry, say.
+    /// A nested message's length is not, which is exactly why reverse wins there instead.
+    fn claim_block(&mut self, _n: usize) -> Option<&mut [u8]> {
+        None
+    }
+
     /// Appends a base-128 varint. The default is the byte-at-a-time loop, which is right
     /// for `Vec` (`push` is a compare and a store) but leaves a cursor buffer paying its
     /// bounds check per byte — see [`SliceBuf`]'s override. [`RevBuf`] must override it for
@@ -336,6 +354,10 @@ impl<B: WriteBuf> WriteBuf for AnyDir<B> {
         self.0.copy_within(src, dest);
     }
     #[inline]
+    fn claim_block(&mut self, n: usize) -> Option<&mut [u8]> {
+        self.0.claim_block(n)
+    }
+    #[inline]
     fn put_varint(&mut self, value: u64) {
         self.0.put_varint(value);
     }
@@ -346,6 +368,53 @@ impl<B: WriteBuf> WriteBuf for AnyDir<B> {
     #[inline]
     fn put_len_delimited(&mut self, payload: &[u8]) {
         self.0.put_len_delimited(payload);
+    }
+}
+
+/// Longest copy the [`copy_small`] ladder handles. 48 is exactly how far its
+/// three-overlapping-pairs form reaches; see that function and the note about the failed
+/// cap-64 attempt.
+pub(crate) const SMALL_COPY_MAX: usize = 48;
+
+/// Copies `n` bytes with overlapping fixed-width stores: no call, no loop, no branch
+/// between the stores of a given width class.
+///
+/// This is the whole reason a short string field does not pay for an out-of-line `memcpy`,
+/// which costs ~4.5 ns of call overhead — real money when the corpora are wall-to-wall
+/// 4-64 byte strings. Every buffer type routes its short copies through here, so the three
+/// impls cannot drift.
+///
+/// # Safety
+///
+/// `n` must be in `1..=SMALL_COPY_MAX`, `dst` must be valid for writes of `n` bytes, and
+/// `src` valid for reads of `n`. Every load and store lands inside `[0, n)`, so nothing
+/// outside the caller's `n` bytes is read or written — that is what lets a fixed-capacity
+/// buffer use this after claiming exactly `n`.
+#[inline(always)]
+pub(crate) unsafe fn copy_small(dst: *mut u8, src: *const u8, n: usize) {
+    debug_assert!(n >= 1 && n <= SMALL_COPY_MAX);
+    if n >= 16 {
+        // Three overlapping 16-byte pairs, branchless. Ends cover [0,16) and [n-16,n),
+        // middle closes the gap. 48 is the reach of this form (n/2-8 <= 16 and
+        // n/2+8 >= n-16) and n >= 16 keeps it in bounds. Redundant below 32, still
+        // unconditional: cheaper than a branch.
+        let mid = n / 2 - 8;
+        (dst as *mut u128).write_unaligned((src as *const u128).read_unaligned());
+        (dst.add(mid) as *mut u128).write_unaligned((src.add(mid) as *const u128).read_unaligned());
+        (dst.add(n - 16) as *mut u128)
+            .write_unaligned((src.add(n - 16) as *const u128).read_unaligned());
+    } else if n >= 8 {
+        (dst as *mut u64).write_unaligned((src as *const u64).read_unaligned());
+        (dst.add(n - 8) as *mut u64)
+            .write_unaligned((src.add(n - 8) as *const u64).read_unaligned());
+    } else if n >= 4 {
+        (dst as *mut u32).write_unaligned((src as *const u32).read_unaligned());
+        (dst.add(n - 4) as *mut u32)
+            .write_unaligned((src.add(n - 4) as *const u32).read_unaligned());
+    } else {
+        *dst = *src;
+        *dst.add(n / 2) = *src.add(n / 2);
+        *dst.add(n - 1) = *src.add(n - 1);
     }
 }
 
@@ -370,39 +439,16 @@ mod alloc_impls {
             // Overlapping fixed-width stores for short slices, skipping the out-of-line
             // `memcpy` call `extend_from_slice` lowers to. Worth 5-10% on encode.
             let n = src.len();
-            if n == 0 || n > 48 {
+            if n == 0 || n > SMALL_COPY_MAX {
                 self.extend_from_slice(src);
                 return;
             }
             self.reserve(n);
             let len = self.len();
+            // SAFETY: `reserve` guarantees `n` writable bytes at `len`, `n` is in range, and
+            // `copy_small` stays inside them.
             unsafe {
-                let d = self.as_mut_ptr().add(len);
-                let s = src.as_ptr();
-                if n >= 16 {
-                    // Three overlapping 16-byte pairs, branchless. Ends cover [0,16) and
-                    // [n-16,n), middle closes the gap. 48 is the reach of this form
-                    // (n/2-8 <= 16 and n/2+8 >= n-16) and n >= 16 keeps it in bounds.
-                    // Redundant below 32, still unconditional: cheaper than a branch.
-                    let mid = n / 2 - 8;
-                    (d as *mut u128).write_unaligned((s as *const u128).read_unaligned());
-                    (d.add(mid) as *mut u128)
-                        .write_unaligned((s.add(mid) as *const u128).read_unaligned());
-                    (d.add(n - 16) as *mut u128)
-                        .write_unaligned((s.add(n - 16) as *const u128).read_unaligned());
-                } else if n >= 8 {
-                    (d as *mut u64).write_unaligned((s as *const u64).read_unaligned());
-                    (d.add(n - 8) as *mut u64)
-                        .write_unaligned((s.add(n - 8) as *const u64).read_unaligned());
-                } else if n >= 4 {
-                    (d as *mut u32).write_unaligned((s as *const u32).read_unaligned());
-                    (d.add(n - 4) as *mut u32)
-                        .write_unaligned((s.add(n - 4) as *const u32).read_unaligned());
-                } else {
-                    *d = *s;
-                    *d.add(n / 2) = *s.add(n / 2);
-                    *d.add(n - 1) = *s.add(n - 1);
-                }
+                copy_small(self.as_mut_ptr().add(len), src.as_ptr(), n);
                 self.set_len(len + n);
             }
         }
@@ -532,7 +578,24 @@ impl WriteBuf for RevBuf<'_> {
     #[inline]
     fn put_slice(&mut self, src: &[u8]) {
         // One block prepend: the bytes keep their order, only the block moves.
-        self.claim(src.len()).copy_from_slice(src);
+        //
+        // The length test comes *first*, before `claim` touches `pos`, and the short path then
+        // advances the cursor and stores through a raw pointer rather than building the
+        // `&mut [u8]` `claim` returns. That order is load-bearing: putting `claim`'s assert and
+        // cursor update ahead of the length branch is measurably worse on varint-heavy inputs,
+        // where most calls exceed the cap and take the branch for nothing. `SliceBuf` has the
+        // same shape — it writes its cursor after the copy.
+        let n = src.len();
+        if n == 0 || n > SMALL_COPY_MAX {
+            self.claim(n).copy_from_slice(src);
+            return;
+        }
+        assert!(self.pos >= n, "RevBuf exhausted");
+        self.pos -= n;
+        // SAFETY: as `claim` — `pos + n` is the old `pos`, which is `<= buf.len()` for the
+        // buffer's whole life, and the assert is what keeps the subtraction from wrapping.
+        // That is `n` writable bytes at `pos`, which is all `copy_small` requires.
+        unsafe { copy_small(self.buf.as_mut_ptr().add(self.pos), src.as_ptr(), n) };
     }
     #[inline]
     fn len(&self) -> usize {
@@ -542,6 +605,10 @@ impl WriteBuf for RevBuf<'_> {
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let pos = self.pos;
         &mut self.buf[pos..]
+    }
+    #[inline]
+    fn claim_block(&mut self, n: usize) -> Option<&mut [u8]> {
+        Some(self.claim(n))
     }
     fn grow(&mut self, _additional: usize) {
         panic!("RevBuf has a fixed capacity and cannot grow")
@@ -752,14 +819,19 @@ impl WriteBuf for SliceBuf<'_> {
     }
     #[inline]
     fn put_slice(&mut self, src: &[u8]) {
-        let end = self.pos + src.len();
+        let n = src.len();
+        let end = self.pos + n;
         assert!(end <= self.buf.len(), "SliceBuf overflow");
         // SAFETY: `pos <= end <= buf.len()` — the first from the invariant that `pos` only
-        // ever advances to a previously checked `end`, the second from the assert.
+        // ever advances to a previously checked `end`, the second from the assert. That is
+        // `n` writable bytes at `pos`, which is `copy_small`'s whole requirement.
         unsafe {
-            self.buf
-                .get_unchecked_mut(self.pos..end)
-                .copy_from_slice(src)
+            let dst = self.buf.get_unchecked_mut(self.pos..end);
+            if n == 0 || n > SMALL_COPY_MAX {
+                dst.copy_from_slice(src);
+            } else {
+                copy_small(dst.as_mut_ptr(), src.as_ptr(), n);
+            }
         };
         self.pos = end;
     }
@@ -880,6 +952,51 @@ mod tests {
             assert_eq!(buf.len(), 6 + n, "len wrong at n={n}");
             assert_eq!(&buf[..6], b"prefix", "prefix clobbered at n={n}");
             assert_eq!(&buf[6..], &src[..], "payload wrong at n={n}");
+        }
+    }
+
+    /// Every buffer type routes short copies through the same ladder, so every buffer type
+    /// gets the same all-lengths sweep. Both cases write next to existing bytes on purpose:
+    /// overlapping stores make an off-by-one offset or a write past `n` invisible to a
+    /// check that only compares the payload.
+    #[test]
+    fn put_slice_ladder_all_lengths_slice_and_rev() {
+        for n in 0..=80usize {
+            let src: Vec<u8> = (0..n).map(|i| (i as u8) ^ 0x5A).collect();
+
+            // Forward into a fixed slice: payload lands after a prefix, and the bytes past
+            // `end` must be untouched.
+            let mut backing = [0xCCu8; 200];
+            let mut sb = SliceBuf::new(&mut backing);
+            sb.put_slice(b"prefix");
+            sb.put_slice(&src);
+            let written = sb.written().to_vec();
+            assert_eq!(written.len(), 6 + n, "SliceBuf len wrong at n={n}");
+            assert_eq!(
+                &written[..6],
+                b"prefix",
+                "SliceBuf prefix clobbered at n={n}"
+            );
+            assert_eq!(&written[6..], &src[..], "SliceBuf payload wrong at n={n}");
+            assert!(
+                backing[6 + n..].iter().all(|&b| b == 0xCC),
+                "SliceBuf wrote past n={n}"
+            );
+
+            // Reverse prepends, so the payload lands *before* the earlier write and the
+            // bytes below `pos` are the ones that must stay untouched.
+            let mut backing = [0xCCu8; 200];
+            let mut rb = RevBuf::new(&mut backing);
+            rb.put_slice(b"suffix");
+            rb.put_slice(&src);
+            let written = rb.written().to_vec();
+            assert_eq!(written.len(), 6 + n, "RevBuf len wrong at n={n}");
+            assert_eq!(&written[..n], &src[..], "RevBuf payload wrong at n={n}");
+            assert_eq!(&written[n..], b"suffix", "RevBuf suffix clobbered at n={n}");
+            assert!(
+                backing[..200 - (6 + n)].iter().all(|&b| b == 0xCC),
+                "RevBuf wrote below pos at n={n}"
+            );
         }
     }
 

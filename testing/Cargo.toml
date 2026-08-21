@@ -45,3 +45,7 @@ harness = false
 [[bench]]
 name = "otlp_traces"
 harness = false
+
+[[bench]]
+name = "otlp_logs"
+harness = false

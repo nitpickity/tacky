@@ -4,9 +4,11 @@
 //! prost and C++ messages are pre-built so we measure pure encoding/decoding
 //! speed, not allocation.
 //!
-//! Wire output is semantically identical everywhere, but not byte-identical:
-//! tacky pads nested-message length prefixes to a fixed width, so its output can
-//! be a little larger.
+//! Wire output is semantically identical everywhere. At the default `Tack` width a
+//! placeholder is *grown* rather than padded, so tacky's byte count matches prost's exactly;
+//! each bench prints the two lengths so that stays checked rather than assumed. Byte-level
+//! equality is still not assertable against a reverse writer, which emits fields in the
+//! opposite order — legal, and checked by decoding instead.
 //!
 //! `--features cpp` adds arms for the official C++ protobuf runtime; run
 //! `scripts/bench_cpp.sh`, which sets it up statically. Each C++ workload gets up to four
@@ -45,6 +47,13 @@ mod tacky_accesslog {
 mod prost_accesslog {
     include!(concat!(env!("OUT_DIR"), "/accesslog.rs"));
 }
+
+// Shared with `benches/descriptor_set.rs`, which measures this writer on its own. Here it
+// is one of the three unlike message types in `bench_encode_rotating`.
+#[path = "common/fds_writer.rs"]
+mod fds_writer;
+
+const FDS_REGISTRY: &[u8] = include_bytes!("../data/registry.fds");
 
 use prost_proto::{
     MixedLargeMessage as PMixedLargeMessage, MixedSmallMessage as PMixedSmallMessage,
@@ -232,17 +241,6 @@ fn bench_encode_realistic(c: &mut Criterion) {
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
 
-    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
-    // *direction* from the buffer kind.
-    group.bench_function("tacky-slice", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        b.iter(|| {
-            let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut sb));
-            black_box(sb.written());
-        });
-    });
-
     // Field order differs — a downward buffer emits fields in the reverse of the order they
     // are written, which is legal — so this is checked by decoding, not by comparing bytes.
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
@@ -260,20 +258,6 @@ fn bench_encode_realistic(c: &mut Criterion) {
             let mut rb = tacky::RevBuf::new(&mut backing);
             tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
             black_box(rb.written());
-        });
-    });
-
-    // What handing the result over as an owned, index-0 buffer costs: the reverse output
-    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
-    group.bench_function("tacky-rev-owned", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        let mut out = Vec::with_capacity(size as usize + 1024);
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
-            out.clear();
-            out.extend_from_slice(rb.written());
-            black_box(out.as_slice());
         });
     });
     #[cfg(feature = "cpp")]
@@ -606,240 +590,132 @@ fn bench_decode_repeated_strings(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
-// Pprof: realistic profiling data (~10KB+ messages)
+// Pprof: a real profile, not a synthesised one
 // ---------------------------------------------------------------------------
 
-const NUM_FUNCTIONS: usize = 30;
-const NUM_LOCATIONS: usize = 50;
-const NUM_SAMPLES: usize = 200;
-const LOCS_PER_SAMPLE: usize = 4;
+/// A real Go heap profile, checked in ungzipped (`testing/data/pprof_go_heap.pb`).
+///
+/// Vendored from `grafana/pyroscope`, `pkg/pprof/testdata/heap`, which is
+/// AGPL-3.0-licensed testdata; it is used here as data only, not linked, and stays
+/// under its own licence. Refresh instructions are in `scripts/gen_bench_fixtures.sh`.
+///
+/// Measured shape: 847 KB, 4 `sample_type`s and 4 values per sample, 11,951 samples
+/// at a mean stack depth of **17.5** (median 19, max 32), 4,676 locations averaging
+/// 1.22 `Line`s each (inlined frames, max 7) and all carrying an `address`, 2,405
+/// functions, one mapping, and a 3,006-entry string table of 155 KB — mean symbol
+/// length 52 B, max 117 B. Every sample carries exactly one numeric `bytes` label,
+/// which is what Go's heap profiler emits.
+///
+/// Two things that follow from the size and are worth stating rather than implying:
+/// 847 KB does not fit in the ~1.25 MB per-core L2 of the CI runners alongside an
+/// output buffer, so this is not a cache-resident best case; and `runtime/pprof`
+/// gzips its output, so proto encoding is a minority of the cost of writing a real
+/// profile. What it is *not* a minority of is interesting on its own: Go's
+/// `profileBuilder` hand-writes the wire format field by field rather than
+/// populating a `Profile` message, because materialising one is too expensive.
+/// That is tacky's premise, shipped in the Go standard library.
+const PPROF_FIXTURE: &[u8] = include_bytes!("../data/pprof_go_heap.pb");
 
-fn pprof_string_table() -> Vec<String> {
-    let mut st = Vec::with_capacity(7 + NUM_FUNCTIONS + 5);
-    st.push(String::new()); // 0: required empty
-    st.push("cpu".into()); // 1
-    st.push("nanoseconds".into()); // 2
-    st.push("thread".into()); // 3
-    st.push("id".into()); // 4
-    st.push("/usr/bin/myapp".into()); // 5: mapping filename
-    st.push("abc123def456".into()); // 6: build id
-    for i in 0..NUM_FUNCTIONS {
-        st.push(format!("github.com/myorg/myapp/pkg.Function{i}"));
-    }
-    for i in 0..5 {
-        st.push(format!("/home/user/src/myapp/pkg/file{i}.go"));
-    }
-    st
+fn prost_pprof_profile() -> prost_pprof::Profile {
+    prost_pprof::Profile::decode(PPROF_FIXTURE).expect("vendored pprof fixture does not decode")
 }
 
-/// Pre-computed data for the pprof encode benchmark, built once outside the hot loop.
-struct PprofEncodeData {
-    /// Per-sample location_id arrays, pre-computed.
-    sample_locs: Vec<[u64; LOCS_PER_SAMPLE]>,
-    /// Per-sample value arrays, pre-computed.
-    sample_values: Vec<[i64; 2]>,
-    /// String table as owned strings (built once).
-    string_table: Vec<String>,
-}
-
-fn pprof_encode_data() -> PprofEncodeData {
-    let sample_locs: Vec<[u64; LOCS_PER_SAMPLE]> = (0..NUM_SAMPLES)
-        .map(|i| std::array::from_fn(|j| ((i * LOCS_PER_SAMPLE + j) % NUM_LOCATIONS + 1) as u64))
-        .collect();
-    let sample_values: Vec<[i64; 2]> = (0..NUM_SAMPLES)
-        .map(|i| [(i as i64 + 1) * 10_000_000, 1])
-        .collect();
-    PprofEncodeData {
-        sample_locs,
-        sample_values,
-        string_table: pprof_string_table(),
-    }
-}
-
-fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, data: &PprofEncodeData) {
+/// Encodes a `Profile` from prost's owned structs, so both arms start from the same
+/// value and only the writer differs. Fields go out in ascending tag order, which is
+/// the order prost emits.
+fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, p: &prost_pprof::Profile) {
     use tacky_pprof::perftools::profiles::Profile;
 
     let s = Profile::schema();
 
-    // sample_type: cpu / nanoseconds
-    s.sample_type.write_msg(buf, |buf, vt| {
-        vt.r#type.write(buf, 1i64);
-        vt.unit.write(buf, 2i64);
+    s.sample_type.write_msgs(buf, &p.sample_type, |buf, vt, t| {
+        vt.r#type.write(buf, t.r#type);
+        vt.unit.write(buf, t.unit);
     });
 
-    s.sample.write_msgs(buf, 0..NUM_SAMPLES, |buf, sample, i| {
-        sample.location_id.write(buf, &data.sample_locs[i]);
-        sample.value.write(buf, &data.sample_values[i]);
-        sample.label.write_msg(buf, |buf, l| {
-            l.key.write(buf, 3i64);
-            l.num.write(buf, (i % 8) as i64);
-            l.num_unit.write(buf, 4i64);
+    s.sample.write_msgs(buf, &p.sample, |buf, sample, sm| {
+        sample.location_id.write(buf, &sm.location_id);
+        sample.value.write(buf, &sm.value);
+        sample.label.write_msgs(buf, &sm.label, |buf, l, lb| {
+            l.key.write(buf, lb.key);
+            l.str.write(buf, lb.str);
+            l.num.write(buf, lb.num);
+            l.num_unit.write(buf, lb.num_unit);
         });
     });
 
-    s.mapping.write_msg(buf, |buf, m| {
-        m.id.write(buf, 1u64);
-        m.memory_start.write(buf, 0x400000u64);
-        m.memory_limit.write(buf, 0x800000u64);
-        m.file_offset.write(buf, 0u64); // won't be written (proto3 default)
-        m.filename.write(buf, 5i64);
-        m.build_id.write(buf, 6i64);
-        m.has_functions.write(buf, true);
-        m.has_filenames.write(buf, true);
-        m.has_line_numbers.write(buf, true);
-        m.has_inline_frames.write(buf, true);
+    s.mapping.write_msgs(buf, &p.mapping, |buf, m, mp| {
+        m.id.write(buf, mp.id);
+        m.memory_start.write(buf, mp.memory_start);
+        m.memory_limit.write(buf, mp.memory_limit);
+        m.file_offset.write(buf, mp.file_offset);
+        m.filename.write(buf, mp.filename);
+        m.build_id.write(buf, mp.build_id);
+        m.has_functions.write(buf, mp.has_functions);
+        m.has_filenames.write(buf, mp.has_filenames);
+        m.has_line_numbers.write(buf, mp.has_line_numbers);
+        m.has_inline_frames.write(buf, mp.has_inline_frames);
     });
 
-    s.location
-        .write_msgs(buf, 1..=NUM_LOCATIONS, |buf, loc, i| {
-            loc.id.write(buf, i as u64);
-            loc.mapping_id.write(buf, 1u64);
-            loc.address.write(buf, (0x400000 + i * 16) as u64);
-            // One `Line` per location, two on every third — as a slice, so the writer controls
-            // element order for both directions.
-            let base = ((i % NUM_FUNCTIONS + 1) as u64, (i * 10) as i64);
-            let extra = (((i + 1) % NUM_FUNCTIONS + 1) as u64, (i * 10 + 5) as i64);
-            let pair = [base, extra];
-            let single = [base];
-            let lines: &[(u64, i64)] = if i % 3 == 0 { &pair } else { &single };
-            loc.line
-                .write_msgs(buf, lines, |buf, line, (function_id, no)| {
-                    line.function_id.write(buf, *function_id);
-                    line.line.write(buf, *no);
-                });
+    s.location.write_msgs(buf, &p.location, |buf, loc, lc| {
+        loc.id.write(buf, lc.id);
+        loc.mapping_id.write(buf, lc.mapping_id);
+        loc.address.write(buf, lc.address);
+        loc.line.write_msgs(buf, &lc.line, |buf, line, ln| {
+            line.function_id.write(buf, ln.function_id);
+            line.line.write(buf, ln.line);
+            line.column.write(buf, ln.column);
         });
+        loc.is_folded.write(buf, lc.is_folded);
+    });
 
-    s.function.write_msgs(buf, 1..=NUM_FUNCTIONS, |buf, f, i| {
-        f.id.write(buf, i as u64);
-        f.name.write(buf, (7 + i - 1) as i64);
-        f.system_name.write(buf, (7 + i - 1) as i64);
-        f.filename
-            .write(buf, (7 + NUM_FUNCTIONS + (i - 1) % 5) as i64);
-        f.start_line.write(buf, (i * 100) as i64);
+    s.function.write_msgs(buf, &p.function, |buf, f, fun| {
+        f.id.write(buf, fun.id);
+        f.name.write(buf, fun.name);
+        f.system_name.write(buf, fun.system_name);
+        f.filename.write(buf, fun.filename);
+        f.start_line.write(buf, fun.start_line);
     });
 
     // One call with the whole table rather than one call per string: the repeated writer
     // owns element order, which is what a downward-growing buffer needs.
     s.string_table
-        .write(buf, data.string_table.iter().map(|st| st.as_str()));
+        .write(buf, p.string_table.iter().map(|st| st.as_str()));
 
-    s.time_nanos.write(buf, 1_678_886_400_000_000_000i64);
-    s.duration_nanos.write(buf, 30_000_000_000i64);
-    s.period_type.write_msg(buf, |buf, vt| {
-        vt.r#type.write(buf, 1i64);
-        vt.unit.write(buf, 2i64);
-    });
-    s.period.write(buf, 10_000_000i64);
-}
-
-fn prost_pprof_profile() -> prost_pprof::Profile {
-    let strings = pprof_string_table();
-
-    let sample_type = vec![prost_pprof::ValueType { r#type: 1, unit: 2 }];
-
-    let sample: Vec<prost_pprof::Sample> = (0..NUM_SAMPLES)
-        .map(|i| {
-            let location_id: Vec<u64> = (0..LOCS_PER_SAMPLE)
-                .map(|j| ((i * LOCS_PER_SAMPLE + j) % NUM_LOCATIONS + 1) as u64)
-                .collect();
-            prost_pprof::Sample {
-                location_id,
-                value: vec![(i as i64 + 1) * 10_000_000, 1],
-                label: vec![prost_pprof::Label {
-                    key: 3,
-                    str: 0,
-                    num: (i % 8) as i64,
-                    num_unit: 4,
-                }],
-            }
-        })
-        .collect();
-
-    let mapping = vec![prost_pprof::Mapping {
-        id: 1,
-        memory_start: 0x400000,
-        memory_limit: 0x800000,
-        file_offset: 0,
-        filename: 5,
-        build_id: 6,
-        has_functions: true,
-        has_filenames: true,
-        has_line_numbers: true,
-        has_inline_frames: true,
-    }];
-
-    let location: Vec<prost_pprof::Location> = (1..=NUM_LOCATIONS)
-        .map(|i| {
-            let mut lines = vec![prost_pprof::Line {
-                function_id: (i % NUM_FUNCTIONS + 1) as u64,
-                line: (i * 10) as i64,
-                column: 0,
-            }];
-            if i % 3 == 0 {
-                lines.push(prost_pprof::Line {
-                    function_id: ((i + 1) % NUM_FUNCTIONS + 1) as u64,
-                    line: (i * 10 + 5) as i64,
-                    column: 0,
-                });
-            }
-            prost_pprof::Location {
-                id: i as u64,
-                mapping_id: 1,
-                address: (0x400000 + i * 16) as u64,
-                line: lines,
-                is_folded: false,
-            }
-        })
-        .collect();
-
-    let function: Vec<prost_pprof::Function> = (1..=NUM_FUNCTIONS)
-        .map(|i| prost_pprof::Function {
-            id: i as u64,
-            name: (7 + i - 1) as i64,
-            system_name: (7 + i - 1) as i64,
-            filename: (7 + NUM_FUNCTIONS + (i - 1) % 5) as i64,
-            start_line: (i * 100) as i64,
-        })
-        .collect();
-
-    prost_pprof::Profile {
-        sample_type,
-        sample,
-        mapping,
-        location,
-        function,
-        string_table: strings,
-        drop_frames: 0,
-        keep_frames: 0,
-        time_nanos: 1_678_886_400_000_000_000,
-        duration_nanos: 30_000_000_000,
-        period_type: Some(prost_pprof::ValueType { r#type: 1, unit: 2 }),
-        period: 10_000_000,
-        comment: vec![],
-        default_sample_type: 0,
-        doc_url: 0,
+    s.drop_frames.write(buf, p.drop_frames);
+    s.keep_frames.write(buf, p.keep_frames);
+    s.time_nanos.write(buf, p.time_nanos);
+    s.duration_nanos.write(buf, p.duration_nanos);
+    if let Some(pt) = &p.period_type {
+        s.period_type.write_msg(buf, |buf, vt| {
+            vt.r#type.write(buf, pt.r#type);
+            vt.unit.write(buf, pt.unit);
+        });
     }
+    s.period.write(buf, p.period);
+    s.comment.write(buf, &p.comment);
+    s.default_sample_type.write(buf, p.default_sample_type);
+    s.doc_url.write(buf, p.doc_url);
 }
 
 fn bench_encode_pprof(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode_pprof");
 
-    let data = pprof_encode_data();
-    let mut ref_buf = Vec::with_capacity(16384);
-    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut ref_buf), &data);
+    let prost_msg = prost_pprof_profile();
+    let mut ref_buf = Vec::with_capacity(PPROF_FIXTURE.len() + 4096);
+    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut ref_buf), &prost_msg);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut buf), &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut buf), &prost_msg);
             black_box(buf.as_slice());
             buf.clear();
         });
     });
 
-    let prost_msg = prost_pprof_profile();
     group.bench_function("prost", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
@@ -854,13 +730,17 @@ fn bench_encode_pprof(c: &mut Criterion) {
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
 
-    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
-    // *direction* from the buffer kind.
+    // This group is the single home for the two buffer diagnostics, because they report the
+    // same thing on every corpus and 847 KB is where they report it most clearly.
+    //
+    // Forward into a fixed slice, so `tacky-slice` vs `tacky-rev` isolates the write
+    // *direction* from the buffer kind, and `tacky-slice` vs `tacky` isolates the buffer kind
+    // from everything else.
     group.bench_function("tacky-slice", |b| {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut sb), &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut sb), &prost_msg);
             black_box(sb.written());
         });
     });
@@ -870,7 +750,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
     let mut rev_backing = vec![0u8; size as usize + 1024];
     let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
+    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
     assert_eq!(
         prost_pprof::Profile::decode(rb.written()).unwrap(),
         prost_msg,
@@ -880,7 +760,7 @@ fn bench_encode_pprof(c: &mut Criterion) {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
             black_box(rb.written());
         });
     });
@@ -892,14 +772,12 @@ fn bench_encode_pprof(c: &mut Criterion) {
         let mut out = Vec::with_capacity(size as usize + 1024);
         b.iter(|| {
             let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &data);
+            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
             out.clear();
             out.extend_from_slice(rb.written());
             black_box(out.as_slice());
         });
     });
-    #[cfg(feature = "cpp")]
-    bench_cpp_arms(&mut group, "cpp", cpp::PPROF, &prost_wire);
     #[cfg(feature = "cpp")]
     bench_cpp_arms(&mut group, "cpp-noutf8", cpp::PPROF_NO_UTF8, &prost_wire);
 
@@ -1159,14 +1037,15 @@ fn tacky_walk_pprof(wire: &[u8]) -> u64 {
 fn bench_decode_pprof(c: &mut Criterion) {
     let mut group = c.benchmark_group("decode_pprof");
 
-    // Use prost-encoded bytes so both decoders parse identical packed data
-    let prost_msg = prost_pprof_profile();
-    let wire = prost_msg.encode_to_vec();
+    // The fixture's own bytes, as Go wrote them, rather than a prost re-encoding: the
+    // field order and packing choices of the real producer are part of what a decoder
+    // has to deal with. Both arms parse the same buffer either way.
+    let wire = PPROF_FIXTURE;
     group.throughput(Throughput::Bytes(wire.len() as u64));
 
     // Verify both decoders produce the same result
-    let tacky_result = tacky_decode_pprof_into_prost(&wire);
-    let prost_result = prost_pprof::Profile::decode(wire.as_slice()).unwrap();
+    let tacky_result = tacky_decode_pprof_into_prost(wire);
+    let prost_result = prost_pprof::Profile::decode(wire).unwrap();
     assert_eq!(
         tacky_result, prost_result,
         "pprof decode mismatch between tacky and prost"
@@ -1174,14 +1053,14 @@ fn bench_decode_pprof(c: &mut Criterion) {
 
     group.bench_function("tacky", |b| {
         b.iter(|| {
-            let msg = tacky_decode_pprof_into_prost(black_box(&wire));
+            let msg = tacky_decode_pprof_into_prost(black_box(wire));
             black_box(&msg);
         });
     });
 
     group.bench_function("prost", |b| {
         b.iter(|| {
-            let msg = prost_pprof::Profile::decode(black_box(wire.as_slice())).unwrap();
+            let msg = prost_pprof::Profile::decode(black_box(wire)).unwrap();
             black_box(&msg);
         });
     });
@@ -1189,19 +1068,34 @@ fn bench_decode_pprof(c: &mut Criterion) {
     // Parse only, no materialization — see `tacky_walk_pprof`. Not comparable to the
     // arms above; it is the baseline a dispatch change would move.
     assert!(
-        tacky_walk_pprof(&wire) != 0,
+        tacky_walk_pprof(wire) != 0,
         "walker folded nothing; it is not visiting the profile"
     );
     group.bench_function("tacky-walk", |b| {
-        b.iter(|| black_box(tacky_walk_pprof(black_box(&wire))));
+        b.iter(|| black_box(tacky_walk_pprof(black_box(wire))));
     });
 
     group.finish();
 }
 
 // ---------------------------------------------------------------------------
-// Access log: string-heavy realistic messages (~100 entries per batch)
+// Access log: string-heavy messages, 100 entries per batch
 // ---------------------------------------------------------------------------
+//
+// This corpus is *plausible*, not real, and unlike pprof there is no fixture to
+// replace it with — nobody publishes access-log payloads. The schema is shaped after
+// Envoy's `envoy.data.accesslog.v3.HTTPAccessLogEntry`, which is the one access-log
+// proto that is actually deployed at scale: headers in a `map`, per-connection detail
+// in a `Common` submessage rather than inline, TLS detail below that. What it does not
+// borrow from Envoy is the well-known types — real ALS keeps timings in
+// `google.protobuf.Duration` and `Timestamp` — because tacky has no specialisation for
+// a message that wraps a single scalar, and benching one would measure a gap this crate
+// has not claimed to close. Timings here are plain `int64` micros.
+//
+// It earns its place for one thing the other corpora do not have: `request_headers` is
+// the only `map` field in the comparative suite, so this is where the map-entry writer
+// is measured against prost and C++ rather than only against itself in
+// `benches/regression.rs`.
 
 const NUM_LOG_ENTRIES: usize = 100;
 
@@ -1259,6 +1153,27 @@ static REFERERS: &[&str] = &[
     "",
 ];
 
+/// Request headers, in the proportion a browser actually sends them. An entry takes the
+/// first `5 + i % 8` of these, so header counts run 5..12 — a real request carries
+/// roughly that many.
+static HEADERS: &[(&str, &str)] = &[
+    ("accept", "application/json, text/plain, */*"),
+    ("accept-encoding", "gzip, deflate, br"),
+    ("accept-language", "en-GB,en;q=0.9"),
+    ("host", "myapp.example.com"),
+    ("connection", "keep-alive"),
+    (
+        "authorization",
+        "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+    ),
+    ("x-request-id", "a]b1c2d3-e4f5-6789-abcd-ef0123456789"),
+    ("x-forwarded-for", "203.0.113.42, 10.0.0.7"),
+    ("x-forwarded-proto", "https"),
+    ("cache-control", "no-cache"),
+    ("cookie", "session=8f2c1a7b4e9d; consent=1; theme=dark"),
+    ("origin", "https://myapp.example.com"),
+];
+
 /// Pre-computed data for the access log encode benchmark.
 struct AccessLogEncodeData {
     remote_addrs: Vec<String>,
@@ -1267,9 +1182,19 @@ struct AccessLogEncodeData {
     response_bytes: Vec<i64>,
     durations: Vec<i64>,
     timestamps: Vec<i64>,
+    /// One header map per entry, built outside the hot loop like everything else here.
+    /// `BTreeMap` on both sides — see the `btree_map` note in `build.rs`.
+    headers: Vec<std::collections::BTreeMap<String, String>>,
+    /// The `Common` submessages, prebuilt for the same reason: tacky's writer reads them
+    /// field by field, so building one per iteration would put `String` allocation into
+    /// the encode measurement.
+    commons: Vec<prost_accesslog::Common>,
 }
 
 fn accesslog_encode_data() -> AccessLogEncodeData {
+    let durations: Vec<i64> = (0..NUM_LOG_ENTRIES)
+        .map(|i| 500 + (i as i64 * 317) % 50_000) // 0.5ms to 50ms
+        .collect();
     let remote_addrs: Vec<String> = (0..NUM_LOG_ENTRIES)
         .map(|i| {
             format!(
@@ -1304,12 +1229,44 @@ fn accesslog_encode_data() -> AccessLogEncodeData {
                 _ => 0,       // redirect/empty
             })
             .collect(),
-        durations: (0..NUM_LOG_ENTRIES)
-            .map(|i| 500 + (i as i64 * 317) % 50_000) // 0.5ms to 50ms
-            .collect(),
         timestamps: (0..NUM_LOG_ENTRIES)
             .map(|i| 1_700_000_000_000_000 + i as i64 * 15_000) // ~15µs apart
             .collect(),
+        commons: (0..NUM_LOG_ENTRIES)
+            .map(|i| accesslog_common(i, durations[i]))
+            .collect(),
+        durations,
+        headers: (0..NUM_LOG_ENTRIES)
+            .map(|i| {
+                HEADERS[..5 + i % 8]
+                    .iter()
+                    .map(|(n, v)| (n.to_string(), v.to_string()))
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+/// The `Common` submessage, identical on both sides. Values vary with `i` so the
+/// nested-message path is not encoding the same bytes 100 times over.
+fn accesslog_common(i: usize, duration: i64) -> prost_accesslog::Common {
+    prost_accesslog::Common {
+        upstream_host: format!("10.4.{}.{}:8080", i % 8, 20 + i % 40),
+        upstream_cluster: "orders-v2-canary".into(),
+        route_name: "orders_route".into(),
+        upstream_connect_micros: 300 + (i as i64 * 71) % 4_000,
+        time_to_first_byte_micros: duration / 2,
+        request_bytes: 180 + (i as i64 * 37) % 2_000,
+        sampled: i % 4 == 0,
+        // TLS is only reported on the connections that had it: HTTP/2 over plaintext
+        // to a sidecar is common enough that leaving it unset on some entries is the
+        // realistic shape, not an omission.
+        tls: (i % 3 != 0).then(|| prost_accesslog::TlsProperties {
+            version: "TLSv1.3".into(),
+            cipher_suite: "TLS_AES_128_GCM_SHA256".into(),
+            sni: "myapp.example.com".into(),
+            resumed: i % 5 == 0,
+        }),
     }
 }
 
@@ -1318,19 +1275,6 @@ fn tacky_encode_accesslog<B: tacky::WriteBuf>(
     data: &AccessLogEncodeData,
 ) {
     use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
-
-    const BASE_HEADERS: [(&str, &str); 2] = [
-        ("Accept", "application/json"),
-        (
-            "Authorization",
-            "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
-        ),
-    ];
-    const WITH_REQUEST_ID: [(&str, &str); 3] = [
-        BASE_HEADERS[0],
-        BASE_HEADERS[1],
-        ("X-Request-Id", "a]b1c2d3-e4f5-6789-abcd-ef0123456789"),
-    ];
 
     let s = AccessLog::schema();
     s.entries.write_msgs(buf, 0..NUM_LOG_ENTRIES, |buf, e, i| {
@@ -1346,16 +1290,27 @@ fn tacky_encode_accesslog<B: tacky::WriteBuf>(
         e.timestamp.write(buf, data.timestamps[i]);
         e.host.write(buf, "myapp.example.com");
         e.protocol.write(buf, "HTTP/2");
-        let headers: &[(&str, &str)] = if i % 3 == 0 {
-            &WITH_REQUEST_ID
-        } else {
-            &BASE_HEADERS
-        };
-        e.request_headers
-            .write_msgs(buf, headers, |buf, h, (name, value)| {
-                h.name.write(buf, *name);
-                h.value.write(buf, *value);
-            });
+        e.request_headers.write(buf, &data.headers[i]);
+        let c = &data.commons[i];
+        e.common.write_msg(buf, |buf, cm| {
+            cm.upstream_host.write(buf, c.upstream_host.as_str());
+            cm.upstream_cluster.write(buf, c.upstream_cluster.as_str());
+            cm.route_name.write(buf, c.route_name.as_str());
+            cm.upstream_connect_micros
+                .write(buf, c.upstream_connect_micros);
+            cm.time_to_first_byte_micros
+                .write(buf, c.time_to_first_byte_micros);
+            cm.request_bytes.write(buf, c.request_bytes);
+            cm.sampled.write(buf, c.sampled);
+            if let Some(t) = &c.tls {
+                cm.tls.write_msg(buf, |buf, tp| {
+                    tp.version.write(buf, t.version.as_str());
+                    tp.cipher_suite.write(buf, t.cipher_suite.as_str());
+                    tp.sni.write(buf, t.sni.as_str());
+                    tp.resumed.write(buf, t.resumed);
+                });
+            }
+        });
     });
     s.server_id.write(buf, "web-prod-us-east-1a-i-0abc123def");
     s.batch_timestamp.write(buf, 1_700_000_000_000_000i64);
@@ -1364,25 +1319,6 @@ fn tacky_encode_accesslog<B: tacky::WriteBuf>(
 fn prost_accesslog_msg(data: &AccessLogEncodeData) -> prost_accesslog::AccessLog {
     let entries: Vec<prost_accesslog::Entry> = (0..NUM_LOG_ENTRIES)
         .map(|i| {
-            let mut headers = vec![
-                prost_accesslog::Header {
-                    name: "Accept".into(),
-                    value: "application/json".into(),
-                },
-                prost_accesslog::Header {
-                    name: "Authorization".into(),
-                    value:
-                        "Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"
-                            .into(),
-                },
-            ];
-            if i % 3 == 0 {
-                headers.push(prost_accesslog::Header {
-                    name: "X-Request-Id".into(),
-                    value: "a]b1c2d3-e4f5-6789-abcd-ef0123456789".into(),
-                });
-            }
-
             let q = QUERIES[i % QUERIES.len()];
             let r = REFERERS[i % REFERERS.len()];
             prost_accesslog::Entry {
@@ -1398,7 +1334,8 @@ fn prost_accesslog_msg(data: &AccessLogEncodeData) -> prost_accesslog::AccessLog
                 timestamp: data.timestamps[i],
                 host: "myapp.example.com".into(),
                 protocol: "HTTP/2".into(),
-                request_headers: headers,
+                request_headers: data.headers[i].clone(),
+                common: Some(data.commons[i].clone()),
             }
         })
         .collect();
@@ -1443,17 +1380,6 @@ fn bench_encode_accesslog(c: &mut Criterion) {
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
 
-    // Forward writer into a fixed slice, so `tacky-rev` vs `tacky-slice` isolates the write
-    // *direction* from the buffer kind.
-    group.bench_function("tacky-slice", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        b.iter(|| {
-            let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut sb), &data);
-            black_box(sb.written());
-        });
-    });
-
     // Field order differs — a downward buffer emits fields in the reverse of the order they
     // are written, which is legal — so this is checked by decoding, not by comparing bytes.
     // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
@@ -1474,34 +1400,53 @@ fn bench_encode_accesslog(c: &mut Criterion) {
         });
     });
 
-    // What handing the result over as an owned, index-0 buffer costs: the reverse output
-    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
-    group.bench_function("tacky-rev-owned", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        let mut out = Vec::with_capacity(size as usize + 1024);
+    // The cold-buffer pair, and the only place in the suite that measures it: every other
+    // arm reuses a warm buffer, which is the right steady state for an exporter but hides
+    // what the first export costs. A fresh `Vec` per iteration pays the reallocation path
+    // from zero capacity, plus one deallocation.
+    //
+    // Both encoders run it because they reach a cold buffer differently: prost reserves
+    // `encoded_len()` up front and allocates once, exactly right, while tacky refuses to
+    // compute that length and doubles its way there. There is no reverse counterpart —
+    // `SliceBuf` and `RevBuf` are fixed-capacity and panic in `grow`.
+    group.bench_function("tacky-grow", |b| {
         b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
-            out.clear();
-            out.extend_from_slice(rb.written());
-            black_box(out.as_slice());
+            let mut buf = Vec::new();
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &data);
+            black_box(buf.as_slice());
         });
     });
+    group.bench_function("prost-grow", |b| {
+        b.iter(|| {
+            let mut buf = Vec::new();
+            prost_msg.encode(&mut buf).unwrap();
+            black_box(buf.as_slice());
+        });
+    });
+    // `request_headers` is a map, so the C++ arm is gated on decoding back to the same
+    // message rather than on byte equality; see `bench_cpp_arms_gated`.
     #[cfg(feature = "cpp")]
-    bench_cpp_arms(&mut group, "cpp", cpp::ACCESSLOG, &prost_wire);
-    #[cfg(feature = "cpp")]
-    bench_cpp_arms(
+    cpp_arms::bench_cpp_arms_gated(
         &mut group,
         "cpp-noutf8",
         cpp::ACCESSLOG_NO_UTF8,
         &prost_wire,
+        |cpp_wire| {
+            assert_eq!(
+                prost_accesslog::AccessLog::decode(cpp_wire).unwrap(),
+                prost_msg,
+                "cpp-noutf8: C++ re-serialization does not decode to the same message"
+            );
+        },
     );
 
     group.finish();
 }
 
 fn tacky_decode_accesslog_into_prost(wire: &[u8]) -> prost_accesslog::AccessLog {
-    use tacky_accesslog::accesslog::{AccessLog, AccessLogField, EntryField, HeaderField};
+    use tacky_accesslog::accesslog::{
+        AccessLog, AccessLogField, CommonField, EntryField, TlsPropertiesField,
+    };
 
     let mut msg = prost_accesslog::AccessLog::default();
     for field in AccessLog::decode(wire) {
@@ -1522,15 +1467,47 @@ fn tacky_decode_accesslog_into_prost(wire: &[u8]) -> prost_accesslog::AccessLog 
                         EntryField::Timestamp(v) => e.timestamp = v,
                         EntryField::Host(v) => e.host = v.to_string(),
                         EntryField::Protocol(v) => e.protocol = v.to_string(),
-                        EntryField::RequestHeaders(fields) => {
-                            let mut h = prost_accesslog::Header::default();
+                        // One map entry per yield. The value is an `Option` because a
+                        // map entry may legally omit it, in which case the type's
+                        // default applies.
+                        EntryField::RequestHeaders((k, v)) => {
+                            e.request_headers
+                                .insert(k.to_string(), v.unwrap_or_default().to_string());
+                        }
+                        EntryField::Common(fields) => {
+                            let c = e.common.get_or_insert_with(Default::default);
                             for f in fields {
                                 match f.unwrap() {
-                                    HeaderField::Name(v) => h.name = v.to_string(),
-                                    HeaderField::Value(v) => h.value = v.to_string(),
+                                    CommonField::UpstreamHost(v) => c.upstream_host = v.to_string(),
+                                    CommonField::UpstreamCluster(v) => {
+                                        c.upstream_cluster = v.to_string()
+                                    }
+                                    CommonField::RouteName(v) => c.route_name = v.to_string(),
+                                    CommonField::UpstreamConnectMicros(v) => {
+                                        c.upstream_connect_micros = v
+                                    }
+                                    CommonField::TimeToFirstByteMicros(v) => {
+                                        c.time_to_first_byte_micros = v
+                                    }
+                                    CommonField::RequestBytes(v) => c.request_bytes = v,
+                                    CommonField::Sampled(v) => c.sampled = v,
+                                    CommonField::Tls(fields) => {
+                                        let t = c.tls.get_or_insert_with(Default::default);
+                                        for f in fields {
+                                            match f.unwrap() {
+                                                TlsPropertiesField::Version(v) => {
+                                                    t.version = v.to_string()
+                                                }
+                                                TlsPropertiesField::CipherSuite(v) => {
+                                                    t.cipher_suite = v.to_string()
+                                                }
+                                                TlsPropertiesField::Sni(v) => t.sni = v.to_string(),
+                                                TlsPropertiesField::Resumed(v) => t.resumed = v,
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                            e.request_headers.push(h);
                         }
                     }
                 }
@@ -1545,7 +1522,9 @@ fn tacky_decode_accesslog_into_prost(wire: &[u8]) -> prost_accesslog::AccessLog 
 
 /// Parse-only counterpart to `tacky_decode_accesslog_into_prost`. See `tacky_walk_pprof`.
 fn tacky_walk_accesslog(wire: &[u8]) -> u64 {
-    use tacky_accesslog::accesslog::{AccessLog, AccessLogField, EntryField, HeaderField};
+    use tacky_accesslog::accesslog::{
+        AccessLog, AccessLogField, CommonField, EntryField, TlsPropertiesField,
+    };
 
     let mut acc = 0u64;
     macro_rules! add {
@@ -1571,11 +1550,30 @@ fn tacky_walk_accesslog(wire: &[u8]) -> u64 {
                         EntryField::Timestamp(v) => add!(v),
                         EntryField::Host(v) => add!(v.len()),
                         EntryField::Protocol(v) => add!(v.len()),
-                        EntryField::RequestHeaders(fields) => {
+                        EntryField::RequestHeaders((k, v)) => {
+                            add!(k.len());
+                            add!(v.map_or(0, str::len));
+                        }
+                        EntryField::Common(fields) => {
                             for f in fields {
                                 match f.unwrap() {
-                                    HeaderField::Name(v) => add!(v.len()),
-                                    HeaderField::Value(v) => add!(v.len()),
+                                    CommonField::UpstreamHost(v) => add!(v.len()),
+                                    CommonField::UpstreamCluster(v) => add!(v.len()),
+                                    CommonField::RouteName(v) => add!(v.len()),
+                                    CommonField::UpstreamConnectMicros(v) => add!(v),
+                                    CommonField::TimeToFirstByteMicros(v) => add!(v),
+                                    CommonField::RequestBytes(v) => add!(v),
+                                    CommonField::Sampled(v) => add!(v),
+                                    CommonField::Tls(fields) => {
+                                        for f in fields {
+                                            match f.unwrap() {
+                                                TlsPropertiesField::Version(v) => add!(v.len()),
+                                                TlsPropertiesField::CipherSuite(v) => add!(v.len()),
+                                                TlsPropertiesField::Sni(v) => add!(v.len()),
+                                                TlsPropertiesField::Resumed(v) => add!(v),
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1627,7 +1625,145 @@ fn bench_decode_accesslog(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(not(feature = "cpp"))]
+// ---------------------------------------------------------------------------
+// Rotating: three message types per iteration, not one hammered
+// ---------------------------------------------------------------------------
+//
+// Every other group in this suite encodes one message type in a tight loop, so its
+// writer, its branch history and its inlined code stay resident for the whole
+// measurement. That is close to what a telemetry exporter really does — it ships
+// `ResourceSpans` over and over — so this group is **not** here as a realism fix. It is
+// here as a control: if the isolated numbers were partly an artifact of one hot writer,
+// the ratios between arms will move when three writers take turns.
+//
+// Fleetbench does the same thing for a stronger reason (Google's fleet runs thousands of
+// message types in one process, and its `ProtoLifecycle` deliberately interleaves twenty
+// so nothing stays hot). Three is what this file can offer, and the three are deliberately
+// unalike in both shape and writer:
+//
+// - `mixed` — 1.2 KB of scalars and small submessages.
+// - `accesslog` — 62 KB of strings, a map and a nested submessage.
+// - `fds registry` — 126 KB of short strings, deep nesting and packed `int32` arrays,
+//   through the writer shared with `benches/descriptor_set.rs`.
+//
+// **pprof is deliberately excluded**: at 847 KB it would be 93% of the blend, leaving the
+// group unable to detect a rotation effect on anything else. These three run 1 : 33 : 67,
+// which is as balanced as this suite's corpora get without shrinking one of them.
+//
+// One iteration encodes all three and throughput is the summed bytes. The number to read
+// is not the blended rate but whether each arm's *ratio* to the others matches what the
+// isolated groups report.
+fn bench_encode_rotating(c: &mut Criterion) {
+    let mut group = c.benchmark_group("encode_rotating");
+
+    let log_data = accesslog_encode_data();
+    let prost_mixed = prost_mixed_all();
+    let prost_log = prost_accesslog_msg(&log_data);
+    let fds = prost_types::FileDescriptorSet::decode(FDS_REGISTRY)
+        .expect("checked-in fixture decodes as FileDescriptorSet");
+
+    // Size each type once, so the throughput denominator is the real blend.
+    let mut probe = Vec::new();
+    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut probe));
+    let mixed_len = probe.len();
+    probe.clear();
+    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut probe), &log_data);
+    let log_len = probe.len();
+    probe.clear();
+    fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut probe), &fds);
+    let fds_len = probe.len();
+    let total = mixed_len + log_len + fds_len;
+    let cap = total + 4096;
+    println!(
+        "encode_rotating: mixed {mixed_len} B + accesslog {log_len} B + fds {fds_len} B \
+         = {total} B per iteration"
+    );
+    group.throughput(Throughput::Bytes(total as u64));
+
+    group.bench_function("tacky", |b| {
+        let mut buf = Vec::with_capacity(cap);
+        b.iter(|| {
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut buf));
+            black_box(buf.as_slice());
+            buf.clear();
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &log_data);
+            black_box(buf.as_slice());
+            buf.clear();
+            fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut buf), &fds);
+            black_box(buf.as_slice());
+            buf.clear();
+        });
+    });
+
+    group.bench_function("tacky-rev", |b| {
+        let mut backing = vec![0u8; cap];
+        b.iter(|| {
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
+            black_box(rb.written());
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &log_data);
+            black_box(rb.written());
+            let mut rb = tacky::RevBuf::new(&mut backing);
+            fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut rb), &fds);
+            black_box(rb.written());
+        });
+    });
+
+    group.bench_function("prost", |b| {
+        let mut buf = Vec::with_capacity(cap);
+        b.iter(|| {
+            prost_mixed.encode(&mut buf).unwrap();
+            black_box(buf.as_slice());
+            buf.clear();
+            prost_log.encode(&mut buf).unwrap();
+            black_box(buf.as_slice());
+            buf.clear();
+            fds.encode(&mut buf).unwrap();
+            black_box(buf.as_slice());
+            buf.clear();
+        });
+    });
+
+    // The C++ arms cannot go through `bench_cpp_arms`, which times one kind; the point here
+    // is three kinds in one iteration. Each handle is seeded from prost's bytes exactly as
+    // that helper does, and `byte_size` is called once up front to prime the size cache the
+    // `-cached` arm reuses.
+    #[cfg(feature = "cpp")]
+    {
+        let handles = [
+            cpp::Msg::parse(cpp::MIXED, &prost_mixed.encode_to_vec()),
+            cpp::Msg::parse(cpp::ACCESSLOG_NO_UTF8, &prost_log.encode_to_vec()),
+            cpp::Msg::parse(cpp::FILE_DESCRIPTOR_SET, &fds.encode_to_vec()),
+        ];
+        for h in &handles {
+            h.byte_size();
+        }
+        group.bench_function("cpp", |b| {
+            let mut buf = Vec::with_capacity(cap);
+            b.iter(|| {
+                for h in &handles {
+                    h.serialize(&mut buf);
+                    black_box(buf.as_slice());
+                    buf.clear();
+                }
+            });
+        });
+        group.bench_function("cpp-cached", |b| {
+            let mut buf = Vec::with_capacity(cap);
+            b.iter(|| {
+                for h in &handles {
+                    h.serialize_cached(&mut buf);
+                    black_box(buf.as_slice());
+                    buf.clear();
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 #[cfg(not(feature = "cpp"))]
 criterion_group!(
     benches,
@@ -1639,6 +1775,7 @@ criterion_group!(
     bench_decode_pprof,
     bench_encode_accesslog,
     bench_decode_accesslog,
+    bench_encode_rotating,
 );
 
 #[cfg(feature = "cpp")]
@@ -1653,5 +1790,6 @@ criterion_group!(
     bench_decode_pprof,
     bench_encode_accesslog,
     bench_decode_accesslog,
+    bench_encode_rotating,
 );
 criterion_main!(benches);

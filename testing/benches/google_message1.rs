@@ -21,9 +21,8 @@
 //! would be worse.
 //!
 //! Wire output is checked by decoding tacky's bytes with prost and comparing the
-//! messages, not by comparing byte strings: tacky pads nested length prefixes to a
-//! fixed width, so its output is semantically equal but can be a couple of bytes
-//! longer, so wire equivalence is checked by decoding rather than by comparing bytes.
+//! messages rather than by comparing byte strings, because a reverse writer emits fields in
+//! the opposite order — legal, but not byte-comparable.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use prost::Message;
@@ -70,7 +69,7 @@ fn payloads(dataset: &[u8]) -> Vec<Vec<u8>> {
 // ---------------------------------------------------------------------------
 
 /// Writes one `GoogleMessage1` in ascending tag order, which is the order prost
-/// emits, so the two outputs differ only where tacky pads a length prefix.
+/// emits.
 fn tacky_encode_p2<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_p2::GoogleMessage1) {
     let s = tacky_p2::benchmarks::proto2::GoogleMessage1::schema();
     s.field1.write(buf, m.field1.as_str());
@@ -426,16 +425,7 @@ macro_rules! encode_group {
                 );
             }
         }
-        group.bench_function("tacky-slice", |b| {
-            let mut backing = vec![0u8; cap + 1024];
-            b.iter(|| {
-                let mut sb = tacky::SliceBuf::new(&mut backing);
-                for m in &msgs {
-                    $encode(tacky::AnyDir::from_mut(&mut sb), m);
-                }
-                black_box(sb.written());
-            });
-        });
+
         group.bench_function("tacky-rev", |b| {
             let mut backing = vec![0u8; cap + 1024];
             b.iter(|| {
@@ -536,10 +526,7 @@ fn bench_message1(c: &mut Criterion) {
         DATASET_PROTO3,
         prost_p3::GoogleMessage1,
         tacky_encode_p3,
-        [
-            ("cpp", testing::cpp::MESSAGE1_PROTO3),
-            ("cpp-noutf8", testing::cpp::MESSAGE1_PROTO3_NO_UTF8),
-        ]
+        [("cpp-noutf8", testing::cpp::MESSAGE1_PROTO3_NO_UTF8),]
     );
     decode_group!(
         c,

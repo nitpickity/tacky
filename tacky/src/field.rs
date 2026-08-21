@@ -508,15 +508,36 @@ pub mod maps {
             let key_tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
             let val_tag = const { EncodedTag::new(2, V::WIRE_TYPE) };
 
-            // An entry's length is exact without a placeholder either way: it is the sum of
-            // two scalar field lengths, both known before anything is written.
+            // An entry's length is exact without a placeholder in either direction: it is the
+            // sum of two scalar field lengths, both known before anything is written. This is
+            // the one place tacky sizes before writing — two scalars deep, no recursion, so it
+            // costs less than a `Tack` would.
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
             let len = K::len(1, k) + v.map(|v| V::len(2, v)).unwrap_or(0);
 
+            // Because the whole entry is known up front, a downward buffer does not have to
+            // mirror the write order: it claims the entry as one block and fills it *forwards*
+            // through a `SliceBuf`, running the same sequence as the forward path below. That
+            // buys the `< 0x80` varint fast path and the small-copy ladder, both of which
+            // `RevBuf`'s own writes lack. Nested-message values cannot do this — their length
+            // is not known in advance — which is why `write_msg` still mirrors.
             if Buf::REVERSE {
-                // Value field first so it lands rightmost, then the key field, then the
-                // length, then the entry tag — the mirror of the order below.
+                let total = entry.raw().1 + crate::scalars::encoded_len_varint(len as u64) + len;
+                if let Some(window) = buf.claim_block(total) {
+                    let mut fwd = crate::SliceBuf::new(window);
+                    entry.write(&mut fwd);
+                    fwd.put_varint(len as u64);
+                    key_tag.write(&mut fwd);
+                    A::encode(&mut fwd, &key);
+                    if let Some(value) = value {
+                        val_tag.write(&mut fwd);
+                        B::encode(&mut fwd, &value);
+                    }
+                    debug_assert_eq!(fwd.len(), total, "map entry size mispredicted");
+                    return Field::new();
+                }
+                // A reverse buffer that cannot claim: mirror the order instead.
                 if let Some(value) = value {
                     B::encode(buf, &value);
                     val_tag.write(buf);
