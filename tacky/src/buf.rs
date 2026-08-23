@@ -372,45 +372,37 @@ impl<B: WriteBuf> WriteBuf for AnyDir<B> {
 }
 
 /// Longest copy the [`copy_small`] ladder handles. 48 is exactly how far its
-/// three-overlapping-pairs form reaches; see that function and the note about the failed
-/// cap-64 attempt.
+/// three-overlapping-pairs form reaches;
 pub(crate) const SMALL_COPY_MAX: usize = 48;
 
-/// Copies `n` bytes with overlapping fixed-width stores: no call, no loop, no branch
-/// between the stores of a given width class.
-///
-/// This is the whole reason a short string field does not pay for an out-of-line `memcpy`,
-/// which costs ~4.5 ns of call overhead — real money when the corpora are wall-to-wall
-/// 4-64 byte strings. Every buffer type routes its short copies through here, so the three
-/// impls cannot drift.
+/// Copies `n` bytes with overlapping fixed-width stores instead of memcpy.
+/// LLVM would do it itself iff it could prove the input is const and short, but it cant.
+/// short strings are extremely common, so this gives a nice boost. at 64 bytes its already cheaper to memcpy.
 ///
 /// # Safety
-///
-/// `n` must be in `1..=SMALL_COPY_MAX`, `dst` must be valid for writes of `n` bytes, and
-/// `src` valid for reads of `n`. Every load and store lands inside `[0, n)`, so nothing
-/// outside the caller's `n` bytes is read or written — that is what lets a fixed-capacity
-/// buffer use this after claiming exactly `n`.
+/// `n` must be in `1..=SMALL_COPY_MAX`. `dst` and `src` must have `n` bytes to read/write
+/// to/from, and must not overlap. Each copy below overlaps the *previous* one, which is
+/// fine: the constraint is between a single copy's two arguments, and those live in the
+/// caller's input and the output buffer respectively.
 #[inline(always)]
 pub(crate) unsafe fn copy_small(dst: *mut u8, src: *const u8, n: usize) {
+    use core::ptr::copy_nonoverlapping;
     debug_assert!(n >= 1 && n <= SMALL_COPY_MAX);
     if n >= 16 {
-        // Three overlapping 16-byte pairs, branchless. Ends cover [0,16) and [n-16,n),
+        // Three overlapping 16-byte copies, branchless. Ends cover [0,16) and [n-16,n),
         // middle closes the gap. 48 is the reach of this form (n/2-8 <= 16 and
         // n/2+8 >= n-16) and n >= 16 keeps it in bounds. Redundant below 32, still
         // unconditional: cheaper than a branch.
         let mid = n / 2 - 8;
-        (dst as *mut u128).write_unaligned((src as *const u128).read_unaligned());
-        (dst.add(mid) as *mut u128).write_unaligned((src.add(mid) as *const u128).read_unaligned());
-        (dst.add(n - 16) as *mut u128)
-            .write_unaligned((src.add(n - 16) as *const u128).read_unaligned());
+        copy_nonoverlapping(src, dst, 16);
+        copy_nonoverlapping(src.add(mid), dst.add(mid), 16);
+        copy_nonoverlapping(src.add(n - 16), dst.add(n - 16), 16);
     } else if n >= 8 {
-        (dst as *mut u64).write_unaligned((src as *const u64).read_unaligned());
-        (dst.add(n - 8) as *mut u64)
-            .write_unaligned((src.add(n - 8) as *const u64).read_unaligned());
+        copy_nonoverlapping(src, dst, 8);
+        copy_nonoverlapping(src.add(n - 8), dst.add(n - 8), 8);
     } else if n >= 4 {
-        (dst as *mut u32).write_unaligned((src as *const u32).read_unaligned());
-        (dst.add(n - 4) as *mut u32)
-            .write_unaligned((src.add(n - 4) as *const u32).read_unaligned());
+        copy_nonoverlapping(src, dst, 4);
+        copy_nonoverlapping(src.add(n - 4), dst.add(n - 4), 4);
     } else {
         *dst = *src;
         *dst.add(n / 2) = *src.add(n / 2);
@@ -436,13 +428,12 @@ mod alloc_impls {
         }
         #[inline]
         fn put_slice(&mut self, src: &[u8]) {
-            // Overlapping fixed-width stores for short slices, skipping the out-of-line
-            // `memcpy` call `extend_from_slice` lowers to. Worth 5-10% on encode.
             let n = src.len();
             if n == 0 || n > SMALL_COPY_MAX {
                 self.extend_from_slice(src);
                 return;
             }
+            // Overlapping fixed-width stores for short slices,
             self.reserve(n);
             let len = self.len();
             // SAFETY: `reserve` guarantees `n` writable bytes at `len`, `n` is in range, and
