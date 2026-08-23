@@ -25,7 +25,13 @@ pub struct Tack<'b, B: WriteBuf> {
     pub buffer: &'b mut B,
     /// Byte position in the buffer immediately after the placeholder.
     /// `buffer.len() - start` gives the data length when closing.
-    start: u32,
+    ///
+    /// `usize`, not `u32`: `close` compares it against a `usize` `buffer.len()` and feeds it
+    /// to `get_unchecked_mut`, so a truncating cast past 4 GiB of *sink* (not message) would
+    /// index outside the allocation. Bounding it with an assert instead is not free — it
+    /// costs 9 instructions and a panic edge per `Tack`, since LLVM cannot prove a `Vec` is
+    /// under 4 GiB — whereas widening the field measures identical or better.
+    start: usize,
     /// Number of bytes reserved for the length varint.
     /// 2 bytes = ~16KB, 3 bytes = ~2MB.
     width: u32,
@@ -86,14 +92,14 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
         write_wide_varint(width as usize, 0, buffer);
 
         Tack {
-            start: buffer.len() as u32,
+            start: buffer.len(),
             buffer,
             width,
         }
     }
 
     fn close(&mut self) {
-        let start = self.start as usize;
+        let start = self.start;
         let width = self.width as usize;
         let data_len = self.buffer.len() - start;
 
@@ -121,7 +127,7 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
     #[inline(never)]
     #[cold]
     fn fix_overflow(&mut self, data_len: usize, required_width: usize) {
-        let start = self.start as usize;
+        let start = self.start;
         let width = self.width as usize;
         let diff = required_width - width;
         let old_len = self.buffer.len();
@@ -138,9 +144,9 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
                 .get_unchecked_mut(start - width..start + diff)
         };
         // Padding to exactly `required_width` is the *minimal* encoding, since that is
-        // what `encoded_len_varint` returned — so this is byte-for-byte
-        // `write_varint_slice`, but with the loop bound equal to the slice length,
-        // which drops its per-byte bounds checks.
+        // what `encoded_len_varint` returned — so this writes the same bytes an ordinary
+        // varint loop would, but with the loop bound equal to the slice length, which
+        // drops its per-byte bounds checks.
         write_wide_varint_slice(required_width, data_len as u64, len_prefix_loc);
     }
 }
@@ -181,6 +187,7 @@ mod tests {
     use crate::tack::write_wide_varint;
     use alloc::{vec, vec::Vec};
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_write() {
         let mut buf = Vec::new();
@@ -194,6 +201,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_write_wide_varint_roundtrips() {
         let cases: Vec<(usize, u64)> = vec![
@@ -214,6 +222,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_tack_expansion() {
         let mut buf = Vec::new();

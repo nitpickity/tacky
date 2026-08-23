@@ -245,6 +245,19 @@ pub mod packed {
         /// fixed32, etc.), this bypasses the Tack entirely and writes the length prefix
         /// directly since `count * fixed_size` gives the exact byte length upfront.
         /// For varint types, falls back to the Tack since encoded size depends on values.
+        ///
+        /// On the fixed-size path the prefix is written *before* the elements, from `len()`, so
+        /// `len()` **must** equal the number of elements actually yielded. Every std source and
+        /// adapter satisfies this — slices, `Vec`, arrays, `BTreeSet`/`HashSet` iterators, and
+        /// `Copied`/`Cloned`/`Map`/`Rev` over them — so only a hand-written
+        /// `ExactSizeIterator` can break it, which its own docs call a protocol violation.
+        ///
+        /// The consequence is not unsoundness but a corrupt message: the field truncates, or its
+        /// tail reparses as bogus fields of the parent. A `debug_assert!` reports it **in debug
+        /// builds only** — in release a wrong `len()` corrupts the output silently, and checking
+        /// there is not free (+18 instructions and a panic edge per call, since neither side of
+        /// the comparison is a constant). If you cannot guarantee `len()`, use `write`: it
+        /// measures what was actually written, takes any iterator, and emits identical bytes.
         #[inline]
         pub fn write_exact<B: WriteBuf, I>(self, buf: &mut B, values: I) -> Field<N, Packed<P>>
         where
@@ -263,9 +276,23 @@ pub mod packed {
                     let tag = const { EncodedTag::new(N, WireType::LEN) };
                     tag.write(buf);
                     write_varint(data_len as u64, buf);
+                    #[cfg(debug_assertions)]
+                    let start_len = buf.len();
                     for value in it {
                         P::write_value(value.as_scalar(), buf);
                     }
+                    // Unlike the `put_msg` path below, the prefix here is written from
+                    // `ExactSizeIterator::len()` *before* the elements, so a wrong `len()` — safe
+                    // code, only a contract slip — leaves a prefix that disagrees with the bytes:
+                    // too large truncates the field, too small leaks the tail out as parent
+                    // fields. `put_msg` cannot have this, since its Tack measures what was
+                    // actually written.
+                    #[cfg(debug_assertions)]
+                    debug_assert_eq!(
+                        buf.len() - start_len,
+                        data_len,
+                        "ExactSizeIterator::len() disagreed with the elements written"
+                    );
                     return Field::new();
                 }
             }
@@ -404,6 +431,7 @@ impl<K, V> PbMap<K, V> {
 impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
     /// Decodes a map entry where the value is a nested message.
     /// The decoder closure receives the raw message bytes and returns the parsed result.
+    /// A missing key defaults, as in [`PbMap::read`].
     pub fn read_msg<'a, T>(
         buf: &mut &'a [u8],
         decoder: impl Fn(&'a [u8]) -> T,
@@ -427,10 +455,7 @@ impl<K: ProtobufScalar, M: MessageSchema> PbMap<K, M> {
                 }
             }
         }
-        let Some(key) = key else {
-            return Err(DecodeError::InvalidMapEntry);
-        };
-        Ok((key, val))
+        Ok((key.unwrap_or_default(), val))
     }
 }
 impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
@@ -438,7 +463,11 @@ impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
     ///
     /// The value is `Option` because protobuf allows entries with a key but no value
     /// (proto3 treats this as the default value; tacky surfaces the absence explicitly).
-    /// A missing key is an error since there's no meaningful default for map keys.
+    /// A missing key yields `K`'s default rather than an error, matching protoc's parser:
+    /// a `map<K, V>` has no way to represent an absent key, so the default is the only
+    /// thing a decoder can produce. Note this is leniency, not a presence rule — protoc
+    /// *writes* the zero key in every syntax, and under proto2 the entry key even has a
+    /// hasbit. Some encoders (prost) omit it anyway.
     pub fn read<'a>(
         buf: &mut &'a [u8],
     ) -> Result<(K::RustType<'a>, Option<V::RustType<'a>>), DecodeError> {
@@ -460,10 +489,7 @@ impl<K: ProtobufScalar, V: ProtobufScalar> PbMap<K, V> {
                 }
             }
         }
-        let Some(key) = key else {
-            return Err(DecodeError::InvalidMapEntry);
-        };
-        Ok((key, val))
+        Ok((key.unwrap_or_default(), val))
     }
 }
 
@@ -524,31 +550,33 @@ pub mod maps {
             // is not known in advance — which is why `write_msg` still mirrors.
             if Buf::REVERSE {
                 let total = entry.raw().1 + crate::scalars::encoded_len_varint(len as u64) + len;
-                if let Some(window) = buf.claim_block(total) {
-                    let mut fwd = crate::SliceBuf::new(window);
-                    entry.write(&mut fwd);
-                    fwd.put_varint(len as u64);
-                    key_tag.write(&mut fwd);
-                    A::encode(&mut fwd, &key);
-                    if let Some(value) = value {
-                        val_tag.write(&mut fwd);
-                        B::encode(&mut fwd, &value);
-                    }
-                    debug_assert_eq!(fwd.len(), total, "map entry size mispredicted");
-                    return Field::new();
-                }
-                // A reverse buffer that cannot claim: mirror the order instead.
+                // `expect`, not a mirrored fallback: the only reverse buffer that refuses a
+                // window is one without the room, and writing the same bytes one at a time
+                // needs exactly as much — so the fallback could only ever reach `claim`'s own
+                // panic by a longer route. Keeping it cost 119 instructions here, because a
+                // `claim_block` that can say no makes the whole second path live code.
+                let window = buf
+                    .claim_block(total)
+                    .expect("reverse buffer exhausted writing a map entry");
+                let mut fwd = crate::SliceBuf::new(window);
+                entry.write(&mut fwd);
+                fwd.put_varint(len as u64);
+                key_tag.write(&mut fwd);
+                A::encode(&mut fwd, &key);
                 if let Some(value) = value {
-                    B::encode(buf, &value);
-                    val_tag.write(buf);
+                    val_tag.write(&mut fwd);
+                    B::encode(&mut fwd, &value);
                 }
-                A::encode(buf, &key);
-                key_tag.write(buf);
-                buf.put_varint(len as u64);
-                entry.write(buf);
+                debug_assert_eq!(fwd.len(), total, "map entry size mispredicted");
                 return Field::new();
             }
 
+            // Same check the reverse path gets from `fwd.len()`, which here needs the delta
+            // measured explicitly. `cfg` rather than a bare `let`, so release does not carry an
+            // unused load. A mispredicted `len` writes a prefix that disagrees with the payload:
+            // the entry either truncates or leaks its tail out as bogus parent fields.
+            #[cfg(debug_assertions)]
+            let start_len = buf.len();
             entry.write(buf);
             buf.put_varint(len as u64);
             key_tag.write(buf);
@@ -557,6 +585,12 @@ pub mod maps {
                 val_tag.write(buf);
                 B::encode(buf, &value);
             }
+            #[cfg(debug_assertions)]
+            debug_assert_eq!(
+                buf.len() - start_len,
+                entry.raw().1 + crate::scalars::encoded_len_varint(len as u64) + len,
+                "map entry size mispredicted"
+            );
             Field::new()
         }
     }
@@ -642,6 +676,13 @@ pub trait ProtoEncode<P: ProtobufScalar> {
     /// `as_scalar()` and delegates to `P::write_value`. Override this directly
     /// if your type can't cheaply produce the scalar's Rust type — but note that
     /// packed fields won't work without `as_scalar()`.
+    ///
+    /// An override **must write exactly as many bytes as `as_scalar()`'s value measures**.
+    /// Map entries size themselves from `as_scalar()` before writing anything, so a wider
+    /// `encode` produces a length prefix that disagrees with the payload — the entry
+    /// truncates, and its tail reparses as bogus fields of the parent message.
+    /// [`PbDisplay`](`crate::PbDisplay`) and [`PbWrite`](`crate::PbWrite`) break this on
+    /// purpose and are documented as unusable in maps.
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
         let value = value.as_scalar();
         P::write_value(value, buf);
@@ -686,14 +727,20 @@ impl<T: AsRef<[u8]>> ProtoEncode<PbBytes> for T {
 
 macro_rules! gen_encodes {
     ($src:ty => $($dst:ty),*) => {
+        gen_encodes!($src, |v: &$src| *v == <$src>::default() => $($dst),*);
+    };
+    // Takes the default test as a closure rather than an expression using `self`, which
+    // `macro_rules!` hygiene will not carry across. Non-capturing, so it inlines away.
+    ($src:ty, $is_default:expr => $($dst:ty),*) => {
         $(
             impl ProtoEncode<$dst> for $src {
                 #[inline]
                 fn as_scalar(&self) -> <$dst as ProtobufScalar>::RustType<'_> {
                     *self
                 }
+                #[inline]
                 fn is_default(&self) -> bool {
-                    *self == Self::default()
+                    ($is_default)(self)
                 }
 
             }
@@ -714,8 +761,12 @@ gen_encodes!(i32 => Int32, Sint32, Sfixed32);
 gen_encodes!(u32 => Uint32, Fixed32);
 gen_encodes!(i64 => Int64, Sint64, Sfixed64);
 gen_encodes!(u64 => Uint64, Fixed64);
-gen_encodes!(f32 => Float);
-gen_encodes!(f64 => Double);
+// Bit pattern, not `== 0.0`: `-0.0 == 0.0` is true, so an equality test skips `-0.0` and the
+// field decodes back as `+0.0`. protoc emits the same check for exactly this reason
+// (`bit_cast<uint32_t>(x) != 0` in its generated C++). NaN has non-zero bits, so it is written
+// either way.
+gen_encodes!(f32, |v: &f32| v.to_bits() == 0 => Float);
+gen_encodes!(f64, |v: &f64| v.to_bits() == 0 => Double);
 gen_encodes!(bool => Bool);
 
 #[cfg(test)]
@@ -724,6 +775,7 @@ mod tests {
     use super::*;
     use alloc::{string::ToString, vec, vec::Vec};
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_map_int_string() {
         let mut buf = Vec::new();
@@ -743,6 +795,7 @@ mod tests {
         assert_eq!(results, vec![(1, Some("one")), (2, Some("two"))]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_map_string_string() {
         let mut buf = Vec::new();
@@ -766,6 +819,46 @@ mod tests {
         );
     }
 
+    /// An entry with no field 1 decodes to `K`'s default, as protoc's parser does:
+    /// `protoc --decode` accepts `0a 05 12 03 61 62 63` in proto2 and proto3 alike.
+    #[test]
+    fn test_map_entry_omitted_key() {
+        let mut slice: &[u8] = &[0x05, 0x12, 0x03, 0x61, 0x62, 0x63];
+        let (k, v) = PbMap::<Int32, PbString>::read(&mut slice).unwrap();
+        assert_eq!((k, v), (0, Some("abc")));
+        assert!(slice.is_empty());
+    }
+
+    #[cfg(feature = "alloc")]
+    /// `-0.0 == 0.0`, so an equality-based `is_default` would skip `-0.0` and lose the sign on
+    /// the round trip. `+0.0` must still be skipped, and NaN still written.
+    #[test]
+    fn test_plain_float_negative_zero() {
+        for (v, expect) in [
+            (-0.0f32, &[0x0d, 0x00, 0x00, 0x00, 0x80][..]),
+            (0.0f32, &[]),
+        ] {
+            let mut buf = Vec::new();
+            Field::<1, Plain<Float>>::new().write(&mut buf, v);
+            assert_eq!(buf, expect, "f32 {v:?}");
+        }
+        for (v, expect) in [
+            (
+                -0.0f64,
+                &[0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80][..],
+            ),
+            (0.0f64, &[]),
+        ] {
+            let mut buf = Vec::new();
+            Field::<1, Plain<Double>>::new().write(&mut buf, v);
+            assert_eq!(buf, expect, "f64 {v:?}");
+        }
+        let mut buf = Vec::new();
+        Field::<1, Plain<Float>>::new().write(&mut buf, f32::NAN);
+        assert_eq!(buf.len(), 5, "NaN is not the default");
+    }
+
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_map_int_float() {
         let mut buf = Vec::new();
@@ -783,6 +876,7 @@ mod tests {
         }
         assert_eq!(results, vec![(1, Some(1.5f32)), (2, Some(2.5f32))]);
     }
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_required_string_and_bytes() {
         let mut buf = Vec::new();
@@ -805,6 +899,7 @@ mod tests {
         assert_eq!(b, b"abc");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_optional_string_and_bytes() {
         let mut buf = Vec::new();
@@ -835,6 +930,7 @@ mod tests {
         assert!(buf.is_empty());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_repeated_string_and_bytes() {
         let mut buf = Vec::new();
@@ -865,6 +961,7 @@ mod tests {
         assert_eq!(results, vec![b"x".to_vec(), b"y".to_vec()]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_required_numeric_types() {
         let mut buf = Vec::new();
@@ -937,6 +1034,7 @@ mod tests {
         assert_eq!(v, false);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_optional_numeric_types() {
         let mut buf = Vec::new();
@@ -974,6 +1072,7 @@ mod tests {
         assert!(buf.is_empty());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_repeated_numeric_types() {
         let mut buf = Vec::new();
@@ -1002,6 +1101,7 @@ mod tests {
         assert_eq!(results, vec![true, false, true]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_packed_numeric_types() {
         let mut buf = Vec::new();

@@ -66,12 +66,6 @@ pub trait ProtobufScalar {
     fn write_value(value: Self::RustType<'_>, buf: &mut impl WriteBuf);
     /// Encoded length of the value bytes, excluding tag.
     fn value_len(value: Self::RustType<'_>) -> usize;
-    /// Writes a complete field (tag + value). Convenience method used by map entry encoding
-    /// where the tag isn't precomputed via [`EncodedTag`].
-    fn write(field_nr: u32, value: Self::RustType<'_>, buf: &mut impl WriteBuf) {
-        Self::write_tag(field_nr, buf);
-        Self::write_value(value, buf);
-    }
     /// Reads one value from the buffer, advancing the cursor past it.
     fn read<'a>(buf: &mut &'a [u8]) -> Result<Self::RustType<'a>, DecodeError>;
     /// Total wire length of a field (tag + value). Used for map entries
@@ -79,10 +73,6 @@ pub trait ProtobufScalar {
     fn len(field_nr: u32, value: Self::RustType<'_>) -> usize {
         let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
         encoded_len_varint(tag as u64) + Self::value_len(value)
-    }
-    fn write_tag(field_nr: u32, buf: &mut impl WriteBuf) {
-        let tag = (field_nr << 3) | (Self::WIRE_TYPE as u32);
-        write_varint(tag as u64, buf)
     }
 }
 
@@ -603,23 +593,6 @@ pub fn write_varint_into(mut value: u64, buf: &mut (impl WriteBuf + ?Sized)) {
         } else {
             buf.put_u8(((value & 0x7F) | 0x80) as u8);
             value >>= 7;
-        }
-    }
-}
-
-/// Write a varint into a mutable slice. Used by Tack's overflow path to patch
-/// the length prefix in-place.
-#[inline]
-pub fn write_varint_slice(mut value: u64, buf: &mut [u8]) {
-    let mut i = 0;
-    loop {
-        if value < 0x80 {
-            buf[i] = value as u8;
-            break;
-        } else {
-            buf[i] = ((value & 0x7F) | 0x80) as u8;
-            value >>= 7;
-            i += 1;
         }
     }
 }

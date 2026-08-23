@@ -28,7 +28,12 @@
 /// Appending is used by all scalar writers. Random access (`len`, `as_mut_slice`) is
 /// used by [`Tack`](`crate::Tack`) to patch length placeholders. `grow` and `copy_within`
 /// are only called on Tack's overflow cold path — fixed-size buffers can panic there.
-pub trait WriteBuf {
+///
+/// Sealed: implemented only by `Vec<u8>`, [`SliceBuf`], [`RevBuf`] and [`AnyDir`]. Usable as a
+/// bound from any crate, but not implementable outside this one — `Tack` patches length
+/// prefixes through `get_unchecked_mut` on the strength of `as_mut_slice()` being at least
+/// `len()` long, which a safe trait cannot require of an impl.
+pub trait WriteBuf: private::Sealed {
     /// This buffer's direction as a type — [`Forward`] or [`Reverse`]. What [`OrderedIter`]
     /// dispatches on to decide whether a repeated field's elements need reversing, and
     /// whether a one-way iterator is acceptable here at all.
@@ -164,6 +169,16 @@ pub trait Order: private::Sealed {
     const REVERSE: bool;
 }
 
+/// Seals both [`Order`] and [`WriteBuf`]. The direction markers are impl'd here; each
+/// buffer's `Sealed` impl sits next to its `WriteBuf` impl, since `Vec<u8>`'s is feature-gated.
+///
+/// `WriteBuf` is sealed rather than `unsafe`: [`Tack::close`](`crate::Tack`) patches the length
+/// prefix through `get_unchecked_mut`, relying on `as_mut_slice()` being at least `len()` long.
+/// That is an obligation on the *impl*, and a safe `pub trait` cannot state it — a third-party
+/// impl containing no `unsafe` at all (large `len()`, short `as_mut_slice()`) would get an
+/// out-of-bounds write in release. Sealing turns it into an internal invariant of the four
+/// impls in this module, so `WriteBuf` stays a safe trait. Downstream code can still *use* it:
+/// `fn encode<B: WriteBuf>(..)` compiles anywhere, only new impls are refused.
 mod private {
     pub trait Sealed {}
     impl Sealed for super::Forward {}
@@ -323,6 +338,7 @@ impl<B: WriteBuf> AnyDir<B> {
     }
 }
 
+impl<B: WriteBuf> private::Sealed for AnyDir<B> {}
 impl<B: WriteBuf> WriteBuf for AnyDir<B> {
     type Order = Both;
     /// `B`'s own direction, still a compile-time constant: only the *iterator* bound is
@@ -419,6 +435,7 @@ mod alloc_impls {
 
     use super::*;
 
+    impl private::Sealed for Vec<u8> {}
     impl WriteBuf for Vec<u8> {
         type Order = Forward;
 
@@ -513,6 +530,7 @@ impl<'a> RevBuf<'a> {
     }
 }
 
+impl private::Sealed for RevBuf<'_> {}
 impl WriteBuf for RevBuf<'_> {
     type Order = Reverse;
 
@@ -597,8 +615,14 @@ impl WriteBuf for RevBuf<'_> {
         let pos = self.pos;
         &mut self.buf[pos..]
     }
+    /// `None` when the remaining room is short, as the trait promises — `claim` would assert
+    /// instead. Returning it here is what makes `write_entry`'s mirrored fallback reachable
+    /// rather than dead code.
     #[inline]
     fn claim_block(&mut self, n: usize) -> Option<&mut [u8]> {
+        if self.pos < n {
+            return None;
+        }
         Some(self.claim(n))
     }
     fn grow(&mut self, _additional: usize) {
@@ -684,8 +708,12 @@ pub struct FmtWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        // Per chunk, and const-known, so free in release.
-        debug_assert!(
+        // Per chunk, but `B::REVERSE` is an associated const, so this folds away entirely
+        // for a forward buffer. Not `debug_assert!`: that leaves release silently emitting
+        // chunks backwards. Not `const { assert!(..) }` either — as at `Tack::new_with_width`,
+        // `ProtoEncode::encode` is generic over `B`, so merely *instantiating* it for a
+        // `RevBuf` would then fail to compile even where the path is guarded at runtime.
+        assert!(
             !B::REVERSE,
             "FmtWriter appends; a reverse buffer would emit chunks backwards"
         );
@@ -734,7 +762,8 @@ pub struct IoWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 #[cfg(feature = "std")]
 impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        debug_assert!(
+        // As `FmtWriter::write_str`: a real `assert!`, folded away for forward buffers.
+        assert!(
             !B::REVERSE,
             "IoWriter appends; a reverse buffer would emit chunks backwards"
         );
@@ -796,6 +825,7 @@ where
     }
 }
 
+impl private::Sealed for SliceBuf<'_> {}
 impl WriteBuf for SliceBuf<'_> {
     type Order = Forward;
 
@@ -930,6 +960,7 @@ mod tests {
         IoWriter(&mut rb).write_all(b"chunk").unwrap();
     }
 
+    #[cfg(feature = "alloc")]
     /// The ladder writes overlapping fixed-width blocks, not `n` bytes, so every arm
     /// boundary needs pinning. Appends onto a non-empty buffer so a wrong offset or a store
     /// past `n` shows as corruption rather than an equal prefix.
@@ -991,6 +1022,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn fmt_writer_basic() {
         let mut buf = Vec::new();
@@ -1004,6 +1036,17 @@ mod tests {
         let mut sb = SliceBuf::new(&mut backing);
         write!(FmtWriter(&mut sb), "pi={:.2}", 3.14159).unwrap();
         assert_eq!(sb.written(), b"pi=3.14");
+    }
+
+    /// The trait promises `None` when the window will not fit; `claim` on its own asserts.
+    #[test]
+    fn rev_buf_claim_block_refuses_rather_than_panics() {
+        let mut backing = [0u8; 4];
+        let mut rb = RevBuf::new(&mut backing);
+        assert!(rb.claim_block(100).is_none());
+        assert_eq!(rb.claim_block(4).map(|w| w.len()), Some(4));
+        // Consumed the whole buffer, so a second claim of any size is refused.
+        assert!(rb.claim_block(1).is_none());
     }
 
     /// At the width-1 default any nested message of 128 B or more takes `Tack`'s
@@ -1023,6 +1066,7 @@ mod tests {
         assert_eq!(PbString::read(&mut slice).unwrap(), long);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn pb_display_std_ip() {
         let mut buf = Vec::new();
@@ -1037,6 +1081,7 @@ mod tests {
         assert_eq!(decoded, "192.168.1.42");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn pb_display_std_socket_addr() {
         use crate::{Field, Optional};
@@ -1052,6 +1097,7 @@ mod tests {
         assert_eq!(decoded, "127.0.0.1:8080");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn pb_display_nested_in_tack() {
         let mut buf = Vec::new();

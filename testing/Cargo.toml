@@ -6,7 +6,9 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-tacky = { path = "../tacky" }
+# `std` so that a plain `cargo test` type-checks `IoWriter`/`PbWrite` at all — nothing else in
+# the workspace enables it, and resolver v2 unifies it onto tacky's own test target too.
+tacky = { path = "../tacky", features = ["std"] }
 prost = "0.14"
 # The prost arm of `benches/descriptor_set.rs`. prost-types is generated from
 # descriptor.proto, so the comparison costs us no extra codegen.
