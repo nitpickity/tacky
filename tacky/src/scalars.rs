@@ -1,7 +1,7 @@
 //! Zero-sized marker types for protobuf scalars, plus wire format encoding and decoding.
 //!
 //! Each protobuf scalar type (int32, string, etc.) is represented by a ZST marker struct.
-//! These carry no data — they exist so that [`Field`](`crate::Field`) can be generic over
+//! These carry no data. They exist so that [`Field`](`crate::Field`) can be generic over
 //! the protobuf type and dispatch to the correct encoding at compile time via
 //! the [`ProtobufScalar`] trait.
 
@@ -49,8 +49,8 @@ pub struct PbEnum<T>(PhantomData<T>);
 ///
 /// Each scalar marker ([`Int32`], [`PbString`], etc.) implements this trait,
 /// mapping it to a Rust type, a wire type, and the encoding/decoding logic.
-/// This is the trait that [`Field`](`crate::Field`) dispatches on — adding a new
-/// scalar type to tacky means implementing `ProtobufScalar` for a new ZST.
+/// This is the trait that [`Field`](`crate::Field`) dispatches on, so adding a new scalar type
+/// to tacky means implementing `ProtobufScalar` for a new ZST.
 pub trait ProtobufScalar {
     /// The Rust type this scalar maps to. Lifetime-parameterized so that
     /// borrowed types like `&str` and `&[u8]` can be returned during decoding.
@@ -77,8 +77,8 @@ pub trait ProtobufScalar {
 }
 
 /// Marker for scalars that can appear in `packed` repeated fields.
-/// All numeric types and enums are packable. Strings and bytes are not —
-/// protobuf's wire format doesn't support packing length-delimited types.
+/// All numeric types and enums are packable. Strings and bytes are not, since protobuf's wire
+/// format doesn't support packing length-delimited types.
 pub trait Packable: ProtobufScalar {}
 impl Packable for Int32 {}
 impl Packable for Sint32 {}
@@ -223,7 +223,7 @@ impl ProtobufScalar for Uint64 {
 impl ProtobufScalar for Bool {
     type RustType<'a> = bool;
     const WIRE_TYPE: WireType = WireType::VARINT;
-    /// A varint by wire type, but never more than one byte: `write_value` stores
+    /// A varint by wire type, but never more than one byte, since `write_value` stores
     /// `value as u8`, which is 0 or 1. Declaring it lets packed `bool` take the exact-length
     /// path instead of a placeholder.
     const FIXED_WIRE_SIZE: Option<usize> = Some(1);
@@ -585,6 +585,7 @@ pub fn write_varint(value: u64, buf: &mut impl WriteBuf) {
 
 /// The byte-at-a-time varint loop, i.e. [`WriteBuf::put_varint`]'s default body. Split out
 /// so the trait method can call it without recursing back through [`write_varint`].
+#[doc(hidden)]
 pub fn write_varint_into(mut value: u64, buf: &mut (impl WriteBuf + ?Sized)) {
     loop {
         if value < 0x80 {
@@ -613,8 +614,8 @@ pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
         return Ok(b as u64);
     }
 
-    // With ≥10 bytes remaining, every index 0..9 is provably in-bounds
-    // so the compiler eliminates per-byte bounds checks after inlining.
+    // With 10 or more bytes remaining every index 0..9 is provably in bounds, so the compiler
+    // eliminates the per-byte bounds checks after inlining.
     if bytes.len() >= 10 {
         decode_varint_long(buf)
     } else {
@@ -622,8 +623,7 @@ pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
     }
 }
 
-/// Stolen from Prost..
-/// unrolled varint decoder for the common case where ≥10 bytes remain.
+/// Stolen from Prost. Unrolled varint decoder for the common case where 10 or more bytes remain.
 #[inline]
 fn decode_varint_long(buf: &mut &[u8]) -> Result<u64, DecodeError> {
     let bytes = *buf;
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_skip_varint_panics_on_8_byte_buffer() {
-        // 8 bytes, all with continuation bit set — a truncated varint.
+        // 8 bytes, all with the continuation bit set, so a truncated varint.
         // This should return Truncated, not panic on out-of-bounds buf[8].
         let data = [0x80u8; 8];
         let mut buf: &[u8] = &data;
@@ -770,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_skip_varint_panics_on_9_byte_buffer() {
-        // 9 bytes, all with continuation bit set — a truncated varint.
+        // 9 bytes, all with the continuation bit set, so a truncated varint.
         // This should return Truncated, not panic on out-of-bounds buf[9].
         let data = [0x80u8; 9];
         let mut buf: &[u8] = &data;
@@ -840,11 +840,11 @@ impl EncodedTag {
         buf.put_slice(&self.bytes[..self.len as usize]);
     }
 
-    /// The 5-byte backing array and how many of its bytes are the tag. Exposed so a
-    /// caller that is already claiming space for something else — `RevBuf::put_msg`
-    /// claims for the length varint — can store the tag into it rather than paying a
-    /// second reserve and an out-of-line `memcpy` for one to five bytes. `len()` is
-    /// always in `1..=5`.
+    /// The 5-byte backing array and how many of its bytes are the tag. Exposed so that a caller
+    /// already claiming space for something else, as `RevBuf::put_msg` does for the length
+    /// varint, can store the tag into it instead of paying a second reserve and an out-of-line
+    /// `memcpy` for one to five bytes. `len()` is always in `1..=5`.
+    #[doc(hidden)]
     #[inline]
     pub const fn raw(&self) -> (&[u8; 5], usize) {
         (&self.bytes, self.len as usize)
@@ -853,7 +853,7 @@ impl EncodedTag {
 
 /// Reads a length prefix and returns that many bytes as a sub-slice, advancing the cursor.
 /// This is the building block for decoding strings, bytes, nested messages, packed fields,
-/// and map entries — anything with wire type LEN.
+/// and map entries, i.e. anything with wire type LEN.
 #[inline]
 pub fn decode_len<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8], DecodeError> {
     let len = decode_varint(buf)? as usize;
