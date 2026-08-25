@@ -17,7 +17,12 @@ fn cpp_prefix() -> Option<String> {
     // CMake's GNUInstallDirs defaults to on Fedora/RHEL x86_64.
     ["lib", "lib64"]
         .iter()
-        .any(|d| std::path::Path::new(&p).join(d).join("libprotobuf.a").exists())
+        .any(|d| {
+            std::path::Path::new(&p)
+                .join(d)
+                .join("libprotobuf.a")
+                .exists()
+        })
         .then_some(p)
 }
 
