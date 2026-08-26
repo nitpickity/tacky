@@ -1,20 +1,20 @@
-//! Field schema types and their serialization/deserialization logic.
+//! [`Field`], the schema type, its labels, and the writers for each of them.
 //!
-//! A protobuf field is represented as `Field<N, Label<Scalar>>` where:
-//! - `N` is the field number (const generic, known at compile time)
-//! - `Label` is one of [`Optional`], [`Repeated`], [`Packed`], [`Required`], [`Plain`], or [`PbMap`]
-//! - `Scalar` is a marker type from [`scalars`](`crate::scalars`) or a [`MessageSchema`] implementor
+//! A field is `Field<N, Optional<Int32>>` and the like: the field number as a const generic, then a
+//! label wrapping a [scalar marker](`crate::scalars`) or a [`MessageSchema`] implementor. `PbMap`
+//! is the exception, taking a key and value scalar instead of wrapping one.
 //!
-//! All of these are zero-sized. A generated message schema struct composed entirely
-//! of `Field` types has `size_of::<T>() == 0`.
+//! Every one of these types is zero-sized, so a generated schema struct built from them has
+//! `size_of::<T>() == 0`. See [the label table](`crate#field-labels`) for what each one accepts.
 
 use crate::buf::{OrderedIter, WriteBuf};
 use crate::{scalars::*, tack::Tack};
 use core::marker::PhantomData;
 
 macro_rules! impl_wrapped {
-    ($($t:ident),*) => {
+    ($($(#[$doc:meta])* $t:ident),* $(,)?) => {
         $(
+            $(#[$doc])*
             #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
             pub struct $t<P>(PhantomData<P>);
             impl<P> $t<P> {
@@ -26,21 +26,27 @@ macro_rules! impl_wrapped {
     };
 }
 
-// Field label types, all zero-sized wrappers over PhantomData.
-//
-// - Optional<P>: present or absent. Takes Option<V>, skips the field if None.
-//   Used for proto2 `optional` and proto3 explicit `optional`.
-// - Repeated<P>: unpacked repeated field. Takes IntoIterator<Item=V>, writes each
-//   element with its own tag. Used for length-delimited types that can't be packed.
-// - Required<P>: always written. Takes a bare value. Proto2 `required` fields.
-// - Packed<P>: packed repeated field. Writes all elements under a single
-//   length-delimited tag. More compact for numeric types.
-// - Plain<P>: implicit presence (proto3 default). Skips the field if the value
-//   equals the type's default (0, false, empty string, etc.).
-impl_wrapped!(Optional, Repeated, Required, Packed, Plain);
+impl_wrapped!(
+    /// Explicit presence: takes `Option<V>` and skips the field on `None`. Proto2 `optional`, and
+    /// proto3 `optional`.
+    Optional,
+    /// Unpacked repeated field: takes an iterator and writes each element with its own tag. What
+    /// `repeated` produces for length-delimited types, which cannot be packed.
+    Repeated,
+    /// Always written, from a bare value. Proto2 `required`.
+    Required,
+    /// Packed repeated field: takes an iterator and writes every element under one
+    /// length-delimited tag. What `repeated` produces for numerics and enums.
+    Packed,
+    /// Implicit presence: takes a bare value and skips the field when it equals the type's default
+    /// (`0`, `false`, `""`). Proto3's default for singular scalars.
+    Plain,
+);
 
-/// Map field type, generic over key and value scalar types.
-/// On the wire, each map entry is a length-delimited message with field 1 = key, field 2 = value.
+/// Map field, generic over the key and value scalar types.
+///
+/// On the wire each entry is its own length-delimited message, key in field 1 and value in field 2,
+/// which is why a map is a label in its own right rather than a `Repeated` of something.
 #[derive(Debug, PartialEq, Eq, Default)]
 pub struct PbMap<K, V>(PhantomData<(K, V)>);
 impl<K, V> Copy for PbMap<K, V> {}
@@ -65,7 +71,10 @@ impl<const N: u32, P> Field<N, P> {
 pub mod optional {
     use super::*;
     impl<const N: u32, P: ProtobufScalar> Field<N, Optional<P>> {
-        /// Writes the field if `value` is `Some`, skips it if `None`.
+        /// Writes the field if `value` is `Some`, skips it entirely if `None`.
+        ///
+        /// `V` is anything [`ProtoEncode<P>`](`ProtoEncode`), so a `PbString` field takes any
+        /// `AsRef<str>` and a numeric field any of the matching primitives — no conversion needed.
         // important inline, and do NOT also inline `write_msg`
         #[inline]
         pub fn write<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: Option<V>) -> Self {
@@ -86,9 +95,27 @@ pub mod optional {
     }
 
     impl<const N: u32, M: MessageSchema> Field<N, Optional<M>> {
-        /// Writes a nested message field. The closure receives the buffer (through the
-        /// Tack's borrow) and a default schema instance for the nested message.
-        /// The length prefix is patched automatically when the closure returns.
+        /// Writes a nested message field. The closure receives the buffer and the nested message's
+        /// own schema; the length prefix is filled in when it returns.
+        ///
+        /// ```
+        /// use tacky::*;
+        /// # pub struct Header {
+        /// #     pub title: Field<1, Optional<PbString>>,
+        /// #     pub version: Field<2, Optional<Int32>>,
+        /// # }
+        /// # impl MessageSchema for Header {}
+        /// # pub struct Envelope { pub header: Field<1, Optional<Header>> }
+        /// # impl MessageSchema for Envelope {}
+        /// let mut buf = Vec::new();
+        /// Envelope::schema().header.write_msg(&mut buf, |buf, hdr| {
+        ///     hdr.title.write(buf, Some("report"));
+        ///     hdr.version.write(buf, Some(2));
+        /// });
+        /// ```
+        ///
+        /// Nesting goes as deep as your schema does, and the same struct-literal exhaustiveness
+        /// check works inside the closure.
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             buf.put_msg(t, |buf| f(buf, M::schema()));
@@ -102,10 +129,11 @@ pub mod repeated {
     impl<const N: u32, P: ProtobufScalar> Field<N, Repeated<P>> {
         /// Writes each element with its own tag. For non-packed repeated fields.
         ///
-        /// [`OrderedIter`] hands the elements over in the order this buffer needs them,
-        /// which for a downward-growing one is back-to-front, since each write prepends.
-        /// Only that direction constrains the iterator. A forward buffer takes any of them,
-        /// a `HashSet`'s included.
+        /// Takes any iterator through a forward buffer, a `HashSet`'s included. A reverse buffer
+        /// needs a [`DoubleEndedIterator`], because this call walks it backwards to get the list
+        /// order right — see [`RevBuf`]'s [ordering contract](`crate::RevBuf#ordering-contract`).
+        ///
+        /// [`RevBuf`]: crate::RevBuf
         #[inline]
         pub fn write<
             B: WriteBuf,
@@ -132,12 +160,24 @@ pub mod repeated {
         ///
         /// For a homogeneous list prefer `write`, which takes any iterator. This is for the
         /// *heterogeneous* one. `write` fixes one `I::Item` for the whole list, whereas each call
-        /// here picks its own `V`, so a repeated string field can take a `&str`, then a `String`,
-        /// then a [`PbDisplay`](`crate::PbDisplay`).
+        /// here picks its own `V`:
         ///
-        /// Elements appear in call order through a forward buffer and in **reverse** call order
-        /// through a downward-growing one, since each call prepends. See [`RevBuf`]'s ordering
-        /// contract.
+        /// ```
+        /// use tacky::*;
+        /// # pub struct M { pub tags: Field<1, Repeated<PbString>> }
+        /// # impl MessageSchema for M {}
+        /// let mut buf = Vec::new();
+        /// let schema = M::schema();
+        /// let owned = String::from("beta");
+        ///
+        /// schema.tags.write_single(&mut buf, "alpha");        // &str
+        /// schema.tags.write_single(&mut buf, &owned);         // &String
+        /// schema.tags.write_single(&mut buf, PbDisplay(&7));  // anything Display
+        /// ```
+        ///
+        /// One call per element, so through a [`RevBuf`] they come out in reverse call order: call
+        /// tail-first, or let `write` own the list. See its
+        /// [ordering contract](`crate::RevBuf#ordering-contract`).
         ///
         /// [`RevBuf`]: crate::RevBuf
         #[inline]
@@ -157,13 +197,12 @@ pub mod repeated {
     impl<const N: u32, M: MessageSchema> Field<N, Repeated<M>> {
         /// Writes one entry of a repeated message field.
         ///
-        /// Reach for `write_msgs` when the entries come from one list, since it owns the
-        /// iteration and so gets the order right in either direction. This one is for entries with no single
+        /// Reach for `write_msgs` when the entries come from one list, since it owns the iteration
+        /// and so gets the order right in either direction. This one is for entries with no single
         /// Rust type, where one closure per call can capture whatever it likes.
         ///
-        /// Entries appear in call order through a forward buffer and in **reverse** call order
-        /// through a downward-growing one, since each call prepends its whole entry. See
-        /// [`RevBuf`]'s ordering contract.
+        /// One call per entry, so through a [`RevBuf`] they come out in reverse call order. See its
+        /// [ordering contract](`crate::RevBuf#ordering-contract`).
         ///
         /// [`RevBuf`]: crate::RevBuf
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
@@ -174,10 +213,24 @@ pub mod repeated {
 
         /// Writes every element of `values`, one length-delimited submessage each.
         ///
-        /// Equivalent to `write_msg` in a loop, except that the writer owns the iteration, which
-        /// is what lets it emit elements back-to-front for a downward-growing buffer, where a
-        /// caller's own loop would silently reverse the list. The closure takes the element as a
-        /// third argument, the only difference at the call site.
+        /// ```
+        /// use tacky::*;
+        /// # pub struct Event { pub name: Field<1, Optional<PbString>> }
+        /// # impl MessageSchema for Event {}
+        /// # pub struct Log { pub events: Field<1, Repeated<Event>> }
+        /// # impl MessageSchema for Log {}
+        /// let mut buf = Vec::new();
+        /// Log::schema().events.write_msgs(&mut buf, ["scroll", "click"], |buf, ev, name| {
+        ///     ev.name.write(buf, Some(name));
+        /// });
+        /// ```
+        ///
+        /// Equivalent to `write_msg` in a loop, except that the writer owns the iteration, so it
+        /// can emit the elements back-to-front for a [`RevBuf`] where your own loop would silently
+        /// reverse the list. The closure taking the element as a third argument is the only
+        /// difference at the call site. Prefer this whenever the entries come from one list.
+        ///
+        /// [`RevBuf`]: crate::RevBuf
         pub fn write_msgs<B: WriteBuf, I: OrderedIter<B::Order> + IntoIterator>(
             self,
             buf: &mut B,
@@ -229,6 +282,15 @@ pub mod packed {
         /// fixed32, etc.), this bypasses the Tack entirely and writes the length prefix
         /// directly since `count * fixed_size` gives the exact byte length upfront.
         /// For varint types, falls back to the Tack since encoded size depends on values.
+        ///
+        /// ```
+        /// use tacky::*;
+        /// # pub struct M { pub samples: Field<1, Packed<Double>> }
+        /// # impl MessageSchema for M {}
+        /// let mut buf = Vec::new();
+        /// M::schema().samples.write_exact(&mut buf, [1.5, 2.5, 3.5]);
+        /// assert_eq!(buf.len(), 2 + 3 * 8);  // tag, length, three f64s
+        /// ```
         ///
         /// On the fixed-size path the prefix is written *before* the elements, from `len()`, so
         /// `len()` **must** equal the number of elements actually yielded. Every std source and
@@ -282,9 +344,11 @@ pub mod packed {
             Field::new()
         }
     }
-    /// Iterator over values in a packed repeated field during deserialization.
-    /// Yields one decoded scalar per call to `next()`. Borrows the packed
-    /// byte slice, so no allocation is needed.
+    /// Iterator over the values of a packed repeated field, one decoded scalar per `next()`.
+    /// Borrows the packed bytes, so decoding a packed field allocates nothing.
+    ///
+    /// Yielded by a generated field enum's packed variants; you receive one rather than build it.
+    /// Each item is a `Result`, since a varint can be malformed part-way through the run.
     #[derive(Debug, Copy, Clone, PartialEq)]
     pub struct PackedIter<'a, T: Packable> {
         buf: &'a [u8],
@@ -474,13 +538,29 @@ pub mod maps {
         /// Writes all key-value pairs from an iterator. Accepts anything that yields
         /// pairs of encodable types, such as `HashMap`, `BTreeMap` or arrays of tuples.
         ///
-        /// Entry order is *not* reversed for a downward-growing buffer, unlike a repeated
-        /// field's elements. Protobuf leaves map entry order unspecified, and requiring
-        /// `DoubleEndedIterator` here would rule out `HashMap`, whose iterator is not one. The
-        /// one visible consequence is duplicate keys, which the wire format resolves
-        /// last-one-wins, so an input yielding the same key twice resolves to the *other* value
-        /// than it would through a forward buffer. `HashMap`/`BTreeMap` cannot produce
-        /// duplicates; an iterator of tuples can.
+        /// ```
+        /// use tacky::*;
+        /// use std::collections::BTreeMap;
+        /// # pub struct M { pub headers: Field<1, PbMap<PbString, PbString>> }
+        /// # impl MessageSchema for M {}
+        /// let mut buf = Vec::new();
+        /// let schema = M::schema();
+        ///
+        /// schema.headers.write(&mut buf, [("host", "example.com")]);
+        ///
+        /// let owned: BTreeMap<&str, &str> = BTreeMap::from([("accept", "*/*")]);
+        /// schema.headers.write(&mut buf, &owned);
+        /// ```
+        ///
+        /// Any iterator will do in either direction, `HashMap`'s included — entries are written in
+        /// iteration order and never reversed, since protobuf leaves map entry order unspecified.
+        /// Requiring a `DoubleEndedIterator` here would have ruled `HashMap` out for nothing.
+        ///
+        /// That costs you only duplicate keys, which resolve last-one-wins and so land on the other
+        /// value through a [`RevBuf`] than they would forwards. A `HashMap` or `BTreeMap` cannot
+        /// produce a duplicate; an iterator of tuples can.
+        ///
+        /// [`RevBuf`]: crate::RevBuf
         pub fn write<
             Buf: WriteBuf,
             I: IntoIterator<Item = (A, B)>,
@@ -498,6 +578,19 @@ pub mod maps {
         }
         /// Writes a single map entry. The value is `Option` so that key-only entries
         /// can represent deletions in update messages.
+        ///
+        /// ```
+        /// use tacky::*;
+        /// # pub struct M { pub headers: Field<1, PbMap<PbString, PbString>> }
+        /// # impl MessageSchema for M {}
+        /// let mut buf = Vec::new();
+        /// let schema = M::schema();
+        ///
+        /// schema.headers.write_entry(&mut buf, "x-trace", Some("abc"));
+        /// schema.headers.write_entry::<_, _, &str>(&mut buf, "x-tombstone", None);
+        /// ```
+        ///
+        /// A `None` value needs the turbofish, since nothing in the call names the value type.
         pub fn write_entry<Buf: WriteBuf, A: ProtoEncode<K>, B: ProtoEncode<V>>(
             self,
             buf: &mut Buf,
@@ -548,8 +641,7 @@ pub mod maps {
 
             // Same check the reverse path gets from `fwd.len()`, measured explicitly here. `cfg`
             // rather than a bare `let`, so release does not carry an unused load. A mispredicted
-            // `len` writes a prefix that disagrees with the payload. The entry either truncates
-            // or leaks its tail out as bogus parent fields.
+            // `len` corrupts the entry the way `write_exact` documents.
             #[cfg(debug_assertions)]
             let start_len = buf.len();
             entry.write(buf);
@@ -570,7 +662,20 @@ pub mod maps {
         }
     }
     impl<const N: u32, K: ProtobufScalar, M: MessageSchema> Field<N, PbMap<K, M>> {
-        /// Writes a map entry where the value is a nested message, written via closure.
+        /// Writes a map entry whose value is a nested message, through a closure as
+        /// [`write_msg`](`Field::write_msg`) does.
+        ///
+        /// ```
+        /// use tacky::*;
+        /// # pub struct Stats { pub hits: Field<1, Optional<Uint64>> }
+        /// # impl MessageSchema for Stats {}
+        /// # pub struct M { pub per_route: Field<1, PbMap<PbString, Stats>> }
+        /// # impl MessageSchema for M {}
+        /// let mut buf = Vec::new();
+        /// M::schema().per_route.write_msg(&mut buf, "/index", |buf, st| {
+        ///     st.hits.write(buf, Some(42));
+        /// });
+        /// ```
         pub fn write_msg<B: WriteBuf, A: ProtoEncode<K>>(
             self,
             buf: &mut B,
@@ -610,9 +715,10 @@ pub mod maps {
     }
 }
 
-/// Marker trait for generated message schema types. Implemented by `tacky-build`
-/// on every generated schema struct. Used as a bound on `Field`'s `write_msg`
-/// methods to distinguish nested message fields from scalar fields.
+/// Marker trait for generated message schema types, and the bound that tells `Field`'s `write_msg`
+/// methods a field is a nested message rather than a scalar.
+///
+/// Implemented by `tacky-build` on every generated schema struct; you should not need to write one.
 pub trait MessageSchema: Sized {
     /// Constructs a fresh schema value. Generated schemas are zero-sized,
     /// so this never allocates and never reads memory.
@@ -629,14 +735,33 @@ pub trait MessageSchema: Sized {
     }
 }
 
-/// Bridges domain types to protobuf scalars for serialization.
+/// Bridges your own types to protobuf scalars, so a field can be written from them directly.
 ///
-/// Implement this for your own types to make them directly writable through tacky.
-/// For example, a `UserId(u64)` could implement `ProtoEncode<Uint64>` by returning
-/// the inner value from `as_scalar()`.
+/// The blanket impls already cover the Rust primitives and anything `AsRef<str>` or `AsRef<[u8]>`;
+/// implement it yourself when a domain type wraps one of those:
 ///
-/// The default implementations cover the standard Rust primitives: `i32` encodes as
-/// `Int32`/`Sint32`/`Sfixed32`, anything `AsRef<str>` encodes as `PbString`, etc.
+/// ```
+/// use tacky::*;
+/// #[derive(Clone, Copy)]
+/// pub struct UserId(u64);
+///
+/// impl ProtoEncode<Uint64> for UserId {
+///     fn as_scalar(&self) -> u64 { self.0 }
+/// }
+/// # pub struct M {
+/// #     pub owner: Field<1, Optional<Uint64>>,
+/// #     pub members: Field<2, Packed<Uint64>>,
+/// # }
+/// # impl MessageSchema for M {}
+/// let mut buf = Vec::new();
+/// let schema = M::schema();
+///
+/// schema.owner.write(&mut buf, Some(UserId(7)));
+/// schema.members.write(&mut buf, [UserId(1), UserId(2)]);
+/// ```
+///
+/// One method is usually the whole impl. [`is_default`](`ProtoEncode::is_default`) matters only for
+/// a [`Plain`] field, and [`encode`](`ProtoEncode::encode`) only if `as_scalar` cannot be cheap.
 pub trait ProtoEncode<P: ProtobufScalar> {
     /// Returns the value as the protobuf scalar's Rust type for encoding.
     /// Must be implemented. Packed fields rely on this to compute element sizes.
@@ -646,17 +771,15 @@ pub trait ProtoEncode<P: ProtobufScalar> {
     fn is_default(&self) -> bool {
         self.as_scalar() == P::RustType::default()
     }
-    /// Writes the encoded value to the buffer. The default implementation calls
-    /// `as_scalar()` and delegates to `P::write_value`. Override this directly
-    /// if your type can't cheaply produce the scalar's Rust type, but note that packed fields
-    /// won't work without `as_scalar()`.
+    /// Writes the encoded value. The default calls `as_scalar()` and hands it to `P::write_value`;
+    /// override it only when your type cannot produce the scalar's Rust type cheaply, and note that
+    /// packed fields still need a working `as_scalar()`.
     ///
-    /// An override **must write exactly as many bytes as `as_scalar()`'s value measures**.
-    /// Map entries size themselves from `as_scalar()` before writing anything, so a wider
-    /// `encode` produces a length prefix that disagrees with the payload. The entry truncates,
-    /// and its tail reparses as bogus fields of the parent message.
-    /// [`PbDisplay`](`crate::PbDisplay`) and [`PbWrite`](`crate::PbWrite`) break this on
-    /// purpose and are documented as unusable in maps.
+    /// An override **must write exactly as many bytes as `as_scalar()`'s value measures**, because
+    /// a map entry sizes itself from `as_scalar()` before writing anything. A wider `encode` leaves
+    /// a length prefix disagreeing with its payload, which corrupts the entry.
+    /// [`PbDisplay`](`crate::PbDisplay`) and [`PbWrite`](`crate::PbWrite`) break this deliberately,
+    /// which is why both are unusable as a map key or value.
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
         let value = value.as_scalar();
         P::write_value(value, buf);

@@ -39,13 +39,14 @@ pub trait WriteBuf: private::Sealed {
     #[doc(hidden)]
     fn as_mut_slice(&mut self) -> &mut [u8];
 
-    /// Grow the buffer by `additional` bytes. Called only on the overflow cold path.
-    /// Fixed-size buffers should panic here.
+    /// Grow the buffer by `additional` bytes. Called only when a [`Tack`](`crate::Tack`)'s length
+    /// placeholder turns out too narrow and the payload has to shift. Fixed-size buffers panic here
+    /// unless they have room to spare.
     #[doc(hidden)]
     fn grow(&mut self, additional: usize);
 
-    /// Shift bytes within the buffer. Used on the overflow cold path to make room
-    /// for a wider length varint.
+    /// Shift bytes within the buffer, to make room for a wider length varint. Same cold path as
+    /// [`WriteBuf::grow`].
     #[doc(hidden)]
     fn copy_within(&mut self, src: core::ops::Range<usize>, dest: usize);
 
@@ -75,8 +76,10 @@ pub trait WriteBuf: private::Sealed {
 
     /// Writes a length-delimited submessage: the tag, the byte length of whatever `f` writes, and
     /// the payload. The forward default reserves a [`Tack`](`crate::Tack`); a downward-growing
-    /// buffer runs `f` first and prepends the exact length. Every nested-message and packed-field
-    /// writer goes through here, so this is the only place submessage direction lives.
+    /// buffer runs `f` first and prepends the exact length.
+    //
+    // Every nested-message and packed-field writer goes through here, so this is the only place
+    // submessage direction lives.
     // important inline
     #[inline]
     fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self))
@@ -161,7 +164,7 @@ impl Order for Reverse {
 }
 
 impl Order for Both {
-    /// A placeholder. See [`Both`].
+    // Never read: a `WriteBuf` with `Order = Both` overrides `REVERSE` with the real buffer's.
     const REVERSE: bool = false;
 }
 
@@ -268,12 +271,22 @@ impl<I: DoubleEndedIterator + ExactSizeIterator> ExactSizeIterator for EitherIte
 /// A view of any buffer for code that has not picked a direction, i.e. what
 /// `fn encode(buf: &mut impl WriteBuf)` wanted to be:
 ///
-/// ```ignore
-/// fn write_file<B: WriteBuf>(buf: &mut AnyDir<B>, f: &FileDescriptorProto) {
-///     schema.dependency.write(buf, &f.dependency);          // iterators stay bare
+/// ```
+/// use tacky::*;
+/// # pub struct M { pub tags: Field<1, Repeated<PbString>> }
+/// # impl MessageSchema for M {}
+/// fn write_tags<B: WriteBuf>(buf: &mut AnyDir<B>, tags: &[&str]) {
+///     M::schema().tags.write(buf, tags);          // iterators stay bare
 /// }
-/// write_file(AnyDir::from_mut(&mut vec), &f);               // wrapped once, here
-/// write_file(AnyDir::from_mut(&mut rev_buf), &f);
+///
+/// let mut vec = Vec::new();
+/// write_tags(AnyDir::from_mut(&mut vec), &["a", "b"]);   // wrapped once, here
+///
+/// let mut backing = [0u8; 64];
+/// let mut rev = RevBuf::new(&mut backing);
+/// write_tags(AnyDir::from_mut(&mut rev), &["a", "b"]);
+///
+/// assert_eq!(vec, rev.written());                 // same bytes either way
 /// ```
 ///
 /// It forwards every write to `B` unchanged, including [`WriteBuf::REVERSE`], so the bytes and the
@@ -439,20 +452,45 @@ mod alloc_impls {
 // --- Reverse (downward-growing) buffer ---
 
 /// A buffer that fills from the end backwards, so a nested message's length is known by the time
-/// it has to be written. Doesnt use a [`Tack`](`crate::Tack`), so no overflow shifts.
+/// it has to be written. Doesn't use a [`Tack`](`crate::Tack`), so no overflow shifts.
 ///
-/// The cost is that **every write prepends**, so fields appear on the wire in the reverse of the
-/// order they are written. Protobuf allows any field order, with two exceptions the caller owns.
+/// # Ordering contract
 ///
-/// - **Repeated fields must be written back-to-front**, since their wire order is their list
-///   order. One writer call handles this for you, because [`OrderedIter`] walks the iterator
+/// **Every write prepends**, so fields appear on the wire in the reverse of the order they were
+/// written. Protobuf allows any field order, with two exceptions the caller owns.
+///
+/// - **Repeated fields must be emitted back-to-front**, since their wire order is their list order.
+///   A single writer call handles this for you, because [`OrderedIter`] walks the iterator
 ///   backwards. Across calls it cannot, because each write prepends its whole block, so two
 ///   `write_msgs` calls, or a loop of `write_msg`/`write_single`, come out in reverse call order.
-///   Let one call own the whole list where you can, otherwise call them tail-first.
-/// - **Duplicate map keys** follow last-one-wins, so their relative order matters too.
+///   Let one call own the whole list where you can; otherwise call them tail-first.
+/// - **Duplicate map keys** follow last-one-wins, so their relative order matters too. Map entries
+///   are *not* reversed for you, since protobuf leaves entry order unspecified — so an iterator
+///   yielding the same key twice resolves to the other value than it would forwards.
 ///
 /// Writing a message's fields in descending field order therefore reproduces exactly the bytes an
-/// ascending forward writer produces.
+/// ascending forward writer produces:
+///
+/// ```
+/// use tacky::*;
+/// # pub struct M {
+/// #     pub text: Field<1, Optional<PbString>>,
+/// #     pub nums: Field<2, Packed<Int32>>,
+/// # }
+/// # impl MessageSchema for M {}
+/// let schema = M::schema();
+///
+/// let mut backing = [0u8; 64];
+/// let mut rev = RevBuf::new(&mut backing);
+/// schema.nums.write(&mut rev, [1, 2, 3]);      // field 2 first,
+/// schema.text.write(&mut rev, Some("hello"));  // field 1 second
+///
+/// let mut fwd = Vec::new();
+/// schema.text.write(&mut fwd, Some("hello"));
+/// schema.nums.write(&mut fwd, [1, 2, 3]);
+///
+/// assert_eq!(rev.written(), fwd.as_slice());
+/// ```
 ///
 /// Fixed capacity, so `grow` panics as it does on [`SliceBuf`]; see
 /// [Running out of room](`SliceBuf#running-out-of-room`). [`RevBuf::written`] returns the bytes,
@@ -628,6 +666,20 @@ impl WriteBuf for RevBuf<'_> {
 /// A fixed-size buffer for `no_std` / no-alloc environments.
 /// Wraps a `&mut [u8]` with a write cursor. Panics if the buffer is exhausted.
 ///
+/// ```
+/// use tacky::*;
+/// # pub struct M { pub text: Field<1, Optional<PbString>> }
+/// # impl MessageSchema for M {}
+/// let mut backing = [0u8; 64];
+/// let mut buf = SliceBuf::new(&mut backing);
+///
+/// M::schema().text.write(&mut buf, Some("hello"));
+/// assert_eq!(buf.written(), b"\x0a\x05hello");
+/// ```
+///
+/// Unlike [`RevBuf`], the bytes start at index 0, and a [`Tack`](`crate::Tack`) whose placeholder
+/// turns out too narrow still widens correctly as long as the buffer has room to spare.
+///
 /// # Running out of room
 ///
 /// Exhausting a fixed buffer panics (`SliceBuf overflow`, or `RevBuf exhausted` for [`RevBuf`]).
@@ -682,17 +734,31 @@ impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
 /// Wraps a reference to a [`Display`](`core::fmt::Display`) type so it can be written
 /// directly as a protobuf string field. The formatted output becomes the field's UTF-8 value.
 ///
-/// ```ignore
-/// schema.name.write(&mut buf, Some(PbDisplay(&my_ip)));
+/// `T` may be unsized, so `str` and `dyn Display` both work.
+///
+/// ```
+/// use tacky::*;
+/// use std::net::Ipv4Addr;
+/// # pub struct M { pub addr: Field<1, Optional<PbString>> }
+/// # impl MessageSchema for M {}
+/// let mut buf = Vec::new();
+/// let ip = Ipv4Addr::new(10, 0, 0, 1);
+///
+/// M::schema().addr.write(&mut buf, Some(PbDisplay(&ip)));
+/// assert_eq!(&buf[2..], b"10.0.0.1");
 /// ```
 ///
-/// Panics on a [`RevBuf`], since it streams through a [`Tack`](`crate::Tack`) placeholder, and if
+/// The length cannot be known before formatting, so this streams through a
+/// [`Tack`](`crate::Tack`) placeholder like any other length-delimited field: formatted output of
+/// 128 bytes or more rescales the prefix once.
+///
+/// Panics on a [`RevBuf`], since a prepending buffer would emit the chunks backwards, and if
 /// `Display::fmt` errors, rather than emit a half-formatted field under a correct length prefix.
 /// Unusable as a map key or value too, because `as_scalar` returns `""` while `encode` writes the
 /// real bytes, so `write_entry`'s precomputed length understates it.
 pub struct PbDisplay<'a, T: core::fmt::Display + ?Sized>(pub &'a T);
 
-impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_, T> {
+impl<T: core::fmt::Display + ?Sized> crate::ProtoEncode<crate::PbString> for PbDisplay<'_, T> {
     fn as_scalar(&self) -> &str {
         ""
     }
@@ -703,7 +769,7 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
         use core::fmt::Write;
-        let t = crate::Tack::new_with_width(buf, 2);
+        let t = crate::Tack::new(buf);
         // `FmtWriter::write_str` never fails, so the only `Err` is the value's own `Display::fmt`.
         // Named, because `unwrap` on a `fmt::Error` prints nothing diagnosable.
         write!(FmtWriter(t.buffer), "{}", value.0).expect("PbDisplay: Display::fmt failed");
@@ -738,12 +804,21 @@ impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
 /// Wraps a closure that writes bytes into an [`IoWriter`] so it can be used directly
 /// as a protobuf bytes or string field. The closure receives an `&mut impl io::Write`.
 ///
-/// ```ignore
-/// schema.json_field.write(&mut buf, Some(PbWrite(|w| serde_json::to_writer(w, &val))));
+/// ```
+/// use tacky::*;
+/// use std::io::Write;
+/// # pub struct M { pub blob: Field<1, Optional<PbBytes>> }
+/// # impl MessageSchema for M {}
+/// let mut buf = Vec::new();
+///
+/// M::schema().blob.write(&mut buf, Some(PbWrite(|w: &mut dyn Write| {
+///     w.write_all(b"{\"k\":1}")   // e.g. serde_json::to_writer(w, &val)
+/// })));
+/// assert_eq!(&buf[2..], b"{\"k\":1}");
 /// ```
 ///
-/// Panics on a [`RevBuf`], and unusable as a map key or value. See [`PbDisplay`].
-/// Panics if the closure errors rather than emit a truncated field.
+/// Streams through a placeholder as [`PbDisplay`] does, with the same restrictions: panics on a
+/// [`RevBuf`] or if the closure errors, and unusable as a map key or value.
 #[cfg(feature = "std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub struct PbWrite<F>(pub F);
@@ -762,7 +837,7 @@ where
     }
 
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
-        let t = crate::Tack::new_with_width(buf, 2);
+        let t = crate::Tack::new(buf);
         (value.0)(&mut IoWriter(t.buffer)).expect("PbWrite closure failed mid-field");
     }
 }
@@ -781,7 +856,7 @@ where
     }
 
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
-        let t = crate::Tack::new_with_width(buf, 2);
+        let t = crate::Tack::new(buf);
         (value.0)(&mut IoWriter(t.buffer)).expect("PbWrite closure failed mid-field");
     }
 }
@@ -908,6 +983,39 @@ mod tests {
             Err(std::io::Error::other("serializer gave up"))
         });
         <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut buf, &w);
+    }
+
+    // Both stream through a `Tack`, so they carry a `DEFAULT_WIDTH` placeholder like every other
+    // length-delimited field and must produce a *minimal* prefix either side of the 128-byte
+    // boundary where the placeholder rescales. A hardcoded width silently costs a byte below it.
+    #[test]
+    fn pb_display_length_prefix_is_minimal() {
+        for n in [1usize, 127, 128, 300] {
+            let mut buf = Vec::new();
+            let s = alloc::string::String::from_utf8(alloc::vec![b'x'; n]).unwrap();
+            // `&*s` is an unsized `str`, which the impl accepts via `?Sized`.
+            <PbDisplay<'_, str> as ProtoEncode<PbString>>::encode(&mut buf, &PbDisplay(&*s));
+
+            let expected_prefix = encoded_len_varint(n as u64);
+            assert_eq!(buf.len(), expected_prefix + n, "n = {n}");
+            let mut cursor = &buf[..];
+            assert_eq!(decode_len(&mut cursor).unwrap(), s.as_bytes(), "n = {n}");
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn pb_write_length_prefix_is_minimal() {
+        for n in [1usize, 127, 128, 300] {
+            let mut buf = Vec::new();
+            let payload = alloc::vec![b'y'; n];
+            let w = PbWrite(|w: &mut dyn std::io::Write| w.write_all(&alloc::vec![b'y'; n]));
+            <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut buf, &w);
+
+            assert_eq!(buf.len(), encoded_len_varint(n as u64) + n, "n = {n}");
+            let mut cursor = &buf[..];
+            assert_eq!(decode_len(&mut cursor).unwrap(), &payload[..], "n = {n}");
+        }
     }
 
     #[test]

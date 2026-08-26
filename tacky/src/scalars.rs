@@ -10,34 +10,51 @@ use core::marker::PhantomData;
 use crate::WriteBuf;
 
 macro_rules! protobuf_types {
-    ($($name:ident)*) => {
+    ($($(#[$doc:meta])* $name:ident)*) => {
         $(
+            $(#[$doc])*
             #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
             pub struct $name;
         )*
     };
 }
 protobuf_types!(
+    /// `int32`, as an `i32`. Two's-complement varint, so a negative value always costs 10 bytes;
+    /// [`Sint32`] is the cheaper choice for data that goes negative.
     Int32
+    /// `sint32`, as an `i32`. ZigZag varint, so small magnitudes stay small in both directions.
     Sint32
+    /// `int64`, as an `i64`. Negative values cost 10 bytes, as [`Int32`].
     Int64
+    /// `sint64`, as an `i64`. ZigZag varint, as [`Sint32`].
     Sint64
+    /// `uint32`, as a `u32`. Varint.
     Uint32
+    /// `uint64`, as a `u64`. Varint.
     Uint64
+    /// `bool`, as a `bool`. Varint, always one byte.
     Bool
+    /// `fixed32`, as a `u32`. Four little-endian bytes, which beats a varint above `2^28`.
     Fixed32
+    /// `sfixed32`, as an `i32`. Four little-endian bytes, so negatives cost no more than positives.
     Sfixed32
+    /// `float`, as an `f32`. Four little-endian bytes.
     Float
+    /// `fixed64`, as a `u64`. Eight little-endian bytes, which beats a varint above `2^56`.
     Fixed64
+    /// `sfixed64`, as an `i64`. Eight little-endian bytes.
     Sfixed64
+    /// `double`, as an `f64`. Eight little-endian bytes.
     Double
+    /// `string`. Length-delimited UTF-8, written from any `AsRef<str>` and decoded as a borrowed
+    /// `&str`. Named `PbString` to leave `String` alone.
     PbString
+    /// `bytes`. Length-delimited, written from any `AsRef<[u8]>` and decoded as a borrowed `&[u8]`.
     PbBytes
 );
 
-/// Constraint for types that can be used as protobuf enums.
-/// Protobuf enums are i32 on the wire, so this requires bidirectional i32 conversion.
-/// Generated enum types implement this automatically.
+/// Constraint for types usable as protobuf enums. Enums are `i32` on the wire, hence the
+/// bidirectional conversion. Generated enum types satisfy it via the blanket impl.
 pub trait PbEnumType: Copy + Into<i32> + From<i32> + Default + PartialEq {}
 impl<T: Copy + Into<i32> + From<i32> + Default + PartialEq> PbEnumType for T {}
 
@@ -76,9 +93,9 @@ pub trait ProtobufScalar {
     }
 }
 
-/// Marker for scalars that can appear in `packed` repeated fields.
-/// All numeric types and enums are packable. Strings and bytes are not, since protobuf's wire
-/// format doesn't support packing length-delimited types.
+/// Marker for scalars that can appear in a [`Packed`](`crate::Packed`) field. Every numeric type and
+/// enum is packable; strings and bytes are not, since the wire format cannot pack length-delimited
+/// values.
 pub trait Packable: ProtobufScalar {}
 impl Packable for Int32 {}
 impl Packable for Sint32 {}
@@ -519,8 +536,10 @@ impl From<core::str::Utf8Error> for DecodeError {
     }
 }
 
-/// Decodes a field key into its field number and wire type.
-/// Every protobuf field on the wire starts with this key.
+/// Decodes a field key into its field number and wire type. Every protobuf field on the wire
+/// starts with one.
+///
+/// Called by generated decoders; not usually called directly.
 #[inline]
 pub fn decode_key(buf: &mut &[u8]) -> Result<(u32, WireType), DecodeError> {
     let v = decode_varint(buf)?;
@@ -552,9 +571,10 @@ pub fn check_wire_type(
     Ok(())
 }
 
-/// Advances the cursor past an unknown field value based on its wire type.
-/// Used by generated deserializers to skip fields not recognized by the schema,
-/// enabling forward compatibility.
+/// Advances the cursor past an unknown field value, using its wire type to know how far. This is
+/// what makes an unrecognised field skippable, and so what makes decoding forward-compatible.
+///
+/// Called by generated decoders; not usually called directly.
 #[cold]
 pub fn skip_field(wire_type: WireType, buf: &mut &[u8]) -> Result<(), DecodeError> {
     match wire_type {
@@ -623,7 +643,8 @@ pub fn decode_varint(buf: &mut &[u8]) -> Result<u64, DecodeError> {
     }
 }
 
-/// Stolen from Prost. Unrolled varint decoder for the common case where 10 or more bytes remain.
+/// Unrolled varint decoder for the common case where 10 or more bytes remain. Same shape as
+/// prost's, which is the conventional way to write this.
 #[inline]
 fn decode_varint_long(buf: &mut &[u8]) -> Result<u64, DecodeError> {
     let bytes = *buf;
@@ -803,10 +824,11 @@ mod tests {
 
 /// A field tag (field number + wire type) pre-encoded as varint bytes.
 ///
-/// Used via `const { EncodedTag::new(N, P::WIRE_TYPE) }` in generated code so
-/// the varint encoding happens at compile time. At runtime, writing a tag is
-/// just a memcpy of 1-2 bytes. This matters in tight loops over repeated fields
-/// where the tag is written once per element.
+/// Written by generated code as `const { EncodedTag::new(N, P::WIRE_TYPE) }`, so the varint
+/// encoding happens at compile time and writing a tag is a 1-2 byte copy. That matters in a loop
+/// over a repeated field, where the tag is written once per element.
+///
+/// Constructed by generated code; not usually named directly.
 #[derive(Copy, Clone)]
 pub struct EncodedTag {
     bytes: [u8; 5],

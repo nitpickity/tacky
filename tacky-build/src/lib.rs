@@ -1,4 +1,4 @@
-//! Build-time code generation for [`tacky`](https://docs.rs/tacky).
+//! Build-time code generation for the `tacky` crate.
 //!
 //! Call [`write_proto`] (or [`write_proto_with_includes`]) from `build.rs`, once per `.proto` file.
 //! Each call emits a zero-sized schema struct per message, an enum per message for decoding, and a
