@@ -46,16 +46,13 @@ pub fn field_ident(name: &str) -> proc_macro2::Ident {
         .unwrap_or_else(|_| proc_macro2::Ident::new_raw(name, proc_macro2::Span::call_site()))
 }
 
-fn read_proto_file(file: &str, includes: &[&str]) -> Vec<FileDescriptor> {
-    let cfg = pb_rs::ConfigBuilder::new(&[file], None, None, includes).unwrap();
-    let cfg = cfg.build();
-    let mut out = Vec::new();
-    for cfg in cfg {
-        let file = pb_rs::types::FileDescriptor::read_proto(&cfg.in_file, &cfg.import_search_path)
-            .unwrap();
-        out.push(file)
+fn read_proto_file(file: &str, includes: &[&str]) -> FileDescriptor {
+    let mut search_path: Vec<std::path::PathBuf> = includes.iter().map(Into::into).collect();
+    let dot = std::path::PathBuf::from(".");
+    if !search_path.contains(&dot) {
+        search_path.push(dot);
     }
-    out
+    FileDescriptor::read_proto(std::path::Path::new(file), &search_path).unwrap()
 }
 
 #[derive(Debug)]
@@ -245,7 +242,6 @@ fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
         typ,
         number,
         default,
-        deprecated,
     } = field;
     let ty = resolve_type(typ.clone(), desc);
     let mut label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
@@ -466,8 +462,7 @@ pub fn write_proto(file: &str, output: &str) {
 }
 
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
-    let mut files = read_proto_file(file, includes);
-    let test_file = files.pop().unwrap();
+    let test_file = read_proto_file(file, includes);
 
     let all_messages = collect_all_messages(&test_file.messages, "");
     let all_enums = collect_all_enums(&test_file.messages, &test_file.enums, "");
