@@ -220,18 +220,83 @@ pub struct FileDescriptor {
 
 impl FileDescriptor {
     /// Parse `in_file`, inline its transitive imports, and resolve every type reference.
-    ///
-    /// Runs in four passes: parse each file to a tree of nested messages; merge the imports into
-    /// one descriptor; flatten that into `messages`/`enums`/`symbols`; resolve the type references
-    /// against the merged symbol table. Resolution is last and happens once, over everything, so
-    /// no name ever has to be resolved against a scope it will later be moved out of.
     pub fn read_proto(in_file: &Path, import_search_path: &[PathBuf]) -> Result<FileDescriptor> {
+        Self::read_protos(
+            std::slice::from_ref(&in_file.to_path_buf()),
+            import_search_path,
+        )
+    }
+
+    /// [`read_proto`](Self::read_proto) over several entry points at once, yielding one descriptor
+    /// holding the union of everything reachable from any of them.
+    ///
+    /// This is what `protoc a.proto b.proto` does, and it is the only way to get two files that do
+    /// not import each other into one output — OpenTelemetry's logs and traces service definitions,
+    /// say, which are siblings sharing only `common` and `resource`. Generating them separately
+    /// would give two unrelated Rust types for every shared message.
+    ///
+    /// Runs in four passes: parse each file to a tree of nested messages; merge the imports and the
+    /// other roots into one descriptor; flatten that into `messages`/`enums`/`symbols`; resolve the
+    /// type references against the merged symbol table. Resolution is last and happens once, over
+    /// everything, so no name is ever resolved against a scope it will later be moved out of.
+    ///
+    /// A file reached from more than one root is parsed once. `package` and `syntax` on the result
+    /// are the first root's; with several roots they describe no single file, and nothing downstream
+    /// reads them.
+    pub fn read_protos(
+        in_files: &[PathBuf],
+        import_search_path: &[PathBuf],
+    ) -> Result<FileDescriptor> {
         let mut visited = HashSet::new();
-        let mut desc = Self::parse_tree(in_file, import_search_path, &mut visited)?;
+        let mut roots = in_files.iter();
+        let first = roots.next().ok_or(Error::NoProto)?;
+        let mut desc = Self::parse_tree(first, import_search_path, &mut visited)?;
+        for root in roots {
+            if visited.contains(&canonical(root)) {
+                // Another root already pulled this one in as an import.
+                continue;
+            }
+            let mut other = Self::parse_tree(root, import_search_path, &mut visited)?;
+            desc.merge(&mut other);
+        }
         desc.flatten();
         desc.resolve_types()?;
         desc.sanity_checks()?;
         Ok(desc)
+    }
+
+    /// Move `other`'s messages and enums in, dropping anything already present under the same
+    /// qualified name.
+    ///
+    /// Protobuf guarantees qualified names are unique, so a repeat is the same definition and
+    /// dropping it is lossless. That is what makes a diamond import — and two roots sharing an
+    /// import — merge cleanly.
+    fn merge(&mut self, other: &mut FileDescriptor) {
+        let package = other.package.clone();
+        for mut m in other.messages.drain(..) {
+            if m.package.is_empty() {
+                m.set_package(&package);
+            }
+            if !self
+                .messages
+                .iter()
+                .any(|e| e.package == m.package && e.name == m.name)
+            {
+                self.messages.push(m);
+            }
+        }
+        for mut e in other.enums.drain(..) {
+            if e.package.is_empty() {
+                e.set_package(&package);
+            }
+            if !self
+                .enums
+                .iter()
+                .any(|x| x.package == e.package && x.name == e.name)
+            {
+                self.enums.push(e);
+            }
+        }
     }
 
     /// Parse one file and merge its imports, leaving messages nested and types unresolved. Called
@@ -275,14 +340,16 @@ impl FileDescriptor {
             m.set_package(&self.package);
         }
 
-        for import in &self.import_paths {
+        // Cloned rather than borrowed: `merge` takes `&mut self`, so the list cannot stay borrowed
+        // out of `self` across the loop.
+        for import in self.import_paths.clone() {
             // `protoc -I` semantics: an import path is joined onto each include root in turn, and
             // the roots are taken as given — a relative one against the process's working
             // directory, not against the importing file. Resolving against the importing file, as
             // this used to, makes a deep tree unreachable whenever the root is relative.
             let mut matching_file = None;
             for path in import_search_path {
-                let candidate = path.join(import);
+                let candidate = path.join(&import);
                 if candidate.exists() {
                     matching_file = Some(candidate);
                     break;
@@ -304,51 +371,7 @@ impl FileDescriptor {
                 continue;
             }
             let mut f = FileDescriptor::parse_tree(&proto_file, import_search_path, visited)?;
-
-            // if the proto has a packge then the names will be prefixed
-            let package = f.package.clone();
-            // A diamond import (a imports b and c, and b also imports c) reaches the
-            // same file twice, so merge by fully-qualified name. Protobuf guarantees
-            // those are unique, which makes a repeat the same definition and dropping
-            // it lossless.
-            let messages: Vec<Message> = f
-                .messages
-                .drain(..)
-                .map(|mut m| {
-                    if m.package.is_empty() {
-                        m.set_package(&package);
-                    }
-                    m
-                })
-                .collect();
-            for m in messages {
-                if !self
-                    .messages
-                    .iter()
-                    .any(|e| e.package == m.package && e.name == m.name)
-                {
-                    self.messages.push(m);
-                }
-            }
-            let enums: Vec<Enumerator> = f
-                .enums
-                .drain(..)
-                .map(|mut e| {
-                    if e.package.is_empty() {
-                        e.set_package(&package);
-                    }
-                    e
-                })
-                .collect();
-            for e in enums {
-                if !self
-                    .enums
-                    .iter()
-                    .any(|x| x.package == e.package && x.name == e.name)
-                {
-                    self.enums.push(e);
-                }
-            }
+            self.merge(&mut f);
         }
         Ok(())
     }
@@ -700,6 +723,172 @@ mod test {
             FieldType::Message("left.L".to_string()),
             field_type(&desc, "root.Root", "l"),
         );
+    }
+
+    /// Two roots that do not import each other, sharing an import, must merge into one descriptor
+    /// with a single copy of the shared message. This is the case a single root cannot express:
+    /// neither sibling reaches the other.
+    #[test]
+    fn multiple_roots_merge_and_share_imports() {
+        let dir = scratch(
+            "multi_root",
+            &[
+                (
+                    "common.proto",
+                    r#"syntax = "proto3";
+                    package common;
+                    message Shared { int32 v = 1; }
+                    "#,
+                ),
+                (
+                    "logs.proto",
+                    r#"syntax = "proto3";
+                    package logs;
+                    import "common.proto";
+                    message Logs { common.Shared s = 1; }
+                    "#,
+                ),
+                (
+                    "traces.proto",
+                    r#"syntax = "proto3";
+                    package traces;
+                    import "common.proto";
+                    message Traces { common.Shared s = 1; }
+                    "#,
+                ),
+            ],
+        );
+        let roots = [dir.join("logs.proto"), dir.join("traces.proto")];
+        let desc = FileDescriptor::read_protos(&roots, &[dir.clone()]).unwrap();
+
+        // Both roots are present, and the import they share appears once.
+        for fqn in ["logs.Logs", "traces.Traces", "common.Shared"] {
+            assert_eq!(
+                1,
+                desc.messages.iter().filter(|m| m.full_name == fqn).count(),
+                "expected exactly one {fqn}",
+            );
+        }
+        // And both refer to that one copy.
+        assert_eq!(
+            FieldType::Message("common.Shared".to_string()),
+            field_type(&desc, "logs.Logs", "s"),
+        );
+        assert_eq!(
+            FieldType::Message("common.Shared".to_string()),
+            field_type(&desc, "traces.Traces", "s"),
+        );
+    }
+
+    /// A root that another root already pulled in as an import is not merged twice.
+    #[test]
+    fn a_root_that_is_also_an_import_appears_once() {
+        let dir = scratch(
+            "root_is_import",
+            &[
+                (
+                    "dep.proto",
+                    r#"syntax = "proto3";
+                    package dep;
+                    message Dep { int32 v = 1; }
+                    "#,
+                ),
+                (
+                    "root.proto",
+                    r#"syntax = "proto3";
+                    package root;
+                    import "dep.proto";
+                    message Root { dep.Dep d = 1; }
+                    "#,
+                ),
+            ],
+        );
+        let roots = [dir.join("root.proto"), dir.join("dep.proto")];
+        let desc = FileDescriptor::read_protos(&roots, &[dir.clone()]).unwrap();
+
+        assert_eq!(2, desc.messages.len(), "{:?}", desc.messages.len());
+        assert_eq!(
+            1,
+            desc.messages
+                .iter()
+                .filter(|m| m.full_name == "dep.Dep")
+                .count(),
+        );
+    }
+
+    /// No roots at all is a caller error, not a panic or an empty descriptor.
+    #[test]
+    fn no_roots_errors() {
+        let err = FileDescriptor::read_protos(&[], &[]).unwrap_err();
+        assert!(matches!(err, Error::NoProto), "unexpected error: {err}");
+    }
+
+    /// A leading comment must not hide the syntax statement. It used to: the scan gave up and
+    /// defaulted to proto2, so a proto3 file's repeated scalars came out `Repeated` instead of
+    /// `Packed` — a real difference on the wire.
+    #[test]
+    fn leading_comment_does_not_hide_the_syntax() {
+        let dir = scratch(
+            "leading_comment",
+            &[(
+                "root.proto",
+                r#"// Copyright 2077 Somebody
+                /* and a block comment for good measure */
+                syntax = "proto3";
+                package a;
+                message M { repeated int32 vals = 1; }
+                "#,
+            )],
+        );
+        let desc = FileDescriptor::read_proto(&dir.join("root.proto"), &[dir.clone()]).unwrap();
+        assert_eq!(Syntax::Proto3, desc.syntax);
+        assert_eq!(
+            Some(Frequency::Packed),
+            desc.messages[0].fields[0].frequency,
+        );
+    }
+
+    /// Packedness is decided per file, from that file's own syntax. A proto2 file's unannotated
+    /// `repeated int32` stays expanded even when the file importing it is proto3 — this used to be
+    /// re-derived downstream from one descriptor-wide syntax, which packed it.
+    #[test]
+    fn imported_proto2_keeps_its_own_packing_rules() {
+        let dir = scratch(
+            "mixed_syntax",
+            &[
+                (
+                    "dep.proto",
+                    r#"syntax = "proto2";
+                    package dep;
+                    message Dep { repeated int32 vals = 1; }
+                    "#,
+                ),
+                (
+                    "root.proto",
+                    r#"syntax = "proto3";
+                    package root;
+                    import "dep.proto";
+                    message Root { dep.Dep d = 1; repeated int32 mine = 2; }
+                    "#,
+                ),
+            ],
+        );
+        let desc = FileDescriptor::read_proto(&dir.join("root.proto"), &[dir.clone()]).unwrap();
+
+        let field = |msg: &str, name: &str| {
+            desc.messages
+                .iter()
+                .find(|m| m.full_name == msg)
+                .unwrap()
+                .fields
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .frequency
+        };
+        assert_eq!(Some(Frequency::Repeated), field("dep.Dep", "vals"));
+        // The proto3 root's own repeated scalar is still packed.
+        assert_eq!(Some(Frequency::Packed), field("root.Root", "mine"));
     }
 
     /// A nested message's `file_package` is its file's package, not its enclosing scope. Getting

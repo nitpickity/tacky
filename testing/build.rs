@@ -121,20 +121,14 @@ fn main() {
     for f in otlp {
         println!("cargo:rerun-if-changed={f}");
     }
-    // tacky-build inlines a file's imports into the generated module, so pointing
-    // it at the collector service file yields `ExportTraceServiceRequest` and the
-    // whole `ResourceSpans` tree in one place. `protos` is the import root, exactly
-    // as `-Iprotos` is for the protoc invocations above.
-    tacky_build::write_proto_with_includes(
-        otlp[3],
+    // Both collector services into one module, for `benches/otlp_traces.rs` and
+    // `benches/otlp_logs.rs`. They are siblings — neither imports the other — so no single
+    // root file reaches both, and generating them separately would emit `common`/`resource`
+    // twice as unrelated Rust types. `protos` is the import root, exactly as `-Iprotos` is
+    // for the protoc invocations above.
+    tacky_build::write_protos(
+        &[otlp[3], otlp[5]],
         &format!("{out_dir}/tacky_otlp.rs"),
-        &["protos"],
-    );
-    // The logs signal, for `benches/otlp_logs.rs`. Same tree, same tag; a separate
-    // generated module because the two collector services share only common/resource.
-    tacky_build::write_proto_with_includes(
-        otlp[5],
-        &format!("{out_dir}/tacky_otlp_logs.rs"),
         &["protos"],
     );
     // prost spreads one module per proto package and cross-references them with

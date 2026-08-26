@@ -9,10 +9,10 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{
-        alpha1, alphanumeric1, anychar, digit1, hex_digit1, multispace1, not_line_ending,
+        alpha1, alphanumeric1, digit1, hex_digit1, multispace1, not_line_ending,
     },
     combinator::{map, map_res, opt, recognize, value, verify},
-    multi::{many0, many1, separated_list0, separated_list1},
+    multi::{many0, many1, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
 };
@@ -617,17 +617,14 @@ fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, ()> {
     }
 }
 
+/// Peek at the file's syntax before parsing it properly, since the field grammar depends on it.
+///
+/// Protobuf requires the `syntax`/`edition` statement to be the file's first statement, so only
+/// whitespace and comments are skipped to reach it. Absent, the file is proto2, as protoc assumes.
+/// `input` is returned untouched: this is a look-ahead, not a consuming parser.
 fn scan_syntax(input: &str) -> IResult<&str, Syntax> {
-    map_res(
-        separated_list0(many0(anychar), alt((syntax, edition))),
-        |v| {
-            Ok::<Syntax, &str>(if v.is_empty() {
-                Syntax::Proto2
-            } else {
-                v[0].clone()
-            })
-        },
-    )(input)
+    let found = opt(preceded(many0(br), alt((syntax, edition))))(input)?.1;
+    Ok((input, found.unwrap_or(Syntax::Proto2)))
 }
 
 pub fn file_descriptor<'a>(
@@ -1888,4 +1885,3 @@ mod test {
         assert_eq!(player.fields[2].frequency, Some(Frequency::Repeated));
     }
 }
-

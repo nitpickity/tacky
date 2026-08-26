@@ -18,9 +18,10 @@ pub fn field_ident(name: &str) -> proc_macro2::Ident {
         .unwrap_or_else(|_| proc_macro2::Ident::new_raw(name, proc_macro2::Span::call_site()))
 }
 
-fn read_proto_file(file: &str, includes: &[&str]) -> FileDescriptor {
+fn read_proto_files(files: &[&str], includes: &[&str]) -> FileDescriptor {
+    let roots: Vec<std::path::PathBuf> = files.iter().map(Into::into).collect();
     let search_path: Vec<std::path::PathBuf> = includes.iter().map(Into::into).collect();
-    FileDescriptor::read_proto(std::path::Path::new(file), &search_path).unwrap()
+    FileDescriptor::read_protos(&roots, &search_path).unwrap()
 }
 
 #[derive(Debug)]
@@ -216,17 +217,10 @@ fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor, scope: &Sco
         default,
     } = field;
     let ty = resolve_type(typ.clone(), desc, scope);
-    let mut label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
-
-    // pb-rs's scan_syntax fails on files with leading comments, misdetecting
-    // proto3 as proto2. This causes repeated scalar fields to get Repeated
-    // instead of Packed. Fix it here using the correctly-parsed syntax.
-    if matches!(desc.syntax, pb_rs::types::Syntax::Proto3)
-        && matches!(label, Label::Repeated)
-        && ty.is_packable_scalar()
-    {
-        label = Label::Packed;
-    }
+    // The parser decides packedness per file, from that file's own syntax, so nothing is re-derived
+    // here. Doing so from the descriptor's syntax used to pack a proto2 import's repeated scalars
+    // whenever the root file happened to be proto3.
+    let label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
 
     Field {
         name: name.clone(),
@@ -676,7 +670,20 @@ pub fn write_proto(file: &str, output: &str) {
 /// is joined onto each root in turn, and a relative root is taken against the working directory —
 /// for a `build.rs`, the package directory. Nothing is inferred from the importing file's location.
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
-    let test_file = read_proto_file(file, includes);
+    write_protos(&[file], output, includes)
+}
+
+/// [`write_proto_with_includes`] over several `.proto` files at once, emitting one module tree
+/// holding everything reachable from any of them — as `protoc a.proto b.proto` does.
+///
+/// Use this when the types you want are not all reachable from a single file. OpenTelemetry's logs
+/// and traces service definitions are the standard example: they are siblings, neither imports the
+/// other, and they share `common` and `resource`. Generating them one at a time gives two unrelated
+/// Rust types for every shared message, so nothing that touches a `KeyValue` can be used with both.
+///
+/// A file reached from more than one of `files` is emitted once.
+pub fn write_protos(files: &[&str], output: &str, includes: &[&str]) {
+    let test_file = read_proto_files(files, includes);
 
     // Each proto package becomes a Rust module holding its own definitions, so a type is named
     // exactly what the `.proto` called it. `read_proto` returns both lists flattened, in declaration

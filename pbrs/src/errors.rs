@@ -9,6 +9,8 @@ pub enum Error {
     Nom(nom::Err<nom::error::Error<String>>),
     /// Nom's other failure case; giving up in the middle of a file
     TrailingGarbage(String),
+    /// No `.proto` file provided
+    NoProto,
     /// Invalid message
     InvalidMessage(String),
     /// An `import` that could not be found on the include path
@@ -44,6 +46,7 @@ impl std::fmt::Display for Error {
             Error::Io(e) => write!(f, "{}", e),
             Error::Nom(e) => write!(f, "{}", e),
             Error::TrailingGarbage(s) => write!(f, "parsing abandoned near: {:?}", s),
+            Error::NoProto => write!(f, "No .proto file provided"),
             Error::InvalidMessage(msg) => write!(
                 f,
                 "Message checks errored: {}\r\n\

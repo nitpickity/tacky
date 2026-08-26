@@ -37,9 +37,10 @@ mod cpp_arms;
 mod corpus_gen;
 use corpus_gen::{bytes, mix, scattered};
 
+// One generated module covers both collector services; `otlp_traces.rs` includes the same file.
 #[allow(dead_code)]
-mod tacky_otlp_logs {
-    include!(concat!(env!("OUT_DIR"), "/tacky_otlp_logs.rs"));
+mod tacky_otlp {
+    include!(concat!(env!("OUT_DIR"), "/tacky_otlp.rs"));
 }
 #[allow(dead_code)]
 mod otlp {
@@ -53,9 +54,9 @@ use otlp::opentelemetry::proto::resource::v1 as presource;
 // tacky-build keeps one module per proto package, as prost does; this bench wants one namespace.
 #[allow(dead_code)]
 mod t {
-    pub use super::tacky_otlp_logs::opentelemetry::proto::collector::logs::v1::*;
-    pub use super::tacky_otlp_logs::opentelemetry::proto::common::v1::*;
-    pub use super::tacky_otlp_logs::opentelemetry::proto::logs::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::collector::logs::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::common::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::logs::v1::*;
 }
 
 // ---------------------------------------------------------------------------
