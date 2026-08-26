@@ -249,7 +249,7 @@ fn field_type(input: &str) -> IResult<&str, FieldType> {
         value(FieldType::Float, tag("float")),
         value(FieldType::Double, tag("double")),
         map(map_field, |(k, v)| FieldType::Map(Box::new(k), Box::new(v))),
-        map(qualifiable_name, FieldType::MessageOrEnum),
+        map(qualifiable_name, FieldType::Named),
     ))(input)
 }
 
@@ -1121,7 +1121,7 @@ mod test {
         let desc = assert_desc(msg).unwrap();
         assert_eq!(1, desc.messages.len());
         assert_eq!(
-            FieldType::MessageOrEnum("Bar".to_owned()),
+            FieldType::Named("Bar".to_owned()),
             desc.messages[0].fields[0].typ
         );
 
@@ -1777,7 +1777,7 @@ mod test {
                 optional int32 a = 1;
             }"#,
         );
-        // 'optional' is parsed as a type (MessageOrEnum), 'int32' as name,
+        // 'optional' is parsed as a type (Named), 'int32' as name,
         // then 'a' can't match '=', so the field fails -> message has 0 fields
         // OR the entire parse fails. Either way, we should NOT get a valid
         // field with frequency Optional from the keyword.

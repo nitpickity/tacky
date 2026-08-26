@@ -7,35 +7,6 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::io::Write;
 
-/// Recursively collect all messages (including nested) with their qualified names.
-fn collect_all_messages<'a>(messages: &'a [Message], prefix: &str) -> Vec<(&'a Message, String)> {
-    let mut result = Vec::new();
-    for m in messages {
-        let qname = format!("{}{}", prefix, m.name);
-        result.push((m, qname.clone()));
-        result.extend(collect_all_messages(&m.messages, &qname));
-    }
-    result
-}
-
-/// Recursively collect all enums (top-level and nested inside messages) with their qualified names.
-fn collect_all_enums<'a>(
-    messages: &'a [Message],
-    enums: &'a [Enumerator],
-    prefix: &str,
-) -> Vec<(&'a Enumerator, String)> {
-    let mut result = Vec::new();
-    for e in enums {
-        let qname = format!("{}{}", prefix, e.name);
-        result.push((e, qname));
-    }
-    for m in messages {
-        let mprefix = format!("{}{}", prefix, m.name);
-        result.extend(collect_all_enums(&m.messages, &m.enums, &mprefix));
-    }
-    result
-}
-
 pub fn parse_ty(s: &str) -> syn::Type {
     syn::parse_str(s).unwrap_or_else(|_| panic!("failed to parse type: {}", s))
 }
@@ -170,17 +141,21 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
                 _ => panic!("invalid map structure"),
             }
         }
-        FieldType::Message(m) => {
-            let name = m.qualified_name(desc);
-            PbType::Message(name)
-        }
-        FieldType::Enum(e) => {
-            let name = e.qualified_name(desc);
-            let enum_data = e.get_enum(desc);
-            let values = enum_data.fields.iter().map(|(_, v)| *v).collect();
+        FieldType::Message(fqn) => PbType::Message(desc.rust_name(&fqn).to_string()),
+        FieldType::Enum(fqn) => {
+            let name = desc.rust_name(&fqn).to_string();
+            let values = desc
+                .find_enum(&fqn)
+                .unwrap_or_else(|| panic!("resolved enum {fqn} is missing from the descriptor"))
+                .fields
+                .iter()
+                .map(|(_, v)| *v)
+                .collect();
             PbType::Enum((name, values))
         }
-        FieldType::MessageOrEnum(s) => unreachable!(),
+        FieldType::Named(name) => {
+            unreachable!("type reference {name} survived resolution")
+        }
     }
 }
 
@@ -464,15 +439,15 @@ pub fn write_proto(file: &str, output: &str) {
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
     let test_file = read_proto_file(file, includes);
 
-    let all_messages = collect_all_messages(&test_file.messages, "");
-    let all_enums = collect_all_enums(&test_file.messages, &test_file.enums, "");
-
-    let messages = all_messages
+    // `read_proto` returns both lists already flattened, in declaration order.
+    let messages = test_file
+        .messages
         .iter()
-        .map(|(m, qname)| write_message(m, qname, &test_file));
-    let enums = all_enums
+        .map(|m| write_message(m, &m.rust_name, &test_file));
+    let enums = test_file
+        .enums
         .iter()
-        .map(|(e, qname)| write_enum(e, qname, &test_file));
+        .map(|e| write_enum(e, &e.rust_name, &test_file));
 
     // Build the innermost module content
     let mut inner = quote! {
