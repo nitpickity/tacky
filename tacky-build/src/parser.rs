@@ -2,9 +2,10 @@
 //! and dont i dont to write my own (yet).
 
 use crate::{field_enum::field_enum, field_type::field_type};
-use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
+use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message, SymbolKind};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
 use std::io::Write;
 
 pub fn parse_ty(s: &str) -> syn::Type {
@@ -111,7 +112,7 @@ pub enum PbType {
     Map(Scalar, Box<PbType>),
 }
 
-fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
+fn resolve_type(value: FieldType, desc: &FileDescriptor, scope: &Scope) -> PbType {
     match value {
         FieldType::Int32 => PbType::Scalar(Scalar::Int32),
         FieldType::Int64 => PbType::Scalar(Scalar::Int64),
@@ -129,17 +130,17 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor) -> PbType {
         FieldType::Sfixed32 => PbType::Scalar(Scalar::Sfixed32),
         FieldType::Float => PbType::Scalar(Scalar::Float),
         FieldType::Map(k, v) => {
-            let kt: PbType = resolve_type(*k, desc);
-            let vt: PbType = resolve_type(*v, desc);
+            let kt: PbType = resolve_type(*k, desc, scope);
+            let vt: PbType = resolve_type(*v, desc, scope);
             match (kt, vt) {
                 (PbType::Scalar(k), PbType::Scalar(v)) => PbType::SimpleMap(k, v),
                 (PbType::Scalar(k), v) => PbType::Map(k, Box::new(v)),
                 _ => panic!("invalid map structure"),
             }
         }
-        FieldType::Message(fqn) => PbType::Message(desc.rust_name(&fqn).to_string()),
+        FieldType::Message(fqn) => PbType::Message(scope.name(&fqn).to_string()),
         FieldType::Enum(fqn) => {
-            let name = desc.rust_name(&fqn).to_string();
+            let name = scope.name(&fqn).to_string();
             let values = desc
                 .find_enum(&fqn)
                 .unwrap_or_else(|| panic!("resolved enum {fqn} is missing from the descriptor"))
@@ -206,7 +207,7 @@ pub struct OneOfGroup {
     pub fields: Vec<Field>,
 }
 
-fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
+fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor, scope: &Scope) -> Field {
     let pb_rs::types::Field {
         name,
         frequency,
@@ -214,7 +215,7 @@ fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor) -> Field {
         number,
         default,
     } = field;
-    let ty = resolve_type(typ.clone(), desc);
+    let ty = resolve_type(typ.clone(), desc, scope);
     let mut label: Label = frequency.map(|f| f.into()).unwrap_or(Label::Plain);
 
     // pb-rs's scan_syntax fails on files with leading comments, misdetecting
@@ -246,9 +247,18 @@ impl From<pb_rs::types::Frequency> for Label {
     }
 }
 
-fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> TokenStream {
+fn write_message(
+    m: &Message,
+    qualified_name: &str,
+    desc: &FileDescriptor,
+    scope: &Scope,
+) -> TokenStream {
     // Regular (non-oneof) fields
-    let regular_fields: Vec<Field> = m.fields.iter().map(|f| convert_field(f, desc)).collect();
+    let regular_fields: Vec<Field> = m
+        .fields
+        .iter()
+        .map(|f| convert_field(f, desc, scope))
+        .collect();
 
     // Oneof groups
     let oneof_groups: Vec<OneOfGroup> = m
@@ -256,12 +266,19 @@ fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> To
         .iter()
         .map(|o| OneOfGroup {
             name: o.name.clone(),
-            fields: o.fields.iter().map(|f| convert_field(f, desc)).collect(),
+            fields: o
+                .fields
+                .iter()
+                .map(|f| convert_field(f, desc, scope))
+                .collect(),
         })
         .collect();
 
     // All fields flattened (for the decode enum)
-    let all_fields: Vec<Field> = m.all_fields().map(|f| convert_field(f, desc)).collect();
+    let all_fields: Vec<Field> = m
+        .all_fields()
+        .map(|f| convert_field(f, desc, scope))
+        .collect();
 
     let struct_schema = message_schema(qualified_name, &regular_fields, &oneof_groups);
     let field_enum = field_enum(qualified_name, &all_fields);
@@ -277,7 +294,12 @@ fn write_message(m: &Message, qualified_name: &str, desc: &FileDescriptor) -> To
     }
 }
 
-fn write_enum(m: &Enumerator, qualified_name: &str, _desc: &FileDescriptor) -> TokenStream {
+fn write_enum(
+    m: &Enumerator,
+    qualified_name: &str,
+    _desc: &FileDescriptor,
+    _scope: &Scope,
+) -> TokenStream {
     let name_ident = format_ident!("{qualified_name}");
 
     let variants = m.fields.iter().map(|(field, _number)| {
@@ -428,6 +450,215 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
     }
 }
 
+/// The names a single package's generated module uses to refer to types, and the imports that
+/// bring the ones from other packages into scope.
+///
+/// Definitions always spell a type as a bare identifier, which is what lets the generated bodies
+/// read like hand-written Rust — a cross-package reference is an ordinary `use` at the top of the
+/// module, exactly as you would write it yourself, rather than a path threaded through every field.
+#[derive(Default)]
+struct Scope {
+    /// Fully-qualified proto name -> the identifier this package's definitions should spell it as.
+    local: HashMap<String, String>,
+    /// Module path -> the items to take from it, one `use` per module rather than per type.
+    imports: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl Scope {
+    fn name(&self, fqn: &str) -> &str {
+        self.local
+            .get(fqn)
+            .unwrap_or_else(|| panic!("{fqn} is not in scope for this package"))
+    }
+
+    fn import_statements(&self) -> Vec<TokenStream> {
+        self.imports
+            .iter()
+            .map(|(path, items)| {
+                let items = items.iter().cloned().collect::<Vec<_>>().join(", ");
+                let statement = if items.contains(", ") {
+                    format!("use {path}{{{items}}};")
+                } else {
+                    format!("use {path}{items};")
+                };
+                let statement: syn::ItemUse = syn::parse_str(&statement)
+                    .unwrap_or_else(|e| panic!("bad import `{statement}`: {e}"));
+                quote!(#statement)
+            })
+            .collect()
+    }
+}
+
+/// Collect the fully-qualified names a field type refers to, looking through maps.
+fn referenced_types(typ: &FieldType, out: &mut Vec<String>) {
+    match typ {
+        FieldType::Message(fqn) | FieldType::Enum(fqn) => out.push(fqn.clone()),
+        FieldType::Map(k, v) => {
+            referenced_types(k, out);
+            referenced_types(v, out);
+        }
+        _ => {}
+    }
+}
+
+/// The module path to reach package `to` from inside package `from`: one `super` per level up to
+/// their common ancestor, then down. Sibling packages come out as `super::super::common::v1`.
+fn relative_path(from: &str, to: &str) -> String {
+    let segments = |p: &str| -> Vec<String> {
+        p.split('.')
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let (from, to) = (segments(from), segments(to));
+    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+
+    let mut path = String::new();
+    for _ in shared..from.len() {
+        path.push_str("super::");
+    }
+    for segment in &to[shared..] {
+        path.push_str(segment);
+        path.push_str("::");
+    }
+    path
+}
+
+/// Work out what each package's module must import, and under what identifier every type it touches
+/// should be spelled.
+///
+/// A type declared in the same package is spelled with its own flattened name. One from elsewhere is
+/// imported under that name too, unless the package already has something by that name — then it is
+/// imported under an alias carrying its package, which is the only case where a generated name is
+/// not simply what the `.proto` called it.
+fn build_scopes(desc: &FileDescriptor) -> HashMap<String, Scope> {
+    let mut scopes: HashMap<String, Scope> = HashMap::new();
+
+    // Own declarations first, so an import can tell whether its short name is already taken.
+    for (fqn, symbol) in &desc.symbols {
+        let scope = scopes.entry(symbol.file_package.clone()).or_default();
+        if let Some(previous) = scope
+            .local
+            .iter()
+            .find(|(_, name)| **name == symbol.rust_name)
+        {
+            panic!(
+                "{} and {fqn} both generate the Rust name `{}`; rename one of them, as their \
+                 flattened names are indistinguishable",
+                previous.0, symbol.rust_name
+            );
+        }
+        scope.local.insert(fqn.clone(), symbol.rust_name.clone());
+    }
+
+    // Then the cross-package references, sorted so the emitted imports are stable run to run.
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for m in &desc.messages {
+        let package = &desc.symbols[&m.full_name].file_package;
+        let mut refs = Vec::new();
+        for f in m.all_fields() {
+            referenced_types(&f.typ, &mut refs);
+        }
+        for fqn in refs {
+            if desc.symbols[&fqn].file_package != *package {
+                wanted.push((package.clone(), fqn));
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+
+    for (package, fqn) in wanted {
+        let symbol = &desc.symbols[&fqn];
+        let scope = scopes.entry(package.clone()).or_default();
+        if scope.local.contains_key(&fqn) {
+            continue;
+        }
+        let taken = scope.local.values().any(|name| *name == symbol.rust_name);
+        let local = if taken {
+            // Two packages calling something the same is legal; only one can keep the short name.
+            format!(
+                "{}{}",
+                symbol
+                    .file_package
+                    .split('.')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| heck::AsUpperCamelCase(s).to_string())
+                    .collect::<String>(),
+                symbol.rust_name
+            )
+        } else {
+            symbol.rust_name.clone()
+        };
+
+        // A message is referred to by two names: the schema struct, and the `Fields` decoder the
+        // generated decode enum holds. Both have to come along.
+        let path = relative_path(&package, &symbol.file_package);
+        let (from, to) = (&symbol.rust_name, &local);
+        let items = scope.imports.entry(path).or_default();
+        let spec = |from: &str, to: &str| {
+            if from == to {
+                from.to_string()
+            } else {
+                format!("{from} as {to}")
+            }
+        };
+        items.insert(spec(from, to));
+        if symbol.kind == SymbolKind::Message {
+            items.insert(spec(&format!("{from}Fields"), &format!("{to}Fields")));
+        }
+        scope.local.insert(fqn, local);
+    }
+
+    scopes
+}
+
+/// The generated module tree: one node per package segment, carrying that package's imports and
+/// definitions.
+#[derive(Default)]
+struct ModTree {
+    children: std::collections::BTreeMap<String, ModTree>,
+    imports: Vec<TokenStream>,
+    defs: Vec<TokenStream>,
+}
+
+impl ModTree {
+    fn at(&mut self, package: &str) -> &mut ModTree {
+        let mut node = self;
+        for segment in package.split('.').filter(|s| !s.is_empty()) {
+            node = node.children.entry(segment.to_string()).or_default();
+        }
+        node
+    }
+
+    /// `top` marks the file root, whose children carry the lint attribute: `allow` is inherited by
+    /// nested items, so repeating it on every module would only add noise.
+    fn emit(&self, top: bool) -> TokenStream {
+        let tacky = (!self.defs.is_empty()).then(|| {
+            quote!(
+                use ::tacky::*;
+            )
+        });
+        let imports = &self.imports;
+        let defs = &self.defs;
+        let children = self.children.iter().map(|(name, child)| {
+            let mod_name = format_ident!("{name}");
+            let inner = child.emit(false);
+            let allow = top.then(|| quote!(#[allow(unused, dead_code)]));
+            quote! {
+                #allow
+                pub mod #mod_name { #inner }
+            }
+        });
+        quote! {
+            #tacky
+            #(#imports)*
+            #(#defs)*
+            #(#children)*
+        }
+    }
+}
+
 /// Generate the schema structs and field enums for one `.proto`, resolving its `import` paths
 /// against the directory the file itself sits in — the equivalent of
 /// `protoc -I<dir> <dir>/file.proto`. Use [`write_proto_with_includes`] for a tree whose imports
@@ -447,37 +678,27 @@ pub fn write_proto(file: &str, output: &str) {
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
     let test_file = read_proto_file(file, includes);
 
-    // `read_proto` returns both lists already flattened, in declaration order.
-    let messages = test_file
-        .messages
-        .iter()
-        .map(|m| write_message(m, &m.rust_name, &test_file));
-    let enums = test_file
-        .enums
-        .iter()
-        .map(|e| write_enum(e, &e.rust_name, &test_file));
+    // Each proto package becomes a Rust module holding its own definitions, so a type is named
+    // exactly what the `.proto` called it. `read_proto` returns both lists flattened, in declaration
+    // order, and the traversal order here is what fixes the order of declarations in the output.
+    let scopes = build_scopes(&test_file);
+    let mut tree = ModTree::default();
 
-    // Build the innermost module content
-    let mut inner = quote! {
-        use ::tacky::*;
-        #(#messages)*
-        #(#enums)*
-    };
-
-    // Wrap in nested modules for dotted package names (e.g. "perftools.profiles")
-    for part in test_file.package.rsplit('.') {
-        let mod_name = format_ident!("{}", part);
-        inner = quote! {
-            pub mod #mod_name {
-                #inner
-            }
-        };
+    for (package, scope) in &scopes {
+        tree.at(package).imports = scope.import_statements();
+    }
+    for m in &test_file.messages {
+        let package = &test_file.symbols[&m.full_name].file_package;
+        let def = write_message(m, &m.rust_name, &test_file, &scopes[package]);
+        tree.at(package).defs.push(def);
+    }
+    for e in &test_file.enums {
+        let package = &test_file.symbols[&e.full_name].file_package;
+        let def = write_enum(e, &e.rust_name, &test_file, &scopes[package]);
+        tree.at(package).defs.push(def);
     }
 
-    let token_stream = quote! {
-        #[allow(unused, dead_code)]
-        #inner
-    };
+    let token_stream = tree.emit(true);
 
     // eprintln!("GENERATED CODE:\n{}", token_stream.to_string());
 
@@ -486,4 +707,35 @@ pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
 
     let mut file = std::fs::File::create(output).unwrap();
     file.write_all(formatted.as_bytes()).unwrap();
+}
+
+#[cfg(test)]
+mod test {
+    /// Two messages whose flattened names collide must fail the build with a message naming both,
+    /// rather than emitting two conflicting definitions and letting rustc complain about generated
+    /// code. `Outer.Inner` and a top-level `OuterInner` are indistinguishable once flattened.
+    #[test]
+    #[should_panic(expected = "both generate the Rust name `OuterInner`")]
+    fn colliding_flattened_names_fail_the_build() {
+        let dir = std::env::temp_dir().join("tacky_build_test_collision");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let proto = dir.join("collide.proto");
+        std::fs::write(
+            &proto,
+            r#"syntax = "proto3";
+            package example;
+            message Outer {
+                message Inner { int32 x = 1; }
+            }
+            message OuterInner { int32 y = 1; }
+            "#,
+        )
+        .unwrap();
+
+        super::write_proto(
+            proto.to_str().unwrap(),
+            dir.join("out.rs").to_str().unwrap(),
+        );
+    }
 }

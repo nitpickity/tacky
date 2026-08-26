@@ -1888,3 +1888,4 @@ mod test {
         assert_eq!(player.fields[2].frequency, Some(Frequency::Repeated));
     }
 }
+

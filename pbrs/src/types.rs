@@ -196,8 +196,10 @@ pub enum SymbolKind {
 #[derive(Debug, Clone)]
 pub struct Symbol {
     pub kind: SymbolKind,
-    /// The declaring file's package, which the FQN alone cannot be split back into.
-    pub package: String,
+    /// The package of the file that declared this symbol, which the FQN alone cannot be split back
+    /// into. Unlike `Message::package` this does *not* grow with message nesting, so it is what a
+    /// generated module path should be built from.
+    pub file_package: String,
     /// The flattened Rust identifier this symbol generates as.
     pub rust_name: String,
 }
@@ -369,60 +371,77 @@ impl FileDescriptor {
         fn walk(
             mut m: Message,
             prefix: &str,
+            file_package: &str,
             messages: &mut Vec<Message>,
             enums: &mut Vec<Enumerator>,
+            symbols: &mut HashMap<String, Symbol>,
         ) {
             let rust_name = format!("{prefix}{}", m.name);
             m.full_name = qualify(&m.package, &m.name);
             m.rust_name = rust_name.clone();
             let nested_messages: Vec<Message> = m.messages.drain(..).collect();
             let nested_enums: Vec<Enumerator> = m.enums.drain(..).collect();
+            // First definition wins on a duplicate FQN, matching the merge in `fetch_imports`.
+            symbols
+                .entry(m.full_name.clone())
+                .or_insert_with(|| Symbol {
+                    kind: SymbolKind::Message,
+                    file_package: file_package.to_string(),
+                    rust_name: rust_name.clone(),
+                });
             messages.push(m);
 
             for mut e in nested_enums {
                 e.full_name = qualify(&e.package, &e.name);
                 e.rust_name = format!("{rust_name}{}", e.name);
+                symbols
+                    .entry(e.full_name.clone())
+                    .or_insert_with(|| Symbol {
+                        kind: SymbolKind::Enum,
+                        file_package: file_package.to_string(),
+                        rust_name: e.rust_name.clone(),
+                    });
                 enums.push(e);
             }
             for nested in nested_messages {
-                walk(nested, &rust_name, messages, enums);
+                walk(nested, &rust_name, file_package, messages, enums, symbols);
             }
         }
 
         let mut messages = Vec::new();
         let mut enums = Vec::new();
+        let mut symbols = HashMap::new();
 
         for mut e in self.enums.drain(..) {
             e.full_name = qualify(&e.package, &e.name);
             e.rust_name = e.name.clone();
-            enums.push(e);
-        }
-        for m in self.messages.drain(..) {
-            walk(m, "", &mut messages, &mut enums);
-        }
-
-        // First definition wins on a duplicate FQN, matching the merge in `fetch_imports`.
-        for m in &messages {
-            self.symbols
-                .entry(m.full_name.clone())
-                .or_insert_with(|| Symbol {
-                    kind: SymbolKind::Message,
-                    package: m.package.clone(),
-                    rust_name: m.rust_name.clone(),
-                });
-        }
-        for e in &enums {
-            self.symbols
+            symbols
                 .entry(e.full_name.clone())
                 .or_insert_with(|| Symbol {
                     kind: SymbolKind::Enum,
-                    package: e.package.clone(),
+                    // A top-level enum's enclosing scope *is* its file's package.
+                    file_package: e.package.clone(),
                     rust_name: e.rust_name.clone(),
                 });
+            enums.push(e);
+        }
+        for m in self.messages.drain(..) {
+            // Likewise for a top-level message, which is where each nested item inherits it from:
+            // `Message::package` grows with the nesting, so it cannot serve this purpose itself.
+            let file_package = m.package.clone();
+            walk(
+                m,
+                "",
+                &file_package,
+                &mut messages,
+                &mut enums,
+                &mut symbols,
+            );
         }
 
         self.messages = messages;
         self.enums = enums;
+        self.symbols = symbols;
     }
 
     /// Replace every [`FieldType::Named`] with the message or enum it refers to, and downgrade a
@@ -681,6 +700,43 @@ mod test {
             FieldType::Message("left.L".to_string()),
             field_type(&desc, "root.Root", "l"),
         );
+    }
+
+    /// A nested message's `file_package` is its file's package, not its enclosing scope. Getting
+    /// this wrong puts `Span.Event` in a module named after `Span`.
+    #[test]
+    fn symbol_file_package_ignores_message_nesting() {
+        let dir = scratch(
+            "file_package",
+            &[(
+                "root.proto",
+                r#"syntax = "proto3";
+                package a.b.v1;
+                message Span {
+                    message Event { int32 x = 1; }
+                    enum Kind { KIND_ZERO = 0; }
+                    Event e = 1;
+                    Kind k = 2;
+                }
+                "#,
+            )],
+        );
+        let desc = FileDescriptor::read_proto(&dir.join("root.proto"), &[dir.clone()]).unwrap();
+
+        for fqn in ["a.b.v1.Span", "a.b.v1.Span.Event", "a.b.v1.Span.Kind"] {
+            assert_eq!(
+                "a.b.v1", desc.symbols[fqn].file_package,
+                "wrong file_package for {fqn}",
+            );
+        }
+        // The enclosing scope, by contrast, does grow with the nesting.
+        let event = desc
+            .messages
+            .iter()
+            .find(|m| m.full_name == "a.b.v1.Span.Event")
+            .unwrap();
+        assert_eq!("a.b.v1.Span", event.package);
+        assert_eq!("SpanEvent", event.rust_name);
     }
 
     /// Mutually importing files terminate. Protobuf forbids an import cycle, but the recursion

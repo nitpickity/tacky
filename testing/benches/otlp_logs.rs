@@ -50,7 +50,13 @@ use otlp::opentelemetry::proto::collector::logs::v1 as pcol;
 use otlp::opentelemetry::proto::common::v1 as pcommon;
 use otlp::opentelemetry::proto::logs::v1 as plogs;
 use otlp::opentelemetry::proto::resource::v1 as presource;
-use tacky_otlp_logs::opentelemetry::proto::collector::logs::v1 as t;
+// tacky-build keeps one module per proto package, as prost does; this bench wants one namespace.
+#[allow(dead_code)]
+mod t {
+    pub use super::tacky_otlp_logs::opentelemetry::proto::collector::logs::v1::*;
+    pub use super::tacky_otlp_logs::opentelemetry::proto::common::v1::*;
+    pub use super::tacky_otlp_logs::opentelemetry::proto::logs::v1::*;
+}
 
 // ---------------------------------------------------------------------------
 // Corpus
