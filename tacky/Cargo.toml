@@ -2,12 +2,22 @@
 name = "tacky"
 version = "0.4.0"
 edition = "2021"
+description = "Protobuf serialization through zero-sized typed schemas: write your own data types to the wire in a single pass, with no generated structs to fill in."
+repository = "https://github.com/nitpickity/tacky"
+license = "MIT"
+readme = "../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
 default = ["alloc"]
+# Enables the `Vec<u8>` buffer. `SliceBuf` and `RevBuf` work without it.
 alloc = []
+# Adds the `io::Write` adapters, `IoWriter` and `PbWrite`.
 std = ["alloc"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]

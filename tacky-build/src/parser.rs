@@ -1,5 +1,4 @@
-//! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
-//! and dont i dont to write my own (yet).
+//! Wraps pb-rs from quick-protobuf as the `.proto` parser, to avoid a `protoc` system dependency.
 
 use crate::{field_enum::field_enum, field_type::field_type};
 use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message};
@@ -461,10 +460,28 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
     }
 }
 
+/// Generates the schema structs and field enums for one `.proto` file, resolving imports against
+/// the current directory. Call from `build.rs`:
+///
+/// ```no_run
+/// let out_dir = std::env::var("OUT_DIR").unwrap();
+/// tacky_build::write_proto("protos/my_message.proto", &format!("{out_dir}/my_message.rs"));
+/// println!("cargo:rerun-if-changed=protos/my_message.proto");
+/// ```
+///
+/// Then `include!(concat!(env!("OUT_DIR"), "/my_message.rs"))` from a module in your crate.
+///
+/// # Panics
+///
+/// On an unreadable, unparseable or invalid `.proto`, and on any IO error writing `output`. This
+/// runs at build time, so a panic is the intended way to fail the build.
 pub fn write_proto(file: &str, output: &str) {
     write_proto_with_includes(file, output, &["."])
 }
 
+/// [`write_proto`] with explicit import search paths, for a `.proto` that imports others.
+///
+/// `includes` are the roots that `import` paths resolve against, as `protoc -I` takes them.
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
     let mut files = read_proto_file(file, includes);
     let test_file = files.pop().unwrap();

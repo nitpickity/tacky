@@ -16,8 +16,8 @@
 /// used by all scalar writers, random access by [`Tack`](`crate::Tack`) to patch length
 /// placeholders.
 ///
-/// Sealed: implemented only by `Vec<u8>`, [`SliceBuf`], [`RevBuf`] and [`AnyDir`], and usable as a
-/// bound from any crate but not implementable outside this one, for the reason on `private`.
+/// Sealed: implemented only by `Vec<u8>`, [`SliceBuf`], [`RevBuf`] and [`AnyDir`]. Usable as a
+/// bound from any crate, but not implementable outside this one.
 pub trait WriteBuf: private::Sealed {
     /// This buffer's direction as a type, either [`Forward`] or [`Reverse`]. What
     /// [`OrderedIter`] dispatches on.
@@ -126,9 +126,8 @@ pub struct Reverse;
 /// Marker for a buffer whose direction is not known where the write is type-checked, which is
 /// the direction [`AnyDir`] presents. Repeated fields then require a [`DoubleEndedIterator`],
 /// since the buffer may turn out to grow downward.
-///
-/// A `WriteBuf` using this **must** override [`WriteBuf::REVERSE`]. Inheriting `Both`'s
-/// placeholder value would give a wrapper around a [`RevBuf`] forward ordering.
+// A `WriteBuf` using this must override `WriteBuf::REVERSE`. Inheriting `Both`'s placeholder value
+// would give a wrapper around a `RevBuf` forward ordering.
 pub struct Both;
 
 /// A buffer's direction, as a type. Carried by [`WriteBuf::Order`] so that [`OrderedIter`] can
@@ -175,9 +174,10 @@ impl Order for Both {
 ///   there is a compile error rather than a silently reversed list.
 ///
 /// So the direction must be *known* where the call is type-checked, from a concrete buffer or a
-/// `WriteBuf<Order = ..>` bound. A body generic over the buffer has neither, and no impl can cover
-/// it, because a blanket impl over the direction would have to be strict and coherence rejects
-/// that beside the lax [`Forward`] impl. Such a body writes through [`AnyDir`] and its [`Both`].
+/// `WriteBuf<Order = ..>` bound. A body generic over the buffer has neither and writes through
+/// [`AnyDir`] instead.
+// No impl can cover the generic-body case: a blanket impl over the direction would have to be
+// strict, and coherence rejects that beside the lax `Forward` impl. Hence `AnyDir` and `Both`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` cannot be written to a buffer whose direction is `{O}`",
     label = "not writable in `{O}` order",
@@ -230,8 +230,8 @@ where
 
 /// [`Both`]'s ordered iterator: the caller's, or [`Rev`](`core::iter::Rev`) of it, decided by
 /// the [`WriteBuf::REVERSE`] passed to [`OrderedIter::ordered`]. That is a `const` per buffer
-/// type, so the match folds. The tag exists only because the *type* cannot name a direction the
-/// body has not picked.
+/// type, so the match folds.
+// The tag exists only because the *type* cannot name a direction the body has not picked.
 pub enum EitherIter<I> {
     Forward(I),
     Reverse(core::iter::Rev<I>),
@@ -454,8 +454,9 @@ mod alloc_impls {
 /// Writing a message's fields in descending field order therefore reproduces exactly the bytes an
 /// ascending forward writer produces.
 ///
-/// Fixed capacity, so `grow` panics as it does on [`SliceBuf`]. [`RevBuf::written`] returns the
-/// bytes, which sit at the *tail* of the backing slice.
+/// Fixed capacity, so `grow` panics as it does on [`SliceBuf`]; see
+/// [Running out of room](`SliceBuf#running-out-of-room`). [`RevBuf::written`] returns the bytes,
+/// which sit at the *tail* of the backing slice.
 pub struct RevBuf<'a> {
     buf: &'a mut [u8],
     /// Index of the first written byte. Writes move it down, and `buf.len() - pos` is the length
@@ -626,6 +627,22 @@ impl WriteBuf for RevBuf<'_> {
 
 /// A fixed-size buffer for `no_std` / no-alloc environments.
 /// Wraps a `&mut [u8]` with a write cursor. Panics if the buffer is exhausted.
+///
+/// # Running out of room
+///
+/// Exhausting a fixed buffer panics (`SliceBuf overflow`, or `RevBuf exhausted` for [`RevBuf`]).
+/// It is the one encode panic a correct program can reach, so it is the one worth planning for.
+/// Three ways:
+///
+/// - Stop at a record boundary. Compare [`SliceBuf::written`]/[`RevBuf::written`]'s length against
+///   the capacity you handed over and skip a record whose worst case does not fit. This is the only
+///   point at which a partial result is well-formed, and the only option under `panic = "abort"`.
+/// - Encode into a `Vec<u8>`, which grows.
+/// - Use `catch_unwind` for "this record does not fit, flush and retry", which needs
+///   `panic = "unwind"` and the `std` feature. Wrap the closure in `AssertUnwindSafe` and discard
+///   the whole buffer on `Err`, since an interrupted record may already have a plausible length
+///   patched over a truncated payload. Salvaging the records that already fitted needs the boundary
+///   length above.
 pub struct SliceBuf<'a> {
     buf: &'a mut [u8],
     pos: usize,
@@ -698,6 +715,7 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 ///
 /// Forward buffers only, as [`FmtWriter`].
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub struct IoWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 #[cfg(feature = "std")]
@@ -726,8 +744,8 @@ impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
 ///
 /// Panics on a [`RevBuf`], and unusable as a map key or value. See [`PbDisplay`].
 /// Panics if the closure errors rather than emit a truncated field.
-/// ```
 #[cfg(feature = "std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub struct PbWrite<F>(pub F);
 
 #[cfg(feature = "std")]
@@ -878,8 +896,8 @@ mod tests {
         <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut rb, &w);
     }
 
-    /// A failing closure must not leave a silently truncated field. The `Tack` would patch a
-    /// length over the partial bytes and the message would still parse.
+    // A failing closure must not leave a silently truncated field. The `Tack` would patch a
+    // length over the partial bytes and the message would still parse.
     #[cfg(feature = "std")]
     #[test]
     #[should_panic(expected = "PbWrite closure failed mid-field")]
@@ -911,8 +929,8 @@ mod tests {
     }
 
     #[cfg(feature = "alloc")]
-    /// The ladder writes overlapping fixed-width blocks, not `n` bytes, so every arm boundary
-    /// needs pinning. Appends onto a non-empty buffer so a wrong offset shows as corruption.
+    // The ladder writes overlapping fixed-width blocks, not `n` bytes, so every arm boundary
+    // needs pinning. Appends onto a non-empty buffer so a wrong offset shows as corruption.
     #[test]
     fn put_slice_ladder_all_lengths() {
         for n in 0..=80usize {
@@ -926,9 +944,9 @@ mod tests {
         }
     }
 
-    /// Every buffer type routes short copies through the same ladder, so every one gets the same
-    /// all-lengths sweep. Both cases write next to existing bytes on purpose, since with
-    /// overlapping stores a check that only compares the payload misses a write past `n`.
+    // Every buffer type routes short copies through the same ladder, so every one gets the same
+    // all-lengths sweep. Both cases write next to existing bytes on purpose, since with
+    // overlapping stores a check that only compares the payload misses a write past `n`.
     #[test]
     fn put_slice_ladder_all_lengths_slice_and_rev() {
         for n in 0..=80usize {
@@ -986,7 +1004,7 @@ mod tests {
         assert_eq!(sb.written(), b"pi=3.14");
     }
 
-    /// The trait promises `None` when the window will not fit; `claim` on its own asserts.
+    // The trait promises `None` when the window will not fit; `claim` on its own asserts.
     #[test]
     fn rev_buf_claim_block_refuses_rather_than_panics() {
         let mut backing = [0u8; 4];
@@ -997,9 +1015,9 @@ mod tests {
         assert!(rb.claim_block(1).is_none());
     }
 
-    /// At the width-1 default any nested message of 128 B or more takes `Tack`'s
-    /// overflow path, which calls `grow`. A fixed buffer with room to spare must
-    /// serve that rather than panic.
+    // At the width-1 default any nested message of 128 B or more takes `Tack`'s
+    // overflow path, which calls `grow`. A fixed buffer with room to spare must
+    // serve that rather than panic.
     #[test]
     fn slice_buf_survives_tack_overflow() {
         use crate::{Field, Optional};

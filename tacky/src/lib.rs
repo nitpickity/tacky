@@ -21,28 +21,14 @@
 //! a peer sends can panic. Every encode panic is a function of the message and the buffer, never
 //! of an allocator, a clock or a thread, so it reproduces on every run.
 //!
-//! Most are caller bugs. A [`Tack`], [`FmtWriter`] or [`IoWriter`] over a [`RevBuf`], a bad
-//! placeholder width, a [`PbWrite`] closure or [`PbDisplay`] value that fails mid-field. The one
-//! a correct program can reach is a fixed buffer running out of room (`SliceBuf overflow` or
-//! `RevBuf exhausted`). There are three ways to handle that.
-//!
-//! - Stop at a record boundary. Compare [`SliceBuf::written`]/[`RevBuf::written`]'s length
-//!   against the capacity you handed over and skip a record whose worst case does not fit. This
-//!   is the only point at which a partial result is well-formed, and the only option under
-//!   `panic = "abort"`.
-//! - Encode into a `Vec<u8>`, which grows.
-//! - Use `catch_unwind` for "this record does not fit, flush and retry", which needs
-//!   `panic = "unwind"` and the `std` feature. Wrap the closure in `AssertUnwindSafe` and
-//!   discard the whole buffer on `Err`, since an interrupted record may already have a plausible
-//!   length patched over a truncated payload. Salvaging the records that already fitted needs
-//!   the boundary length above.
-//!
-//! Two checks are `debug_assert!` because release cannot afford them. `write_exact` compares
-//! `ExactSizeIterator::len()` against the bytes written, and a map entry checks its predicted
-//! size. Both catch a caller contract slip that corrupts the message rather than breaking safety.
+//! Most are caller bugs: a [`Tack`], [`FmtWriter`] or [`IoWriter`] over a [`RevBuf`], a bad
+//! placeholder width, a [`PbWrite`] closure or [`PbDisplay`] value that fails mid-field. The one a
+//! correct program can reach is a fixed buffer running out of room; see
+//! [Running out of room](`SliceBuf#running-out-of-room`) for the three ways to handle it.
 
 #![no_std]
 #![allow(clippy::new_without_default)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

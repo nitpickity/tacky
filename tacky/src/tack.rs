@@ -1,19 +1,26 @@
 //! Single-pass length encoding for protobuf's length-delimited fields.
 //!
-//! Protobuf requires the byte length of nested messages and packed repeated fields to appear
-//! *before* their contents. The standard approach is two passes, one to compute the length and
-//! one to write. Tack avoids this by writing a fixed-width placeholder varint, letting the
-//! caller write data past it, then patching the real length on [`Drop`].
+//! Home of [`Tack`] and the placeholder width every writer reserves, [`DEFAULT_WIDTH`].
 
 use crate::buf::WriteBuf;
 use crate::scalars::encoded_len_varint;
 
 /// Marks the start of a length-delimited section whose size isn't known yet.
 ///
-/// On creation, writes a placeholder varint [`DEFAULT_WIDTH`] bytes wide. The caller writes data
-/// into [`Tack::buffer`], and on drop the placeholder is overwritten with the actual length. Data
-/// exceeding what the placeholder can hold expands the buffer and shifts the payload, which is
-/// correct but slow and so marked `#[cold]`.
+/// Protobuf requires the byte length of a nested message or packed field to appear *before* its
+/// contents, which conventionally means two passes: one to compute the length, one to write. A
+/// `Tack` writes a fixed-width placeholder varint instead, lets the caller write data past it, and
+/// patches the real length on [`Drop`]:
+///
+/// ```text
+/// Buffer before Tack:  [... tag]
+/// After Tack::new():   [... tag | 00 ]                          <- 1-byte placeholder
+/// After writing data:  [... tag | 00 | actual data bytes... ]
+/// After Tack closes:   [... tag | len len len | data bytes... ]
+/// ```
+///
+/// The placeholder is [`DEFAULT_WIDTH`] bytes wide. Data exceeding what it can hold expands the
+/// buffer and shifts the payload, which is correct but slow and so marked `#[cold]`.
 ///
 /// The caller must write the field tag before creating the Tack.
 #[must_use]
@@ -24,10 +31,10 @@ pub struct Tack<'b, B: WriteBuf> {
     pub buffer: &'b mut B,
     /// Byte position in the buffer immediately after the placeholder.
     /// `buffer.len() - start` gives the data length when closing.
-    ///
-    /// Do not narrow to `u32`. `close` feeds this to `get_unchecked_mut`, so a truncating cast
-    /// past 4 GiB of *sink* (not message) would index outside the allocation, and an assert
-    /// instead costs a compare and a panic edge per `Tack`.
+    //
+    // Do not narrow to `u32`. `close` feeds this to `get_unchecked_mut`, so a truncating cast past
+    // 4 GiB of *sink* (not message) would index outside the allocation, and an assert instead costs
+    // a compare and a panic edge per `Tack`.
     start: usize,
     /// Number of bytes reserved for the length varint. See [`DEFAULT_WIDTH`] for the range each
     /// width covers.
@@ -73,18 +80,18 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
     /// Creates a new Tack with a custom placeholder width, for a caller that knows its payload
     /// will not fit in [`DEFAULT_WIDTH`] bytes.
     ///
-    /// This and `close` are specialised for a constant width. A computed one turns both into
+    /// Pass a constant. This and `close` are specialised for one; a computed width turns both into
     /// loops over a variable, which is slower.
     ///
     /// # Panics
     ///
     /// Unless `1 <= width <= 5`, via [`write_wide_varint`], and on a reverse buffer, which needs
-    /// no placeholder and should use [`WriteBuf::put_msg`]. Both asserts are constant at every
-    /// generated call site, so both fold away there.
+    /// no placeholder and should use [`WriteBuf::put_msg`].
     // important: no #[inline] here, and keep this and `close` small
     pub fn new_with_width(buffer: &'b mut B, width: u32) -> Self {
-        // A Tack's `start`-relative patch would hit the payload when the buffer grows downward. Not `const assert!`, because `maps::write_msg` instantiates its forward
-        // branch for RevBuf behind a runtime guard. Folds away for forward buffers.
+        // A Tack's `start`-relative patch would hit the payload when the buffer grows downward.
+        // Not `const assert!`, because `maps::write_msg` instantiates its forward branch for RevBuf
+        // behind a runtime guard. Folds away for forward buffers.
         assert!(
             !B::REVERSE,
             "Tack is forward-only: a reverse buffer knows its lengths, use WriteBuf::put_msg"
@@ -225,9 +232,9 @@ mod tests {
         }
     }
 
-    /// A `SliceBuf` overflow panics inside a live Tack, so the overflow repair in `Tack::drop`
-    /// runs while unwinding. A second panic there aborts instead of letting the caller's
-    /// `catch_unwind` see the first.
+    // A `SliceBuf` overflow panics inside a live Tack, so the overflow repair in `Tack::drop`
+    // runs while unwinding. A second panic there aborts instead of letting the caller's
+    // `catch_unwind` see the first.
     #[cfg(feature = "std")]
     #[test]
     fn overflow_repair_gives_up_while_unwinding() {

@@ -233,10 +233,10 @@ pub mod packed {
         /// On the fixed-size path the prefix is written *before* the elements, from `len()`, so
         /// `len()` **must** equal the number of elements actually yielded. Every std source and
         /// adapter satisfies this, so only a hand-written `ExactSizeIterator` can break it, and
-        /// then the message is corrupt rather than unsound. The field truncates, or its tail
-        /// reparses as bogus fields of the parent. A `debug_assert!` catches it in debug builds only. If you
-        /// cannot guarantee `len()`, use `write`, which measures what was actually written, takes
-        /// any iterator, and emits identical bytes.
+        /// then the message is corrupt rather than unsound: the field truncates, or its tail
+        /// reparses as bogus fields of the parent. A `debug_assert!` catches it in debug builds
+        /// only. If you cannot guarantee `len()`, use `write` — it measures what was actually
+        /// written, takes any iterator, and emits identical bytes.
         #[inline]
         pub fn write_exact<B: WriteBuf, I>(self, buf: &mut B, values: I) -> Field<N, Packed<P>>
         where
@@ -260,11 +260,8 @@ pub mod packed {
                     for value in it {
                         P::write_value(value.as_scalar(), buf);
                     }
-                    // The prefix here is written from `ExactSizeIterator::len()` *before* the
-                    // elements, so a wrong `len()` leaves a prefix that disagrees with the
-                    // bytes. Too large truncates the field, too small leaks the tail out as
-                    // parent fields. The `put_msg` path below cannot have this, since its Tack
-                    // measures what was actually written.
+                    // Checks the `len()` contract documented above. The `put_msg` path below cannot
+                    // break it, since its Tack measures what was actually written.
                     #[cfg(debug_assertions)]
                     debug_assert_eq!(
                         buf.len() - start_len,
@@ -796,8 +793,8 @@ mod tests {
         );
     }
 
-    /// An entry with no field 1 decodes to `K`'s default, as protoc's parser does:
-    /// `protoc --decode` accepts `0a 05 12 03 61 62 63` in proto2 and proto3 alike.
+    // The absent-key leniency documented on `PbMap::read`: `protoc --decode` accepts
+    // `0a 05 12 03 61 62 63` in proto2 and proto3 alike.
     #[test]
     fn test_map_entry_omitted_key() {
         let mut slice: &[u8] = &[0x05, 0x12, 0x03, 0x61, 0x62, 0x63];
@@ -807,8 +804,8 @@ mod tests {
     }
 
     #[cfg(feature = "alloc")]
-    /// `-0.0 == 0.0`, so an equality-based `is_default` would skip `-0.0` and lose the sign on
-    /// the round trip. `+0.0` must still be skipped, and NaN still written.
+    // `-0.0 == 0.0`, so an equality-based `is_default` would skip `-0.0` and lose the sign on
+    // the round trip. `+0.0` must still be skipped, and NaN still written.
     #[test]
     fn test_plain_float_negative_zero() {
         for (v, expect) in [
@@ -857,7 +854,6 @@ mod tests {
     #[test]
     fn test_required_string_and_bytes() {
         let mut buf = Vec::new();
-        // String
         let _ = Field::<1, Required<PbString>>::new().write(&mut buf, "hello");
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -866,7 +862,6 @@ mod tests {
         let s = PbString::read(&mut slice).unwrap();
         assert_eq!(s, "hello");
         buf.clear();
-        // Bytes
         let _ = Field::<2, Required<PbBytes>>::new().write(&mut buf, b"abc");
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -880,7 +875,6 @@ mod tests {
     #[test]
     fn test_optional_string_and_bytes() {
         let mut buf = Vec::new();
-        // String Some
         let _ = Field::<1, Optional<PbString>>::new().write(&mut buf, Some("hello"));
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -889,11 +883,9 @@ mod tests {
         let s = PbString::read(&mut slice).unwrap();
         assert_eq!(s, "hello");
         buf.clear();
-        // String None
         let _ = Field::<1, Optional<PbString>>::new().write(&mut buf, None::<&str>);
         assert!(buf.is_empty());
         buf.clear();
-        // Bytes Some
         let _ = Field::<2, Optional<PbBytes>>::new().write(&mut buf, Some(b"abc"));
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -902,7 +894,6 @@ mod tests {
         let b = PbBytes::read(&mut slice).unwrap();
         assert_eq!(b, b"abc");
         buf.clear();
-        // Bytes None
         let _ = Field::<2, Optional<PbBytes>>::new().write(&mut buf, None::<&[u8]>);
         assert!(buf.is_empty());
     }
@@ -911,7 +902,6 @@ mod tests {
     #[test]
     fn test_repeated_string_and_bytes() {
         let mut buf = Vec::new();
-        // String
         let _ = Field::<1, Repeated<PbString>>::new().write(&mut buf, vec!["a", "b"]);
         let mut slice = buf.as_slice();
         let mut results = Vec::new();
@@ -924,7 +914,6 @@ mod tests {
         }
         assert_eq!(results, vec!["a", "b"]);
         buf.clear();
-        // Bytes
         let _ = Field::<2, Repeated<PbBytes>>::new().write(&mut buf, vec![b"x", b"y"]);
         let mut slice = buf.as_slice();
         let mut results = Vec::new();
@@ -942,7 +931,6 @@ mod tests {
     #[test]
     fn test_required_numeric_types() {
         let mut buf = Vec::new();
-        // i32
         let _ = Field::<1, Required<Int32>>::new().write(&mut buf, 42);
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -951,7 +939,6 @@ mod tests {
         let v = Int32::read(&mut slice).unwrap();
         assert_eq!(v, 42);
         buf.clear();
-        // u32
         let _ = Field::<2, Required<Uint32>>::new().write(&mut buf, 123u32);
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -984,7 +971,6 @@ mod tests {
         let v = Float::read(&mut slice).unwrap();
         assert_eq!(v, 1.5f32);
         buf.clear();
-        // f64
         let _ = Field::<6, Required<Double>>::new().write(&mut buf, 2.5f64);
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -993,7 +979,6 @@ mod tests {
         let v = Double::read(&mut slice).unwrap();
         assert_eq!(v, 2.5f64);
         buf.clear();
-        // bool
         let _ = Field::<7, Required<Bool>>::new().write(&mut buf, true);
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -1015,7 +1000,6 @@ mod tests {
     #[test]
     fn test_optional_numeric_types() {
         let mut buf = Vec::new();
-        // i32
         let _ = Field::<1, Optional<Int32>>::new().write(&mut buf, Some(42));
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -1027,7 +1011,6 @@ mod tests {
         let _ = Field::<1, Optional<Int32>>::new().write(&mut buf, None::<i32>);
         assert!(buf.is_empty());
         buf.clear();
-        // u32
         let _ = Field::<2, Optional<Uint32>>::new().write(&mut buf, Some(123u32));
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
@@ -1036,7 +1019,6 @@ mod tests {
         let v = Uint32::read(&mut slice).unwrap();
         assert_eq!(v, 123u32);
         buf.clear();
-        // bool
         let _ = Field::<3, Optional<Bool>>::new().write(&mut buf, Some(true));
         let mut slice = buf.as_slice();
         let (tag, wire) = crate::scalars::decode_key(&mut slice).unwrap();
