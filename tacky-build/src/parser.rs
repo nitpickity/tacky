@@ -18,11 +18,7 @@ pub fn field_ident(name: &str) -> proc_macro2::Ident {
 }
 
 fn read_proto_file(file: &str, includes: &[&str]) -> FileDescriptor {
-    let mut search_path: Vec<std::path::PathBuf> = includes.iter().map(Into::into).collect();
-    let dot = std::path::PathBuf::from(".");
-    if !search_path.contains(&dot) {
-        search_path.push(dot);
-    }
+    let search_path: Vec<std::path::PathBuf> = includes.iter().map(Into::into).collect();
     FileDescriptor::read_proto(std::path::Path::new(file), &search_path).unwrap()
 }
 
@@ -432,10 +428,22 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
     }
 }
 
+/// Generate the schema structs and field enums for one `.proto`, resolving its `import` paths
+/// against the directory the file itself sits in — the equivalent of
+/// `protoc -I<dir> <dir>/file.proto`. Use [`write_proto_with_includes`] for a tree whose imports
+/// are rooted somewhere else.
 pub fn write_proto(file: &str, output: &str) {
-    write_proto_with_includes(file, output, &["."])
+    let dir = std::path::Path::new(file)
+        .parent()
+        .and_then(std::path::Path::to_str)
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or(".");
+    write_proto_with_includes(file, output, &[dir])
 }
 
+/// [`write_proto`] with explicit import roots, which behave as `protoc -I` does: an `import` path
+/// is joined onto each root in turn, and a relative root is taken against the working directory —
+/// for a `build.rs`, the package directory. Nothing is inferred from the importing file's location.
 pub fn write_proto_with_includes(file: &str, output: &str, includes: &[&str]) {
     let test_file = read_proto_file(file, includes);
 

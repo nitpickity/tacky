@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::errors::{Error, Result};
@@ -224,7 +224,8 @@ impl FileDescriptor {
     /// against the merged symbol table. Resolution is last and happens once, over everything, so
     /// no name ever has to be resolved against a scope it will later be moved out of.
     pub fn read_proto(in_file: &Path, import_search_path: &[PathBuf]) -> Result<FileDescriptor> {
-        let mut desc = Self::parse_tree(in_file, import_search_path)?;
+        let mut visited = HashSet::new();
+        let mut desc = Self::parse_tree(in_file, import_search_path, &mut visited)?;
         desc.flatten();
         desc.resolve_types()?;
         desc.sanity_checks()?;
@@ -234,14 +235,21 @@ impl FileDescriptor {
     /// Parse one file and merge its imports, leaving messages nested and types unresolved. Called
     /// recursively for each import, so it must not resolve: a name is only resolvable once every
     /// file has been merged.
-    fn parse_tree(in_file: &Path, import_search_path: &[PathBuf]) -> Result<FileDescriptor> {
+    ///
+    /// `visited` spans the whole recursion and holds every file already parsed into it.
+    fn parse_tree(
+        in_file: &Path,
+        import_search_path: &[PathBuf],
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<FileDescriptor> {
+        visited.insert(canonical(in_file));
         let file = std::fs::read_to_string(in_file)?;
         let (rem, mut desc) = file_descriptor(&file).map_err(Error::Nom)?;
         let rem = rem.trim();
         if !rem.is_empty() {
             return Err(Error::TrailingGarbage(rem.chars().take(50).collect()));
         }
-        desc.fetch_imports(in_file, import_search_path)?;
+        desc.fetch_imports(import_search_path, visited)?;
         Ok(desc)
     }
 
@@ -253,7 +261,11 @@ impl FileDescriptor {
     }
 
     /// Get messages and enums from imports
-    fn fetch_imports(&mut self, in_file: &Path, import_search_path: &[PathBuf]) -> Result<()> {
+    fn fetch_imports(
+        &mut self,
+        import_search_path: &[PathBuf],
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<()> {
         for m in &mut self.messages {
             m.set_package(&self.package);
         }
@@ -262,18 +274,13 @@ impl FileDescriptor {
         }
 
         for import in &self.import_paths {
-            // this is the same logic as the C preprocessor;
-            // if the include path item is absolute, then append the filename,
-            // otherwise it is always relative to the file.
+            // `protoc -I` semantics: an import path is joined onto each include root in turn, and
+            // the roots are taken as given — a relative one against the process's working
+            // directory, not against the importing file. Resolving against the importing file, as
+            // this used to, makes a deep tree unreachable whenever the root is relative.
             let mut matching_file = None;
             for path in import_search_path {
-                let candidate = if path.is_absolute() {
-                    path.join(import)
-                } else {
-                    in_file
-                        .parent()
-                        .map_or_else(|| path.join(import), |p| p.join(path).join(import))
-                };
+                let candidate = path.join(import);
                 if candidate.exists() {
                     matching_file = Some(candidate);
                     break;
@@ -286,7 +293,15 @@ impl FileDescriptor {
                 )));
             }
             let proto_file = matching_file.unwrap();
-            let mut f = FileDescriptor::parse_tree(&proto_file, import_search_path)?;
+
+            // A file reached twice — a diamond, or an import cycle — is parsed once. Whichever
+            // descriptor pulled it in first is itself merged upwards into this one, so its
+            // definitions still arrive; and because resolution runs once at the root after every
+            // merge, no intermediate descriptor needs to be complete on its own.
+            if !visited.insert(canonical(&proto_file)) {
+                continue;
+            }
+            let mut f = FileDescriptor::parse_tree(&proto_file, import_search_path, visited)?;
 
             // if the proto has a packge then the names will be prefixed
             let package = f.package.clone();
@@ -467,6 +482,12 @@ impl FileDescriptor {
     pub fn find_enum(&self, full_name: &str) -> Option<&Enumerator> {
         self.enums.iter().find(|e| e.full_name == full_name)
     }
+}
+
+/// A path key for the visited set. Falls back to the path as given when it cannot be
+/// canonicalized, which only happens for a file we could not have opened anyway.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Resolve one type reference the way protobuf specifies: innermost scope outwards.
@@ -659,6 +680,99 @@ mod test {
         assert_eq!(
             FieldType::Message("left.L".to_string()),
             field_type(&desc, "root.Root", "l"),
+        );
+    }
+
+    /// Mutually importing files terminate. Protobuf forbids an import cycle, but the recursion
+    /// used to have no guard at all, so `a` importing `b` importing `a` blew the stack.
+    #[test]
+    fn import_cycle_terminates() {
+        let dir = scratch(
+            "cycle",
+            &[
+                (
+                    "a.proto",
+                    r#"syntax = "proto3";
+                    package p;
+                    import "b.proto";
+                    message A { B b = 1; }
+                    "#,
+                ),
+                (
+                    "b.proto",
+                    r#"syntax = "proto3";
+                    package p;
+                    import "a.proto";
+                    message B { A a = 1; }
+                    "#,
+                ),
+            ],
+        );
+        let desc = FileDescriptor::read_proto(&dir.join("a.proto"), &[dir.clone()]).unwrap();
+
+        // Both arms are present exactly once and refer to each other.
+        assert_eq!(2, desc.messages.len());
+        assert_eq!(
+            FieldType::Message("p.B".to_string()),
+            field_type(&desc, "p.A", "b"),
+        );
+        assert_eq!(
+            FieldType::Message("p.A".to_string()),
+            field_type(&desc, "p.B", "a"),
+        );
+    }
+
+    /// An import path is joined onto the include root, so a file nested well below that root
+    /// resolves an import written relative to the root rather than to itself.
+    #[test]
+    fn import_resolves_against_the_include_root() {
+        let dir = scratch(
+            "root_relative",
+            &[
+                (
+                    "pkg/common/v1/common.proto",
+                    r#"syntax = "proto3";
+                    package pkg.common.v1;
+                    message Shared { int32 v = 1; }
+                    "#,
+                ),
+                (
+                    "pkg/svc/v1/svc.proto",
+                    r#"syntax = "proto3";
+                    package pkg.svc.v1;
+                    import "pkg/common/v1/common.proto";
+                    message Svc { pkg.common.v1.Shared s = 1; }
+                    "#,
+                ),
+            ],
+        );
+        let desc =
+            FileDescriptor::read_proto(&dir.join("pkg/svc/v1/svc.proto"), &[dir.clone()]).unwrap();
+
+        assert_eq!(
+            FieldType::Message("pkg.common.v1.Shared".to_string()),
+            field_type(&desc, "pkg.svc.v1.Svc", "s"),
+        );
+    }
+
+    /// An import that is on no include root is an error naming the file.
+    #[test]
+    fn missing_import_errors() {
+        let dir = scratch(
+            "missing_import",
+            &[(
+                "root.proto",
+                r#"syntax = "proto3";
+                package a;
+                import "nowhere.proto";
+                message M { int32 x = 1; }
+                "#,
+            )],
+        );
+        let err = FileDescriptor::read_proto(&dir.join("root.proto"), &[dir.clone()]).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidImport(ref m) if m.contains("nowhere.proto")),
+            "unexpected error: {err}"
         );
     }
 
