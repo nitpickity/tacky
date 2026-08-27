@@ -1,8 +1,8 @@
 //! Currently wraps/uses pb-rs from quick-protobuf as the underlying parser, as i dont want any protoc system deps (a la prost)
 //! and dont i dont to write my own (yet).
 
+use crate::pbrs::types::{Enumerator, FieldType, FileDescriptor, Message, SymbolKind};
 use crate::{field_enum::field_enum, field_type::field_type};
-use pb_rs::types::{Enumerator, FieldType, FileDescriptor, Message, SymbolKind};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::HashMap;
@@ -83,21 +83,6 @@ impl Scalar {
             Scalar::Bytes => "PbBytes",
         }
     }
-
-    pub const fn wire_type(&self) -> u32 {
-        match self {
-            Scalar::Int32
-            | Scalar::Sint32
-            | Scalar::Int64
-            | Scalar::Sint64
-            | Scalar::Uint32
-            | Scalar::Uint64
-            | Scalar::Bool => 0,
-            Scalar::Fixed32 | Scalar::Sfixed32 | Scalar::Float => 5,
-            Scalar::Fixed64 | Scalar::Sfixed64 | Scalar::Double => 1,
-            Scalar::String | Scalar::Bytes => 2,
-        }
-    }
 }
 impl std::fmt::Display for Scalar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -157,25 +142,6 @@ fn resolve_type(value: FieldType, desc: &FileDescriptor, scope: &Scope) -> PbTyp
     }
 }
 
-impl PbType {
-    pub const fn wire_type(&self) -> u32 {
-        match self {
-            PbType::Scalar(s) => s.wire_type(),
-            PbType::Enum(_) => 0, //varint
-            PbType::Message(_) | PbType::Map(_, _) | PbType::SimpleMap(_, _) => 2,
-        }
-    }
-
-    /// Whether this type is a scalar that supports packed encoding (everything except string/bytes).
-    pub fn is_packable_scalar(&self) -> bool {
-        match self {
-            PbType::Scalar(Scalar::String) | PbType::Scalar(Scalar::Bytes) => false,
-            PbType::Scalar(_) | PbType::Enum(_) => true,
-            _ => false,
-        }
-    }
-}
-
 impl std::fmt::Display for PbType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -208,13 +174,14 @@ pub struct OneOfGroup {
     pub fields: Vec<Field>,
 }
 
-fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor, scope: &Scope) -> Field {
-    let pb_rs::types::Field {
+fn convert_field(field: &crate::pbrs::types::Field, desc: &FileDescriptor, scope: &Scope) -> Field {
+    let crate::pbrs::types::Field {
         name,
         frequency,
         typ,
         number,
-        default,
+        // Presence is checked in the parser's own `sanity_checks`, which rejects custom defaults.
+        default: _,
     } = field;
     let ty = resolve_type(typ.clone(), desc, scope);
     // The parser decides packedness per file, from that file's own syntax, so nothing is re-derived
@@ -229,14 +196,14 @@ fn convert_field(field: &pb_rs::types::Field, desc: &FileDescriptor, scope: &Sco
         label,
     }
 }
-impl From<pb_rs::types::Frequency> for Label {
-    fn from(value: pb_rs::types::Frequency) -> Self {
+impl From<crate::pbrs::types::Frequency> for Label {
+    fn from(value: crate::pbrs::types::Frequency) -> Self {
         match value {
-            pb_rs::types::Frequency::Optional => Label::Optional,
-            pb_rs::types::Frequency::Repeated => Label::Repeated,
-            pb_rs::types::Frequency::Required => Label::Required,
-            pb_rs::types::Frequency::Packed => Label::Packed,
-            pb_rs::types::Frequency::Plain => Label::Plain,
+            crate::pbrs::types::Frequency::Optional => Label::Optional,
+            crate::pbrs::types::Frequency::Repeated => Label::Repeated,
+            crate::pbrs::types::Frequency::Required => Label::Required,
+            crate::pbrs::types::Frequency::Packed => Label::Packed,
+            crate::pbrs::types::Frequency::Plain => Label::Plain,
         }
     }
 }

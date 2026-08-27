@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::errors::{Error, Result};
-use crate::parser::file_descriptor;
+use super::errors::{Error, Result};
+use super::parser::file_descriptor;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Syntax {
@@ -220,6 +220,10 @@ pub struct FileDescriptor {
 
 impl FileDescriptor {
     /// Parse `in_file`, inline its transitive imports, and resolve every type reference.
+    #[allow(
+        dead_code,
+        reason = "the single-root entry point; tacky-build itself calls read_protos"
+    )]
     pub fn read_proto(in_file: &Path, import_search_path: &[PathBuf]) -> Result<FileDescriptor> {
         Self::read_protos(
             std::slice::from_ref(&in_file.to_path_buf()),
@@ -512,6 +516,10 @@ impl FileDescriptor {
     ///
     /// If the name is not in the symbol table. Every name reachable from a resolved `FieldType` is,
     /// by construction, so a panic here means the descriptor was built by hand.
+    #[allow(
+        dead_code,
+        reason = "read via `symbols` directly by tacky-build; used by tests here"
+    )]
     pub fn rust_name(&self, full_name: &str) -> &str {
         &self
             .symbols

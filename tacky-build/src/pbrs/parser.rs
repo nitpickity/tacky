@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::str;
 
-use crate::types::{
+use super::types::{
     Enumerator, Field, FieldType, FileDescriptor, Frequency, Message, OneOf, Syntax,
 };
 
