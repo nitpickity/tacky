@@ -66,8 +66,15 @@ mod otlp {
     include!(concat!(env!("OUT_DIR"), "/otlp.rs"));
 }
 
-// tacky-build inlines a file's imports, so the whole tree lives in one module.
-use tacky_otlp::opentelemetry::proto::collector::trace::v1 as t;
+// tacky-build inlines a file's imports but keeps one module per proto package, as prost does.
+// This bench wants them as one namespace, so flatten the four it touches into `t`.
+#[allow(dead_code)]
+mod t {
+    pub use super::tacky_otlp::opentelemetry::proto::collector::trace::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::common::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::resource::v1::*;
+    pub use super::tacky_otlp::opentelemetry::proto::trace::v1::*;
+}
 // prost keeps one module per proto package.
 use otlp::opentelemetry::proto::collector::trace::v1 as pcol;
 use otlp::opentelemetry::proto::common::v1 as pcommon;

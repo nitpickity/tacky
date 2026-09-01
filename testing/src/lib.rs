@@ -814,7 +814,10 @@ mod tests {
 
     #[test]
     fn test_imported_types() {
-        use crate::tacky_importing::importing::{SimpleEnum, Wrapper, WrapperField, WrapperFields};
+        // `Wrapper` is declared in package `importing`; the types it imports keep their own
+        // package, `example`, in the generated module tree.
+        use crate::tacky_importing::example::{SimpleEnum, SimpleMessageField};
+        use crate::tacky_importing::importing::{Wrapper, WrapperField, WrapperFields};
 
         // Encode a Wrapper message that uses imported types
         let mut buf = Vec::new();
@@ -841,12 +844,8 @@ mod tests {
                     for f in fields {
                         let f = f.unwrap();
                         match f {
-                            crate::tacky_importing::importing::SimpleMessageField::NormalInt(v) => {
-                                normal_int = Some(v)
-                            }
-                            crate::tacky_importing::importing::SimpleMessageField::Astring(v) => {
-                                astring = Some(v)
-                            }
+                            SimpleMessageField::NormalInt(v) => normal_int = Some(v),
+                            SimpleMessageField::Astring(v) => astring = Some(v),
                             _ => {}
                         }
                     }

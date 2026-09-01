@@ -49,7 +49,7 @@ fn main() {
     println!("cargo:rerun-if-changed={simple_file}");
     println!("cargo:rerun-if-changed={importing_file}");
     tacky_build::write_proto(simple_file, &simple_out);
-    tacky_build::write_proto_with_includes(importing_file, &importing_out, &["."]);
+    tacky_build::write_proto_with_includes(importing_file, &importing_out, &["protos"]);
 
     let proto3_file = "protos/proto3_message.proto";
     println!("cargo:rerun-if-changed={proto3_file}");
@@ -121,23 +121,15 @@ fn main() {
     for f in otlp {
         println!("cargo:rerun-if-changed={f}");
     }
-    // tacky-build inlines a file's imports into the generated module, so pointing
-    // it at the collector service file yields `ExportTraceServiceRequest` and the
-    // whole `ResourceSpans` tree in one place. The include path has to be absolute:
-    // pb-rs resolves a relative one against the *importing file's* directory, C
-    // preprocessor style, which never matches a deep tree like this one.
-    let protos_root = std::fs::canonicalize("protos").unwrap();
-    tacky_build::write_proto_with_includes(
-        otlp[3],
+    // Both collector services into one module, for `benches/otlp_traces.rs` and
+    // `benches/otlp_logs.rs`. They are siblings — neither imports the other — so no single
+    // root file reaches both, and generating them separately would emit `common`/`resource`
+    // twice as unrelated Rust types. `protos` is the import root, exactly as `-Iprotos` is
+    // for the protoc invocations above.
+    tacky_build::write_protos(
+        &[otlp[3], otlp[5]],
         &format!("{out_dir}/tacky_otlp.rs"),
-        &[protos_root.to_str().unwrap()],
-    );
-    // The logs signal, for `benches/otlp_logs.rs`. Same tree, same tag; a separate
-    // generated module because the two collector services share only common/resource.
-    tacky_build::write_proto_with_includes(
-        otlp[5],
-        &format!("{out_dir}/tacky_otlp_logs.rs"),
-        &[protos_root.to_str().unwrap()],
+        &["protos"],
     );
     // prost spreads one module per proto package and cross-references them with
     // `super::super::`, so ask for the module tree in a single includable file

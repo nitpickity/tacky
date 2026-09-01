@@ -1,19 +1,18 @@
 use std::path::PathBuf;
 use std::str;
 
-use crate::types::{
-    Enumerator, Extend, Extensions, Field, FieldType, FileDescriptor, Frequency, Message, OneOf,
-    RpcFunctionDeclaration, RpcService, Syntax,
+use super::types::{
+    Enumerator, Field, FieldType, FileDescriptor, Frequency, Message, OneOf, Syntax,
 };
 
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_until},
     character::complete::{
-        alpha1, alphanumeric1, anychar, digit1, hex_digit1, multispace1, not_line_ending,
+        alpha1, alphanumeric1, digit1, hex_digit1, multispace1, not_line_ending,
     },
     combinator::{map, map_res, opt, recognize, value, verify},
-    multi::{many0, many1, separated_list0, separated_list1},
+    multi::{many0, many1, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
 };
@@ -33,7 +32,6 @@ enum MessageEvent {
     ReservedNums(Vec<i32>),
     ReservedNames(Vec<String>),
     OneOf(OneOf),
-    Extensions(Extensions),
     Ignore,
 }
 
@@ -50,8 +48,6 @@ enum Event {
     Package(String),
     Message(Message),
     Enum(Enumerator),
-    RpcService(RpcService),
-    Extend(Extend),
     Ignore,
 }
 
@@ -159,26 +155,16 @@ fn package(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
-fn extensions(input: &str) -> IResult<&str, Extensions> {
-    map(
+/// `extensions 1300 to max;` — consumed and discarded. tacky generates no extension accessors, so
+/// the range is of no interest; it only has to not derail the surrounding message.
+fn extensions(input: &str) -> IResult<&str, ()> {
+    value(
+        (),
         delimited(
             pair(tag("extensions"), many1(br)),
-            pair(
-                integer,
-                preceded(pair(many0(br), pair(tag("to"), many1(br))), take_until(";")),
-            ),
+            take_until(";"),
             tag(";"),
         ),
-        |(from, to)| {
-            // TODO: is there a better way to parse "max" or a number?
-            let s = to.trim();
-            let to = if s == "max" {
-                Extensions::max()
-            } else {
-                s.parse().unwrap()
-            };
-            Extensions { from, to }
-        },
     )(input)
 }
 
@@ -263,7 +249,7 @@ fn field_type(input: &str) -> IResult<&str, FieldType> {
         value(FieldType::Float, tag("float")),
         value(FieldType::Double, tag("double")),
         map(map_field, |(k, v)| FieldType::Map(Box::new(k), Box::new(v))),
-        map(qualifiable_name, FieldType::MessageOrEnum),
+        map(qualifiable_name, FieldType::Named),
     ))(input)
 }
 
@@ -277,33 +263,6 @@ fn map_field(input: &str) -> IResult<&str, (FieldType, FieldType)> {
         ),
         pair(many0(br), tag(">")),
     )(input)
-}
-
-fn default_check<'a>(
-    syntax: Syntax,
-    typ: FieldType,
-    key_vals: &[(&'a str, &'a str)],
-) -> Result<Option<String>, &'a str> {
-    for &(k, v) in key_vals.iter() {
-        if k == "default" {
-            return match (syntax, typ) {
-                (Syntax::Proto2, FieldType::String | FieldType::Bytes) => {
-                    let remove_compulsory_inverted_commas: IResult<&str, &str> =
-                        alt((
-                            delimited(tag("\""), take_until("\""), tag("\"")),
-                            delimited(tag("\'"), take_until("\'"), tag("\'")),
-                        ))(v);
-                    remove_compulsory_inverted_commas
-                        .map(|(_, s)| Some(s.to_owned()))
-                        .map_err(|_| "Default value must be wrapped in inverted commas!")
-                }
-                (Syntax::Proto2, _) => Ok(Some(v.to_owned())),
-                (Syntax::Proto3, _) => Ok(Some(v.to_owned())),
-                (Syntax::Edition(_), _) => Ok(Some(v.to_owned())),
-            };
-        }
-    }
-    Ok(None)
 }
 
 fn frequencies(
@@ -410,9 +369,8 @@ fn field_generic(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Field> {
             }
         }
 
-        let default = default_check(syntax.clone(), typ.clone(), &key_vals).map_err(|e| {
-            nom::Err::Failure(nom::error::Error::new(e, nom::error::ErrorKind::Verify))
-        })?;
+        // Only presence matters: tacky rejects custom defaults outright, in `sanity_checks`.
+        let default = key_vals.iter().any(|&(k, _)| k == "default");
 
         Ok((
             input,
@@ -422,27 +380,9 @@ fn field_generic(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Field> {
                 number,
                 default,
                 typ,
-                deprecated: key_vals
-                    .iter()
-                    .find_map(|&(k, v)| {
-                        if k == "deprecated" {
-                            Some(v.parse().expect("Cannot parse Deprecated value"))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(false),
             },
         ))
     }
-}
-
-fn message_field(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Field> {
-    field_generic(syntax)
-}
-
-fn oneof_message_field(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Field> {
-    field_generic(syntax)
 }
 
 fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
@@ -454,7 +394,7 @@ fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
                     pair(many0(br), tag("{")),
                     many1(delimited(
                         many0(br),
-                        oneof_message_field(syntax.clone()),
+                        field_generic(syntax.clone()),
                         many0(br),
                     )),
                     tag("}"),
@@ -469,20 +409,16 @@ fn one_of(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, OneOf> {
                         Syntax::Proto3 => field.frequency = Some(Frequency::Plain),
                     }
                 }
-                OneOf {
-                    name,
-                    fields,
-                    package: "".to_string(),
-                    module: "".to_string(),
-                    imported: false,
-                }
+                OneOf { name, fields }
             },
         )(input)
     }
 }
 
-fn rpc_function_declaration(input: &str) -> IResult<&str, RpcFunctionDeclaration> {
-    map(
+/// `rpc Method(Arg) returns (Ret);`, with an optional braced option body — consumed and discarded.
+fn rpc_function_declaration(input: &str) -> IResult<&str, ()> {
+    value(
+        (),
         tuple((
             delimited(pair(tag("rpc"), many1(br)), word, many0(br)),
             delimited(pair(tag("("), many0(br)), word, pair(many0(br), tag(")"))),
@@ -506,12 +442,13 @@ fn rpc_function_declaration(input: &str) -> IResult<&str, RpcFunctionDeclaration
                 )),
             ),
         )),
-        |(name, arg, ret, _)| RpcFunctionDeclaration { name, arg, ret },
     )(input)
 }
 
-fn rpc_service(input: &str) -> IResult<&str, RpcService> {
-    map(
+/// A `service` block — consumed and discarded. tacky generates no RPC stubs.
+fn rpc_service(input: &str) -> IResult<&str, ()> {
+    value(
+        (),
         pair(
             delimited(pair(tag("service"), many1(br)), word, many0(br)),
             delimited(
@@ -520,10 +457,6 @@ fn rpc_service(input: &str) -> IResult<&str, RpcService> {
                 tag("}"),
             ),
         ),
-        |(service_name, functions)| RpcService {
-            service_name,
-            functions,
-        },
     )(input)
 }
 
@@ -532,7 +465,7 @@ fn message_event(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, MessageEve
         alt((
             map(reserved_nums, MessageEvent::ReservedNums),
             map(reserved_names, MessageEvent::ReservedNames),
-            map(message_field(syntax.clone()), MessageEvent::Field),
+            map(field_generic(syntax.clone()), MessageEvent::Field),
             map(
                 preceded(
                     opt(pair(alt((tag("export"), tag("local"))), many1(br))),
@@ -548,7 +481,7 @@ fn message_event(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, MessageEve
                 MessageEvent::Enumerator,
             ),
             map(one_of(syntax.clone()), MessageEvent::OneOf),
-            map(extensions, MessageEvent::Extensions),
+            value(MessageEvent::Ignore, extensions),
             value(MessageEvent::Ignore, option_ignore),
             value(MessageEvent::Ignore, br),
         ))(input)
@@ -578,7 +511,6 @@ fn message(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Message> {
                         MessageEvent::Message(m) => msg.messages.push(m),
                         MessageEvent::Enumerator(e) => msg.enums.push(e),
                         MessageEvent::OneOf(o) => msg.oneofs.push(o),
-                        MessageEvent::Extensions(e) => msg.extensions = Some(e),
                         MessageEvent::Ignore => (),
                     }
                 }
@@ -659,9 +591,13 @@ fn option_ignore(input: &str) -> IResult<&str, ()> {
     )(input)
 }
 
-fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Extend> {
+/// An `extend` block — consumed and discarded. tacky generates no extension accessors, but the
+/// body still goes through the field parser rather than a brace scan, so that a field option
+/// containing braces cannot end the block early.
+fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, ()> {
     move |input| {
-        map(
+        value(
+            (),
             terminated(
                 pair(
                     delimited(pair(tag("extend"), many1(br)), qualifiable_name, many0(br)),
@@ -669,7 +605,7 @@ fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Extend> {
                         tag("{"),
                         many1(delimited(
                             many0(br),
-                            message_field(syntax.clone()),
+                            field_generic(syntax.clone()),
                             many0(br),
                         )),
                         tag("}"),
@@ -677,22 +613,18 @@ fn extend(syntax: Syntax) -> impl FnMut(&str) -> IResult<&str, Extend> {
                 ),
                 opt(pair(many0(br), tag(";"))),
             ),
-            |(name, fields)| Extend { name, fields },
         )(input)
     }
 }
 
+/// Peek at the file's syntax before parsing it properly, since the field grammar depends on it.
+///
+/// Protobuf requires the `syntax`/`edition` statement to be the file's first statement, so only
+/// whitespace and comments are skipped to reach it. Absent, the file is proto2, as protoc assumes.
+/// `input` is returned untouched: this is a look-ahead, not a consuming parser.
 fn scan_syntax(input: &str) -> IResult<&str, Syntax> {
-    map_res(
-        separated_list0(many0(anychar), alt((syntax, edition))),
-        |v| {
-            Ok::<Syntax, &str>(if v.is_empty() {
-                Syntax::Proto2
-            } else {
-                v[0].clone()
-            })
-        },
-    )(input)
+    let found = opt(preceded(many0(br), alt((syntax, edition))))(input)?.1;
+    Ok((input, found.unwrap_or(Syntax::Proto2)))
 }
 
 pub fn file_descriptor<'a>(
@@ -722,8 +654,8 @@ pub fn file_descriptor<'a>(
                         ),
                         Event::Enum,
                     ),
-                    map(rpc_service, Event::RpcService),
-                    map(extend(got_syntax), Event::Extend),
+                    value(Event::Ignore, rpc_service),
+                    value(Event::Ignore, extend(got_syntax)),
                     value(Event::Ignore, option_ignore),
                     value(Event::Ignore, br),
                 ))),
@@ -736,8 +668,6 @@ pub fn file_descriptor<'a>(
                             Event::Package(p) => desc.package = p,
                             Event::Message(m) => desc.messages.push(m),
                             Event::Enum(e) => desc.enums.push(e),
-                            Event::RpcService(r) => desc.rpc_services.push(r),
-                            Event::Extend(e) => desc.message_extends.push(e),
                             Event::Ignore => (),
                         }
                     }
@@ -1007,18 +937,13 @@ mod test {
             optional int32 t = 12123;
         }
         "#;
-        let desc = file_descriptor(msg).unwrap().1;
+        // `extend` and `extensions` are skipped, not captured. What matters is that they are
+        // consumed whole, leaving the surrounding messages intact and nothing unparsed.
+        let (rem, desc) = file_descriptor(msg).unwrap();
+        assert!(rem.trim().is_empty(), "unparsed tail: {rem:?}");
         assert_eq!(1, desc.messages.len());
-        assert_eq!(1, desc.message_extends.len());
-        let extend = &desc.message_extends[0];
-        assert_eq!("A", &extend.name);
-        assert_eq!(3, extend.fields.len());
-        let g = &extend.fields[0];
-        let h = &extend.fields[1];
-        let t = &extend.fields[2];
-        assert_eq!("g", &g.name);
-        assert_eq!("h", &h.name);
-        assert_eq!("t", &t.name);
+        assert_eq!("A", &desc.messages[0].name);
+        assert_eq!(1, desc.messages[0].fields.len());
     }
 
     #[test]
@@ -1028,14 +953,10 @@ mod test {
             optional int32 b = 12123;
         }
         "#;
-        let desc = file_descriptor(msg).unwrap().1;
+        // A fully-qualified extend target is still consumed cleanly.
+        let (rem, desc) = file_descriptor(msg).unwrap();
+        assert!(rem.trim().is_empty(), "unparsed tail: {rem:?}");
         assert_eq!(0, desc.messages.len());
-        assert_eq!(1, desc.message_extends.len());
-        let extend = &desc.message_extends[0];
-        assert_eq!(".foo.bar.Baz", &extend.name);
-        assert_eq!(1, extend.fields.len());
-        let field = &extend.fields[0];
-        assert_eq!("b", &field.name);
     }
 
     #[test]
@@ -1052,22 +973,22 @@ mod test {
         }
         message c {
             optional int32 c = 1;
+        }
+        message d {
+            optional int32 d = 1;
+
+            extensions 4, 20 to max;
         }"#;
 
-        let desc = file_descriptor(msg).unwrap().1;
-        assert_eq!(3, desc.messages.len());
-        let a = &desc.messages[0].extensions;
-        let b = &desc.messages[1].extensions;
-        let c = &desc.messages[2].extensions;
-        assert!(a.is_some());
-        assert!(b.is_some());
-        assert!(c.is_none());
-        let a = a.as_ref().unwrap();
-        let b = b.as_ref().unwrap();
-        assert_eq!(a.from, 1300);
-        assert_eq!(a.to, Extensions::max());
-        assert_eq!(b.from, 10321);
-        assert_eq!(b.to, 11000);
+        // The range is discarded; each `extensions` statement must be swallowed without
+        // disturbing its message. `d` covers the comma-separated form, which the previous
+        // structured parser rejected outright.
+        let (rem, desc) = file_descriptor(msg).unwrap();
+        assert!(rem.trim().is_empty(), "unparsed tail: {rem:?}");
+        assert_eq!(4, desc.messages.len());
+        for m in &desc.messages {
+            assert_eq!(1, m.fields.len(), "message {} lost a field", m.name);
+        }
     }
 
     #[test]
@@ -1197,7 +1118,7 @@ mod test {
         let desc = assert_desc(msg).unwrap();
         assert_eq!(1, desc.messages.len());
         assert_eq!(
-            FieldType::MessageOrEnum("Bar".to_owned()),
+            FieldType::Named("Bar".to_owned()),
             desc.messages[0].fields[0].typ
         );
 
@@ -1232,41 +1153,19 @@ mod test {
             }
         "#;
 
-        match file_descriptor(msg) {
-            ::nom::IResult::Ok((_, descriptor)) => {
-                println!("Services found: {:?}", descriptor.rpc_services);
-                let service = &descriptor.rpc_services.get(0).expect("Service not found!");
-                let func0 = service.functions.get(0).expect("Function 0 not returned!");
-                let func1 = service.functions.get(1).expect("Function 1 not returned!");
-                let func2 = service.functions.get(2).expect("Function 2 not returned!");
-                assert_eq!("RpcService", service.service_name);
-                assert_eq!("function0", func0.name);
-                assert_eq!("InStruct0", func0.arg);
-                assert_eq!("OutStruct0", func0.ret);
-                assert_eq!("function1", func1.name);
-                assert_eq!("InStruct1", func1.arg);
-                assert_eq!("OutStruct1", func1.ret);
-                assert_eq!("function2", func2.name);
-                assert_eq!("InStruct2", func2.arg);
-                assert_eq!("OutStruct2", func2.ret);
-            }
-            other => panic!("Could not parse RPC Service: {:?}", other),
-        }
+        // Services are skipped, not captured — including the braced-option form of `function2`.
+        // The grammar is still walked field by field, so adding capture back later is a matter of
+        // returning the parts instead of discarding them.
+        let (rem, desc) = file_descriptor(msg).unwrap();
+        assert!(rem.trim().is_empty(), "unparsed tail: {rem:?}");
+        assert_eq!(0, desc.messages.len());
         assert_desc(msg).unwrap();
     }
 
     #[test]
     fn test_rpc_function() {
         let msg = r#"rpc function_name(Arg) returns (Ret);"#;
-
-        match rpc_function_declaration(msg) {
-            ::nom::IResult::Ok((_, declaration)) => {
-                assert_eq!("function_name", declaration.name);
-                assert_eq!("Arg", declaration.arg);
-                assert_eq!("Ret", declaration.ret);
-            }
-            other => panic!("Could not parse RPC Function Declaration: {:?}", other),
-        }
+        assert_complete(rpc_function_declaration(msg)).unwrap();
     }
 
     #[test]
@@ -1875,7 +1774,7 @@ mod test {
                 optional int32 a = 1;
             }"#,
         );
-        // 'optional' is parsed as a type (MessageOrEnum), 'int32' as name,
+        // 'optional' is parsed as a type (Named), 'int32' as name,
         // then 'a' can't match '=', so the field fails -> message has 0 fields
         // OR the entire parse fails. Either way, we should NOT get a valid
         // field with frequency Optional from the keyword.
@@ -1945,9 +1844,9 @@ mod test {
         service MyService {
             rpc GetFoo(FooRequest) returns (FooResponse);
         }"#;
+        // Skipped, as in proto2/proto3; the edition declaration must still be picked up.
         let desc = assert_desc(msg).unwrap();
-        assert_eq!(1, desc.rpc_services.len());
-        assert_eq!("MyService", desc.rpc_services[0].service_name);
+        assert_eq!(Syntax::Edition("2023".to_string()), desc.syntax);
     }
 
     #[test]

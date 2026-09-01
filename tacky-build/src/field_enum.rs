@@ -303,10 +303,10 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
 
     let fields_iterator_name = format_ident!("{name}Fields");
 
-    let (lt_token, lt_name) = if needs_lifetime {
-        (quote! {<'a>}, (quote! {'a}))
+    let lt_token = if needs_lifetime {
+        quote! {<'a>}
     } else {
-        (quote! {}, quote! {})
+        quote! {}
     };
 
     quote! {
