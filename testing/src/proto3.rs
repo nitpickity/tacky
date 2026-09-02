@@ -309,10 +309,8 @@ mod tests {
         assert_eq!(decoded.byte_arrays, vec![b"x".to_vec(), b"y".to_vec()]);
     }
 
-    /// Iterators that cannot be walked backwards — a `HashSet`'s, a `take_while` — written
-    /// bare. A forward buffer appends, so nothing needs reordering and no bound applies; a
-    /// `RevBuf` rejects these same calls at compile time, since it would have to emit the
-    /// elements back-to-front.
+    /// A `HashSet`'s iterator and a `take_while`, written bare: appending reorders nothing, so
+    /// the repeated writers take any `IntoIterator` with no further bound.
     #[test]
     fn test_repeated_from_one_way_iters() {
         use std::collections::HashSet;
@@ -340,13 +338,11 @@ mod tests {
         assert_eq!(decoded.unums, vec![1, 7]);
     }
 
-    /// One encode routine, written once against `AnyDir` because it does not know its
-    /// buffer's direction, run through both a forward buffer and a `RevBuf`. Both have to come
-    /// out in list order — the reverse arm walks the elements backwards so that prepending
-    /// lands them ascending. This is the shape the benches use.
+    /// One encode routine, written once against a generic `WriteBuf`, run through both buffer
+    /// kinds. This is the shape the benches use.
     #[test]
-    fn test_any_dir_through_both_directions() {
-        fn encode<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, strings: &[&str], nums: &[i32]) {
+    fn test_generic_encode_through_both_buffers() {
+        fn encode<B: tacky::WriteBuf>(buf: &mut B, strings: &[&str], nums: &[i32]) {
             let s = RepeatedMessage::schema();
             s.nums.write(buf, nums);
             s.strings.write(buf, strings);
@@ -356,12 +352,12 @@ mod tests {
         let nums = [1, 2, 3];
 
         let mut fwd = Vec::new();
-        encode(tacky::AnyDir::from_mut(&mut fwd), &strings, &nums);
+        encode(&mut fwd, &strings, &nums);
         let mut backing = [0u8; 128];
-        let mut rb = tacky::RevBuf::new(&mut backing);
-        encode(tacky::AnyDir::from_mut(&mut rb), &strings, &nums);
+        let mut sb = tacky::SliceBuf::new(&mut backing);
+        encode(&mut sb, &strings, &nums);
 
-        for wire in [fwd.as_slice(), rb.written()] {
+        for wire in [fwd.as_slice(), sb.written()] {
             let decoded = prost_proto3::RepeatedMessage::decode(wire).unwrap();
             assert_eq!(decoded.strings, vec!["a", "b", "c"]);
             assert_eq!(decoded.nums, vec![1, 2, 3]);
@@ -512,32 +508,28 @@ mod tests {
 
     // --- Nested messages ---
 
-    /// Pins the reverse buffer at the byte level: writing a message's fields in *descending*
-    /// order into a `RevBuf` must produce exactly the bytes an ascending forward writer
-    /// produces, since each write prepends. Decode-and-compare checks (what the benches use,
-    /// because they share one ascending encoder for both directions) would absorb an
-    /// off-by-one or a reversed varint; this does not.
+    /// Pins the encoder at the byte level: every scalar written in ascending field order has
+    /// to come out as exactly the bytes prost produces. The decode-and-compare checks
+    /// elsewhere would absorb an off-by-one or a mis-encoded varint; this does not.
     #[test]
-    fn test_revbuf_descending_matches_prost() {
-        let mut backing = [0u8; 256];
-        let mut rb = tacky::RevBuf::new(&mut backing);
+    fn test_scalars_match_prost_bytes() {
+        let mut buf = Vec::new();
         let s = ScalarMessage::schema();
-        // Descending field order: a_bytes is 15, a_int32 is 1.
-        s.a_bytes.write(&mut rb, [0xFFu8, 0x00].as_slice());
-        s.a_string.write(&mut rb, "hello");
-        s.a_double.write(&mut rb, 2.71828f64);
-        s.a_float.write(&mut rb, 3.14f32);
-        s.a_sfixed64.write(&mut rb, i64::MIN);
-        s.a_sfixed32.write(&mut rb, i32::MIN);
-        s.a_fixed64.write(&mut rb, 0xCAFE_BABE_DEAD_BEEFu64);
-        s.a_fixed32.write(&mut rb, 0xDEAD_BEEFu32);
-        s.a_bool.write(&mut rb, true);
-        s.a_sint64.write(&mut rb, i64::MIN);
-        s.a_sint32.write(&mut rb, -50);
-        s.a_uint64.write(&mut rb, u64::MAX);
-        s.a_uint32.write(&mut rb, 300u32);
-        s.a_int64.write(&mut rb, -100i64);
-        s.a_int32.write(&mut rb, 42);
+        s.a_int32.write(&mut buf, 42);
+        s.a_int64.write(&mut buf, -100i64);
+        s.a_uint32.write(&mut buf, 300u32);
+        s.a_uint64.write(&mut buf, u64::MAX);
+        s.a_sint32.write(&mut buf, -50);
+        s.a_sint64.write(&mut buf, i64::MIN);
+        s.a_bool.write(&mut buf, true);
+        s.a_fixed32.write(&mut buf, 0xDEAD_BEEFu32);
+        s.a_fixed64.write(&mut buf, 0xCAFE_BABE_DEAD_BEEFu64);
+        s.a_sfixed32.write(&mut buf, i32::MIN);
+        s.a_sfixed64.write(&mut buf, i64::MIN);
+        s.a_float.write(&mut buf, 3.14f32);
+        s.a_double.write(&mut buf, 2.71828f64);
+        s.a_string.write(&mut buf, "hello");
+        s.a_bytes.write(&mut buf, [0xFFu8, 0x00].as_slice());
 
         let prost_msg = prost_proto3::ScalarMessage {
             a_int32: 42,
@@ -556,33 +548,29 @@ mod tests {
             a_string: "hello".into(),
             a_bytes: vec![0xFF, 0x00],
         };
-        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+        assert_eq!(buf.as_slice(), prost_msg.encode_to_vec().as_slice());
     }
 
-    /// The companion to [`test_revbuf_descending_matches_prost`] for lengths that do *not*
-    /// fit in one byte. That test's fields are all short, so it exercises neither
-    /// `RevBuf::put_msg`'s nor `put_len_delimited`'s `>= 0x80` branch — a reversed or
-    /// off-by-one multi-byte varint would slip straight through it.
+    /// The companion to [`test_scalars_match_prost_bytes`] for lengths that do *not* fit in
+    /// one byte. That test's fields are all short, so it never takes `Tack`'s overflow path —
+    /// an off-by-one in the shifted payload or the widened prefix would slip straight through.
     ///
     /// Here the inner `label` is 300 bytes (2-byte length), which pushes the enclosing
     /// `Nested` past 127 too (a second 2-byte length), and `value` is a 3-byte varint. Bytes
     /// are compared against prost rather than decoded, since decoding would re-absorb any
     /// mistake the encoder made in the length prefix.
     #[test]
-    fn test_revbuf_multibyte_lengths_match_prost() {
+    fn test_multibyte_lengths_match_prost() {
         let label = "x".repeat(300);
         let value = 1_000_000i32; // 0xc0 0x84 0x3d — three varint bytes
 
-        let mut backing = [0u8; 1024];
-        let mut rb = tacky::RevBuf::new(&mut backing);
+        let mut buf = Vec::new();
         let s = WithNesting::schema();
-        // Descending field order: name is 3, single is 1.
-        s.name.write(&mut rb, "outer");
-        s.single.write_msg(&mut rb, |buf, s| {
-            // And descending within the nested message: value is 2, label is 1.
-            s.value.write(buf, value);
+        s.single.write_msg(&mut buf, |buf, s| {
             s.label.write(buf, label.as_str());
+            s.value.write(buf, value);
         });
+        s.name.write(&mut buf, "outer");
 
         let prost_msg = prost_proto3::WithNesting {
             single: Some(prost_proto3::Nested {
@@ -592,7 +580,7 @@ mod tests {
             many: vec![],
             name: "outer".into(),
         };
-        assert_eq!(rb.written(), prost_msg.encode_to_vec().as_slice());
+        assert_eq!(buf.as_slice(), prost_msg.encode_to_vec().as_slice());
     }
 
     #[test]

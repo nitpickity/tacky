@@ -1,35 +1,18 @@
 //! Buffer trait for protobuf serialization.
 //!
 //! [`WriteBuf`] covers both appending (for scalar writes) and random-access patching
-//! (for [`Tack`](`crate::Tack`)'s length placeholders). Three buffers implement it:
+//! (for [`Tack`](`crate::Tack`)'s length placeholders). Two buffers implement it:
 //!
 //! - `Vec<u8>`, which grows as needed. The default.
 //! - [`SliceBuf`], a cursor over a caller-owned `&mut [u8]`, for `no_std`/no-alloc.
-//! - [`RevBuf`], which fills the same kind of slice *backwards*, so nested lengths are exact and
-//!   need no placeholder. Comes with an ordering contract for repeated fields, see its docs.
-//!
-//! Direction is a compile-time property, [`WriteBuf::REVERSE`] as a value and
-//! [`WriteBuf::Order`] as a type, so the writers' two arms fold away per buffer type. Code that
-//! has not picked a buffer writes through [`AnyDir`]. See [`OrderedIter`].
 
 /// A contiguous byte buffer that supports both appending and random-access patching. Appending is
 /// used by all scalar writers, random access by [`Tack`](`crate::Tack`) to patch length
 /// placeholders.
 ///
-/// Sealed: implemented only by `Vec<u8>`, [`SliceBuf`], [`RevBuf`] and [`AnyDir`], and usable as a
-/// bound from any crate but not implementable outside this one, for the reason on `private`.
+/// Sealed: implemented only by `Vec<u8>` and [`SliceBuf`], and usable as a bound from any crate
+/// but not implementable outside this one, for the reason on `private`.
 pub trait WriteBuf: private::Sealed {
-    /// This buffer's direction as a type, either [`Forward`] or [`Reverse`]. What
-    /// [`OrderedIter`] dispatches on.
-    type Order: Order;
-
-    /// True for buffers that grow *downward*, where every write prepends. Composite writes, tag
-    /// then value or length then payload, have to be emitted in the opposite order to come out
-    /// correct. An associated const, so each branch folds away per buffer type.
-    ///
-    /// Derived from [`WriteBuf::Order`]. Set the type, never this.
-    const REVERSE: bool = <Self::Order as Order>::REVERSE;
-
     fn put_u8(&mut self, val: u8);
     fn put_slice(&mut self, src: &[u8]);
     fn len(&self) -> usize;
@@ -53,30 +36,15 @@ pub trait WriteBuf: private::Sealed {
         self.len() == 0
     }
 
-    /// Reserves `n` contiguous bytes to be filled in **wire order**, or `None` if this
-    /// buffer cannot hand out such a window.
-    ///
-    /// Only a downward-growing buffer says yes, and only where the total size is known before
-    /// writing, as in a scalar map entry. Prepending a whole block leaves the bytes *inside* it in
-    /// order, so the caller can wrap the window in a [`SliceBuf`] and run the forward path
-    /// verbatim. `Vec` says no, since a window over its uninitialised capacity needs
-    /// `MaybeUninit`.
-    #[doc(hidden)]
-    fn claim_block(&mut self, _n: usize) -> Option<&mut [u8]> {
-        None
-    }
-
     /// Appends a base-128 varint. The default byte-at-a-time loop suits `Vec`; [`SliceBuf`]
-    /// overrides it to avoid a bounds check per byte, and [`RevBuf`] must, since prepending one
-    /// byte at a time reverses the varint's groups.
+    /// overrides it to avoid a bounds check per byte.
     fn put_varint(&mut self, value: u64) {
         crate::scalars::write_varint_into(value, self);
     }
 
     /// Writes a length-delimited submessage: the tag, the byte length of whatever `f` writes, and
-    /// the payload. The forward default reserves a [`Tack`](`crate::Tack`); a downward-growing
-    /// buffer runs `f` first and prepends the exact length. Every nested-message and packed-field
-    /// writer goes through here, so this is the only place submessage direction lives.
+    /// the payload, with the length reserved as a [`Tack`](`crate::Tack`) placeholder. Every
+    /// nested-message and packed-field writer goes through here.
     // important inline
     #[inline]
     fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self))
@@ -88,8 +56,7 @@ pub trait WriteBuf: private::Sealed {
         f(t.buffer);
     }
 
-    /// Appends a length-delimited payload: its length as a varint, then the bytes. A downward
-    /// buffer prepends the payload first and the length second, to get the order right.
+    /// Appends a length-delimited payload: its length as a varint, then the bytes.
     fn put_len_delimited(&mut self, payload: &[u8]) {
         self.put_varint(payload.len() as u64);
         self.put_slice(payload);
@@ -115,32 +82,8 @@ pub trait WriteBuf: private::Sealed {
     }
 }
 
-// --- Direction ---
-
-/// Marker for a buffer that grows upward. Writes append, so a repeated field's elements keep the
-/// order they were written in.
-pub struct Forward;
-/// Marker for a buffer that grows downward. Writes prepend, so a repeated field's elements have
-/// to be emitted back-to-front.
-pub struct Reverse;
-/// Marker for a buffer whose direction is not known where the write is type-checked, which is
-/// the direction [`AnyDir`] presents. Repeated fields then require a [`DoubleEndedIterator`],
-/// since the buffer may turn out to grow downward.
-///
-/// A `WriteBuf` using this **must** override [`WriteBuf::REVERSE`]. Inheriting `Both`'s
-/// placeholder value would give a wrapper around a [`RevBuf`] forward ordering.
-pub struct Both;
-
-/// A buffer's direction, as a type. Carried by [`WriteBuf::Order`] so that [`OrderedIter`] can
-/// select on it. Sealed: the writers branch on exactly [`Forward`], [`Reverse`] and [`Both`].
-pub trait Order: private::Sealed {
-    /// Mirrors [`WriteBuf::REVERSE`], which is derived from this.
-    #[doc(hidden)]
-    const REVERSE: bool;
-}
-
-/// Seals both [`Order`] and [`WriteBuf`]. The direction markers are impl'd here; each buffer's
-/// `Sealed` impl sits next to its `WriteBuf` impl, since `Vec<u8>`'s is feature-gated.
+/// Seals [`WriteBuf`]. Each buffer's `Sealed` impl sits next to its `WriteBuf` impl, since
+/// `Vec<u8>`'s is feature-gated.
 ///
 /// Sealed rather than `unsafe`, because [`Tack`](`crate::Tack`) patches the length prefix through
 /// `get_unchecked_mut`, relying on `as_mut_slice()` being at least `len()` long. A safe
@@ -148,202 +91,6 @@ pub trait Order: private::Sealed {
 /// `len()`, short `as_mut_slice()`) could produce an out-of-bounds write.
 mod private {
     pub trait Sealed {}
-    impl Sealed for super::Forward {}
-    impl Sealed for super::Reverse {}
-    impl Sealed for super::Both {}
-}
-
-impl Order for Forward {
-    const REVERSE: bool = false;
-}
-
-impl Order for Reverse {
-    const REVERSE: bool = true;
-}
-
-impl Order for Both {
-    /// A placeholder. See [`Both`].
-    const REVERSE: bool = false;
-}
-
-/// What the repeated and packed writers take: an iterable they can walk in wire order, given
-/// the buffer's direction. One impl per direction.
-///
-/// - [`Forward`] takes **any** [`IntoIterator`], since appending reorders nothing. A `HashSet`,
-///   a `take_while`, a hand-written one-way `Iterator`.
-/// - [`Reverse`] requires a [`DoubleEndedIterator`] and walks it backwards. A one-way iterator
-///   there is a compile error rather than a silently reversed list.
-///
-/// So the direction must be *known* where the call is type-checked, from a concrete buffer or a
-/// `WriteBuf<Order = ..>` bound. A body generic over the buffer has neither, and no impl can cover
-/// it, because a blanket impl over the direction would have to be strict and coherence rejects
-/// that beside the lax [`Forward`] impl. Such a body writes through [`AnyDir`] and its [`Both`].
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot be written to a buffer whose direction is `{O}`",
-    label = "not writable in `{O}` order",
-    note = "a `Reverse` buffer walks a repeated field's elements backwards, so it needs a `DoubleEndedIterator`",
-    note = "if `{O}` is a generic parameter or projection, this body has not picked a direction. take a `&mut AnyDir<B>` instead, or bound the buffer as `WriteBuf<Order = Forward>`"
-)]
-pub trait OrderedIter<O>: IntoIterator {
-    type Ordered: Iterator<Item = Self::Item>;
-    /// The elements in the order the buffer needs them written. Walk it front-to-back either
-    /// way, since for a downward buffer, whose writes prepend, that yields list order.
-    ///
-    /// `reverse` is [`WriteBuf::REVERSE`]. Only [`Both`] reads it, and it is a compile-time
-    /// constant at every call site, so the arm it selects folds away.
-    fn ordered(self, reverse: bool) -> Self::Ordered;
-}
-
-impl<I: IntoIterator> OrderedIter<Forward> for I {
-    type Ordered = I::IntoIter;
-    #[inline]
-    fn ordered(self, _reverse: bool) -> Self::Ordered {
-        self.into_iter()
-    }
-}
-
-impl<I: IntoIterator> OrderedIter<Reverse> for I
-where
-    I::IntoIter: DoubleEndedIterator,
-{
-    type Ordered = core::iter::Rev<I::IntoIter>;
-    #[inline]
-    fn ordered(self, _reverse: bool) -> Self::Ordered {
-        self.into_iter().rev()
-    }
-}
-
-impl<I: IntoIterator> OrderedIter<Both> for I
-where
-    I::IntoIter: DoubleEndedIterator,
-{
-    type Ordered = EitherIter<I::IntoIter>;
-    #[inline]
-    fn ordered(self, reverse: bool) -> Self::Ordered {
-        if reverse {
-            EitherIter::Reverse(self.into_iter().rev())
-        } else {
-            EitherIter::Forward(self.into_iter())
-        }
-    }
-}
-
-/// [`Both`]'s ordered iterator: the caller's, or [`Rev`](`core::iter::Rev`) of it, decided by
-/// the [`WriteBuf::REVERSE`] passed to [`OrderedIter::ordered`]. That is a `const` per buffer
-/// type, so the match folds. The tag exists only because the *type* cannot name a direction the
-/// body has not picked.
-pub enum EitherIter<I> {
-    Forward(I),
-    Reverse(core::iter::Rev<I>),
-}
-
-impl<I: DoubleEndedIterator> Iterator for EitherIter<I> {
-    type Item = I::Item;
-    #[inline]
-    fn next(&mut self) -> Option<I::Item> {
-        match self {
-            EitherIter::Forward(i) => i.next(),
-            EitherIter::Reverse(i) => i.next(),
-        }
-    }
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        match self {
-            EitherIter::Forward(i) => i.size_hint(),
-            EitherIter::Reverse(i) => i.size_hint(),
-        }
-    }
-}
-
-impl<I: DoubleEndedIterator + ExactSizeIterator> ExactSizeIterator for EitherIter<I> {
-    #[inline]
-    fn len(&self) -> usize {
-        match self {
-            EitherIter::Forward(i) => i.len(),
-            EitherIter::Reverse(i) => i.len(),
-        }
-    }
-}
-
-/// A view of any buffer for code that has not picked a direction, i.e. what
-/// `fn encode(buf: &mut impl WriteBuf)` wanted to be:
-///
-/// ```ignore
-/// fn write_file<B: WriteBuf>(buf: &mut AnyDir<B>, f: &FileDescriptorProto) {
-///     schema.dependency.write(buf, &f.dependency);          // iterators stay bare
-/// }
-/// write_file(AnyDir::from_mut(&mut vec), &f);               // wrapped once, here
-/// write_file(AnyDir::from_mut(&mut rev_buf), &f);
-/// ```
-///
-/// It forwards every write to `B` unchanged, including [`WriteBuf::REVERSE`], so the bytes and the
-/// codegen are the buffer's own. Only [`WriteBuf::Order`] changes, to [`Both`], so repeated fields
-/// take any double-ended iterator and are walked in whichever order `B` needs. A one-way iterator,
-/// which a forward buffer accepts bare, is rejected here.
-#[repr(transparent)]
-pub struct AnyDir<B>(B);
-
-impl<B: WriteBuf> AnyDir<B> {
-    /// Views `buf` as direction-erased. Free, a `repr(transparent)` reference cast.
-    ///
-    /// Takes `&mut B` rather than `B` so the view has no lifetime of its own, because `put_msg`
-    /// builds a `&mut Self` from a shorter-lived `&mut B` and `&mut AnyDir<'a, B>` would be
-    /// invariant in `'a`.
-    #[inline]
-    pub fn from_mut(buf: &mut B) -> &mut AnyDir<B> {
-        // SAFETY: `repr(transparent)` gives `AnyDir<B>` the layout of `B`, and the view adds
-        // no invariants of its own, so the two references are interchangeable.
-        unsafe { &mut *(buf as *mut B as *mut AnyDir<B>) }
-    }
-}
-
-impl<B: WriteBuf> private::Sealed for AnyDir<B> {}
-impl<B: WriteBuf> WriteBuf for AnyDir<B> {
-    type Order = Both;
-    /// `B`'s own direction, still a compile-time constant. This view erases only the *iterator*
-    /// bound, never the tag/value ordering the writers branch on.
-    const REVERSE: bool = B::REVERSE;
-
-    #[inline]
-    fn put_u8(&mut self, val: u8) {
-        self.0.put_u8(val);
-    }
-    #[inline]
-    fn put_slice(&mut self, src: &[u8]) {
-        self.0.put_slice(src);
-    }
-    #[inline]
-    fn len(&self) -> usize {
-        self.0.len()
-    }
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        self.0.as_mut_slice()
-    }
-    #[inline]
-    fn grow(&mut self, additional: usize) {
-        self.0.grow(additional);
-    }
-    #[inline]
-    fn copy_within(&mut self, src: core::ops::Range<usize>, dest: usize) {
-        self.0.copy_within(src, dest);
-    }
-    #[inline]
-    fn claim_block(&mut self, n: usize) -> Option<&mut [u8]> {
-        self.0.claim_block(n)
-    }
-    #[inline]
-    fn put_varint(&mut self, value: u64) {
-        self.0.put_varint(value);
-    }
-    #[inline]
-    fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self)) {
-        self.0.put_msg(tag, |inner| f(AnyDir::from_mut(inner)));
-    }
-    #[inline]
-    fn put_len_delimited(&mut self, payload: &[u8]) {
-        self.0.put_len_delimited(payload);
-    }
 }
 
 /// Longest copy the [`copy_small`] ladder handles, the reach of its three overlapping 16-byte
@@ -394,8 +141,6 @@ mod alloc_impls {
 
     impl private::Sealed for Vec<u8> {}
     impl WriteBuf for Vec<u8> {
-        type Order = Forward;
-
         #[inline]
         fn put_u8(&mut self, val: u8) {
             self.push(val);
@@ -436,192 +181,6 @@ mod alloc_impls {
     }
 }
 
-// --- Reverse (downward-growing) buffer ---
-
-/// A buffer that fills from the end backwards, so a nested message's length is known by the time
-/// it has to be written. Doesnt use a [`Tack`](`crate::Tack`), so no overflow shifts.
-///
-/// The cost is that **every write prepends**, so fields appear on the wire in the reverse of the
-/// order they are written. Protobuf allows any field order, with two exceptions the caller owns.
-///
-/// - **Repeated fields must be written back-to-front**, since their wire order is their list
-///   order. One writer call handles this for you, because [`OrderedIter`] walks the iterator
-///   backwards. Across calls it cannot, because each write prepends its whole block, so two
-///   `write_msgs` calls, or a loop of `write_msg`/`write_single`, come out in reverse call order.
-///   Let one call own the whole list where you can, otherwise call them tail-first.
-/// - **Duplicate map keys** follow last-one-wins, so their relative order matters too.
-///
-/// Writing a message's fields in descending field order therefore reproduces exactly the bytes an
-/// ascending forward writer produces.
-///
-/// Fixed capacity, so `grow` panics as it does on [`SliceBuf`]. [`RevBuf::written`] returns the
-/// bytes, which sit at the *tail* of the backing slice.
-pub struct RevBuf<'a> {
-    buf: &'a mut [u8],
-    /// Index of the first written byte. Writes move it down, and `buf.len() - pos` is the length
-    /// written so far.
-    pos: usize,
-}
-
-impl<'a> RevBuf<'a> {
-    pub fn new(buf: &'a mut [u8]) -> Self {
-        let pos = buf.len();
-        RevBuf { buf, pos }
-    }
-
-    /// The bytes written so far, at the tail of the backing slice.
-    pub fn written(&self) -> &[u8] {
-        &self.buf[self.pos..]
-    }
-
-    #[inline]
-    fn claim(&mut self, n: usize) -> &mut [u8] {
-        assert!(self.pos >= n, "RevBuf exhausted");
-        self.pos -= n;
-        // SAFETY: `pos + n` is the old `pos`, which is `<= buf.len()` for the buffer's whole
-        // life, and the assert is what stops the subtraction wrapping.
-        unsafe { self.buf.get_unchecked_mut(self.pos..self.pos + n) }
-    }
-}
-
-impl private::Sealed for RevBuf<'_> {}
-impl WriteBuf for RevBuf<'_> {
-    type Order = Reverse;
-
-    /// Runs `f`, then prepends the exact length and the tag. [`Tack`](`crate::Tack`)'s job without
-    /// any of its machinery, since the length is known by the time it is needed.
-    #[inline]
-    fn put_msg(&mut self, tag: crate::scalars::EncodedTag, f: impl FnOnce(&mut Self)) {
-        let before = self.len();
-        f(self);
-        let payload = (self.len() - before) as u64;
-
-        // Both parts are known here, so claim once and store. Two separate appends instead cost
-        // two asserts, two cursor updates and an out-of-line `memcpy` for the tag, per message.
-        let (tag_bytes, tag_len) = tag.raw();
-        // Single-byte lengths are the overwhelming majority, every submessage under 128 B, so
-        // take them on a compare rather than `encoded_len_varint`'s clz/multiply/divide.
-        if payload < 0x80 {
-            let dst = self.claim(tag_len + 1);
-            // SAFETY: `dst.len() == tag_len + 1`, and `tag_len <= 5` per `EncodedTag::new`.
-            unsafe {
-                for i in 0..tag_len {
-                    *dst.get_unchecked_mut(i) = *tag_bytes.get_unchecked(i);
-                }
-                *dst.get_unchecked_mut(tag_len) = payload as u8;
-            }
-            return;
-        }
-        let vn = crate::scalars::encoded_len_varint(payload);
-        let dst = self.claim(tag_len + vn);
-        // SAFETY: `dst.len() == tag_len + vn` by construction, and `tag_len <= 5` per
-        // `EncodedTag::new`, so every index below is in range.
-        unsafe {
-            for i in 0..tag_len {
-                *dst.get_unchecked_mut(i) = *tag_bytes.get_unchecked(i);
-            }
-            let mut v = payload;
-            for i in 0..vn - 1 {
-                *dst.get_unchecked_mut(tag_len + i) = ((v & 0x7F) | 0x80) as u8;
-                v >>= 7;
-            }
-            *dst.get_unchecked_mut(tag_len + vn - 1) = v as u8;
-        }
-    }
-
-    #[inline]
-    fn put_u8(&mut self, val: u8) {
-        self.claim(1)[0] = val;
-    }
-    #[inline]
-    fn put_slice(&mut self, src: &[u8]) {
-        // One block prepend, so the bytes keep their order and only the block moves.
-        //
-        // The length test comes *first*, before `claim` touches `pos`, and the short path then
-        // stores through a raw pointer rather than building the `&mut [u8]` `claim` returns.
-        // Keep that order. `claim`'s assert and cursor update ahead of the length branch is
-        // measurably worse on varint-heavy inputs, where most calls exceed the cap.
-        let n = src.len();
-        if n == 0 || n > SMALL_COPY_MAX {
-            self.claim(n).copy_from_slice(src);
-            return;
-        }
-        assert!(self.pos >= n, "RevBuf exhausted");
-        self.pos -= n;
-        // SAFETY: as in `claim`. `pos + n` is the old `pos`, which is `<= buf.len()` for the
-        // buffer's whole life, and the assert is what keeps the subtraction from wrapping. That
-        // is `n` writable bytes at `pos`, which is all `copy_small` requires.
-        unsafe { copy_small(self.buf.as_mut_ptr().add(self.pos), src.as_ptr(), n) };
-    }
-    #[inline]
-    fn len(&self) -> usize {
-        self.buf.len() - self.pos
-    }
-    #[inline]
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        let pos = self.pos;
-        &mut self.buf[pos..]
-    }
-    /// `None` when the remaining room is short, as the trait promises; `claim` would assert
-    /// instead.
-    #[inline]
-    fn claim_block(&mut self, n: usize) -> Option<&mut [u8]> {
-        if self.pos < n {
-            return None;
-        }
-        Some(self.claim(n))
-    }
-    fn grow(&mut self, _additional: usize) {
-        panic!("RevBuf has a fixed capacity and cannot grow")
-    }
-    fn copy_within(&mut self, _src: core::ops::Range<usize>, _dest: usize) {
-        panic!("RevBuf never shifts: lengths are known before they are written")
-    }
-    #[inline]
-    fn put_varint(&mut self, value: u64) {
-        // Claim the exact width and store into it; staging into a `[u8; 10]` for `put_slice`
-        // costs an out-of-line `memcpy` on the most frequent write there is.
-        //
-        // No `value < 0x80` fast path, deliberately. Field values are mixed magnitude, so that
-        // branch mispredicts where `encoded_len_varint`'s `clz` is branchless. The opposite
-        // holds for *message lengths* in `put_msg`, which are locally uniform.
-        let n = crate::scalars::encoded_len_varint(value);
-        let dst = self.claim(n);
-        let mut v = value;
-        for i in 0..n - 1 {
-            dst[i] = ((v & 0x7F) | 0x80) as u8;
-            v >>= 7;
-        }
-        dst[n - 1] = v as u8;
-    }
-    #[inline]
-    fn put_len_delimited(&mut self, payload: &[u8]) {
-        // One claim for length and payload together. The length's width follows from the
-        // payload's, so two appends would only buy a second assert.
-        if payload.len() < 0x80 {
-            let dst = self.claim(1 + payload.len());
-            // SAFETY: `dst.len() == 1 + payload.len()` by construction.
-            unsafe {
-                *dst.get_unchecked_mut(0) = payload.len() as u8;
-                dst.get_unchecked_mut(1..).copy_from_slice(payload);
-            }
-            return;
-        }
-        let vn = crate::scalars::encoded_len_varint(payload.len() as u64);
-        let dst = self.claim(vn + payload.len());
-        // SAFETY: `dst.len() == vn + payload.len()` by construction.
-        unsafe {
-            let mut v = payload.len() as u64;
-            for i in 0..vn - 1 {
-                *dst.get_unchecked_mut(i) = ((v & 0x7F) | 0x80) as u8;
-                v >>= 7;
-            }
-            *dst.get_unchecked_mut(vn - 1) = v as u8;
-            dst.get_unchecked_mut(vn..).copy_from_slice(payload);
-        }
-    }
-}
-
 // --- Fixed-size slice buffer ---
 
 /// A fixed-size buffer for `no_std` / no-alloc environments.
@@ -644,19 +203,10 @@ impl<'a> SliceBuf<'a> {
 
 /// Adapter that implements [`core::fmt::Write`] for any [`WriteBuf`], so `Display` types can be
 /// written into a protobuf buffer with `write!`.
-///
-/// Forward buffers only. A multi-chunk write into a prepending buffer comes out chunk-reversed.
 pub struct FmtWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        // Folds away for a forward buffer. Not `debug_assert!`, which leaves release emitting
-        // chunks backwards, and not `const { assert!(..) }`, which as at `Tack::new_with_width`
-        // would refuse to compile an instantiation the caller guards at runtime.
-        assert!(
-            !B::REVERSE,
-            "FmtWriter appends; a reverse buffer would emit chunks backwards"
-        );
         self.0.put_slice(s.as_bytes());
         Ok(())
     }
@@ -669,10 +219,9 @@ impl<B: WriteBuf + ?Sized> core::fmt::Write for FmtWriter<'_, B> {
 /// schema.name.write(&mut buf, Some(PbDisplay(&my_ip)));
 /// ```
 ///
-/// Panics on a [`RevBuf`], since it streams through a [`Tack`](`crate::Tack`) placeholder, and if
-/// `Display::fmt` errors, rather than emit a half-formatted field under a correct length prefix.
-/// Unusable as a map key or value too, because `as_scalar` returns `""` while `encode` writes the
-/// real bytes, so `write_entry`'s precomputed length understates it.
+/// Panics if `Display::fmt` errors, rather than emit a half-formatted field under a correct length
+/// prefix. Unusable as a map key or value too, because `as_scalar` returns `""` while `encode`
+/// writes the real bytes, so `write_entry`'s precomputed length understates it.
 pub struct PbDisplay<'a, T: core::fmt::Display + ?Sized>(pub &'a T);
 
 impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_, T> {
@@ -686,7 +235,8 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 
     fn encode(buf: &mut impl WriteBuf, value: &Self) {
         use core::fmt::Write;
-        let t = crate::Tack::new_with_width(buf, 2);
+        // big enough for most things (ips, urls, uuids, etc)
+        let t = crate::Tack::new_with_width(buf, 1);
         // `FmtWriter::write_str` never fails, so the only `Err` is the value's own `Display::fmt`.
         // Named, because `unwrap` on a `fmt::Error` prints nothing diagnosable.
         write!(FmtWriter(t.buffer), "{}", value.0).expect("PbDisplay: Display::fmt failed");
@@ -695,19 +245,12 @@ impl<T: core::fmt::Display> crate::ProtoEncode<crate::PbString> for PbDisplay<'_
 
 /// Adapter that implements [`std::io::Write`] for any [`WriteBuf`], for sinks like
 /// `serde_json::to_writer`.
-///
-/// Forward buffers only, as [`FmtWriter`].
 #[cfg(feature = "std")]
 pub struct IoWriter<'a, B: WriteBuf + ?Sized>(pub &'a mut B);
 
 #[cfg(feature = "std")]
 impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // As in `FmtWriter::write_str`.
-        assert!(
-            !B::REVERSE,
-            "IoWriter appends; a reverse buffer would emit chunks backwards"
-        );
         self.0.put_slice(buf);
         Ok(buf.len())
     }
@@ -724,7 +267,7 @@ impl<B: WriteBuf + ?Sized> std::io::Write for IoWriter<'_, B> {
 /// schema.json_field.write(&mut buf, Some(PbWrite(|w| serde_json::to_writer(w, &val))));
 /// ```
 ///
-/// Panics on a [`RevBuf`], and unusable as a map key or value. See [`PbDisplay`].
+/// Unusable as a map key or value. See [`PbDisplay`].
 /// Panics if the closure errors rather than emit a truncated field.
 /// ```
 #[cfg(feature = "std")]
@@ -770,8 +313,6 @@ where
 
 impl private::Sealed for SliceBuf<'_> {}
 impl WriteBuf for SliceBuf<'_> {
-    type Order = Forward;
-
     #[inline]
     fn put_u8(&mut self, val: u8) {
         assert!(self.pos < self.buf.len(), "SliceBuf overflow");
@@ -858,26 +399,6 @@ mod tests {
     use crate::tack::Tack;
     use crate::{scalars::*, ProtoEncode};
 
-    // --- Reverse-buffer guards. Without them each of these silently corrupts output ---
-
-    #[test]
-    #[should_panic(expected = "Tack is forward-only")]
-    fn pb_display_into_rev_buf_panics() {
-        let mut backing = [0u8; 64];
-        let mut rb = crate::RevBuf::new(&mut backing);
-        <PbDisplay<'_, u32> as ProtoEncode<PbString>>::encode(&mut rb, &PbDisplay(&42u32));
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    #[should_panic(expected = "Tack is forward-only")]
-    fn pb_write_into_rev_buf_panics() {
-        let mut backing = [0u8; 64];
-        let mut rb = crate::RevBuf::new(&mut backing);
-        let w = PbWrite(|w: &mut dyn std::io::Write| w.write_all(b"payload"));
-        <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut rb, &w);
-    }
-
     /// A failing closure must not leave a silently truncated field. The `Tack` would patch a
     /// length over the partial bytes and the message would still parse.
     #[cfg(feature = "std")]
@@ -890,24 +411,6 @@ mod tests {
             Err(std::io::Error::other("serializer gave up"))
         });
         <PbWrite<_> as ProtoEncode<PbBytes>>::encode(&mut buf, &w);
-    }
-
-    #[test]
-    #[should_panic(expected = "FmtWriter appends")]
-    fn fmt_writer_into_rev_buf_panics() {
-        let mut backing = [0u8; 64];
-        let mut rb = crate::RevBuf::new(&mut backing);
-        write!(FmtWriter(&mut rb), "{}", 42).unwrap();
-    }
-
-    #[cfg(feature = "std")]
-    #[test]
-    #[should_panic(expected = "IoWriter appends")]
-    fn io_writer_into_rev_buf_panics() {
-        use std::io::Write as _;
-        let mut backing = [0u8; 64];
-        let mut rb = crate::RevBuf::new(&mut backing);
-        IoWriter(&mut rb).write_all(b"chunk").unwrap();
     }
 
     #[cfg(feature = "alloc")]
@@ -927,10 +430,10 @@ mod tests {
     }
 
     /// Every buffer type routes short copies through the same ladder, so every one gets the same
-    /// all-lengths sweep. Both cases write next to existing bytes on purpose, since with
-    /// overlapping stores a check that only compares the payload misses a write past `n`.
+    /// all-lengths sweep. Writes next to existing bytes on purpose, since with overlapping stores
+    /// a check that only compares the payload misses a write past `n`.
     #[test]
-    fn put_slice_ladder_all_lengths_slice_and_rev() {
+    fn put_slice_ladder_all_lengths_slice_buf() {
         for n in 0..=80usize {
             let src: Vec<u8> = (0..n).map(|i| (i as u8) ^ 0x5A).collect();
 
@@ -952,21 +455,6 @@ mod tests {
                 backing[6 + n..].iter().all(|&b| b == 0xCC),
                 "SliceBuf wrote past n={n}"
             );
-
-            // Reverse prepends, so the payload goes *before* the earlier write and the bytes
-            // below `pos` are the ones that must stay untouched.
-            let mut backing = [0xCCu8; 200];
-            let mut rb = RevBuf::new(&mut backing);
-            rb.put_slice(b"suffix");
-            rb.put_slice(&src);
-            let written = rb.written().to_vec();
-            assert_eq!(written.len(), 6 + n, "RevBuf len wrong at n={n}");
-            assert_eq!(&written[..n], &src[..], "RevBuf payload wrong at n={n}");
-            assert_eq!(&written[n..], b"suffix", "RevBuf suffix clobbered at n={n}");
-            assert!(
-                backing[..200 - (6 + n)].iter().all(|&b| b == 0xCC),
-                "RevBuf wrote below pos at n={n}"
-            );
         }
     }
 
@@ -984,17 +472,6 @@ mod tests {
         let mut sb = SliceBuf::new(&mut backing);
         write!(FmtWriter(&mut sb), "pi={:.2}", 3.14159).unwrap();
         assert_eq!(sb.written(), b"pi=3.14");
-    }
-
-    /// The trait promises `None` when the window will not fit; `claim` on its own asserts.
-    #[test]
-    fn rev_buf_claim_block_refuses_rather_than_panics() {
-        let mut backing = [0u8; 4];
-        let mut rb = RevBuf::new(&mut backing);
-        assert!(rb.claim_block(100).is_none());
-        assert_eq!(rb.claim_block(4).map(|w| w.len()), Some(4));
-        // Consumed the whole buffer, so a second claim of any size is refused.
-        assert!(rb.claim_block(1).is_none());
     }
 
     /// At the width-1 default any nested message of 128 B or more takes `Tack`'s

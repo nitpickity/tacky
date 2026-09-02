@@ -123,9 +123,9 @@ Message {
 };
 ```
 
-`scm` is the nested schema, so the same struct-literal exhaustiveness check works inside the closure if you want it. Letting the writer own the iteration is what keeps the list in order for every buffer: `RevBuf` fills backwards, so it has to emit the elements back-to-front, and only a call that owns the loop can do that.
+`scm` is the nested schema, so the same struct-literal exhaustiveness check works inside the closure if you want it.
 
-When the entries have no single Rust type, `write_msg` and `write_single` write one at a time instead — see their API docs, and the ordering caveat under [Buffers and write direction](#buffers-and-write-direction).
+When the entries have no single Rust type, `write_msg` and `write_single` write one at a time instead — see their API docs.
 
 ## Maps
 
@@ -164,25 +164,19 @@ The value is `Option` because protobuf technically allows a map entry with a key
 
 Tacky encodes in a single pass. Pre-computed tags and the [tack](#the-tack-primitive) length-patching strategy eliminate the size-calculation pass that prost and similar libraries need for nested messages and packed fields.
 
-Encode, measured in one run on an M3 (ARM) across four real-world schemas. `tacky` writes into a `Vec<u8>`; `tacky-rev` into a caller-provided fixed slice, filled backwards, which needs no length placeholders at all — see [Buffers and write direction](#buffers-and-write-direction) for what that buys and what it costs. The C++ column is the fair arm: `cpp-noutf8` for proto3, `cpp` for proto2.
+Encode, measured in one run on an M3 (ARM) across four real-world schemas. `tacky` writes into a `Vec<u8>`. The C++ column is the fair arm: `cpp-noutf8` for proto3, `cpp` for proto2.
 
-Both ratio columns are for the default forward writer; `tacky-rev`'s own ratio against C++ is in the rightmost column.
-
-| Corpus | Size | tacky | tacky-rev | prost | C++ | tacky vs prost | tacky vs C++ | rev vs C++ |
-| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **pprof** — real Go heap profile | 847 KB | 490 µs | 449 | 1314 | 772 | **2.7x** | **1.6x** | **1.7x** |
-| **Descriptor set** — with source info | 126 KB | 48.4 µs | 38.8 | 174 | 63.0 | **3.6x** | **1.3x** | **1.6x** |
-| **Descriptor set** — schemas only | 20 KB | 11.2 µs | 8.9 | 24.5 | 13.5 | **2.2x** | **1.2x** | **1.5x** |
-| **OTLP traces** — 512 spans | 355 KB | 109 µs | 85.5 | 235 | 136 | **2.2x** | **1.3x** | **1.6x** |
-| **OTLP traces** — 200 spans | 145 KB | 42.8 µs | 34.0 | 90.4 | 51.5 | **2.1x** | **1.2x** | **1.5x** |
-| **OTLP logs** — 512 records | 233 KB | 66.8 µs | 48.3 | 120 | 68.2 | **1.8x** | **1.0x** | **1.4x** |
-| **Access log** — 100 entries, map headers | 62 KB | 11.4 µs | 12.3 | 28.7 | 19.2 | **2.5x** | **1.7x** | **1.6x** |
-
-Two things the spread shows, both worth knowing before you believe the good numbers:
+| Corpus | Size | tacky | prost | C++ | tacky vs prost | tacky vs C++ |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| **pprof** — real Go heap profile | 847 KB | 490 µs | 1314 | 772 | **2.7x** | **1.6x** |
+| **Descriptor set** — with source info | 126 KB | 48.4 µs | 174 | 63.0 | **3.6x** | **1.3x** |
+| **Descriptor set** — schemas only | 20 KB | 11.2 µs | 24.5 | 13.5 | **2.2x** | **1.2x** |
+| **OTLP traces** — 512 spans | 355 KB | 109 µs | 235 | 136 | **2.2x** | **1.3x** |
+| **OTLP traces** — 200 spans | 145 KB | 42.8 µs | 90.4 | 51.5 | **2.1x** | **1.2x** |
+| **OTLP logs** — 512 records | 233 KB | 66.8 µs | 120 | 68.2 | **1.8x** | **1.0x** |
+| **Access log** — 100 entries, map headers | 62 KB | 11.4 µs | 28.7 | 19.2 | **2.5x** | **1.7x** |
 
 **The win tracks length prefixes per byte, not size.** A descriptor set with source info is thousands of tiny messages each carrying two packed `int32` arrays — three length prefixes per ~15 bytes of payload — and that is where the sizing pass costs prost most and tacky nothing. OTLP logs are the opposite: one ~120-byte body per record, so copying dominates and there is barely any prefix work to skip. Hence 3.6x down to 1.8x against prost on the same encoder.
-
-**`tacky-rev` is faster almost everywhere, but it asks for something.** It needs an upper bound on the output size and it constrains how you write repeated fields — see [Buffers and write direction](#buffers-and-write-direction). The access log is where it loses: that corpus is dominated by a scalar-valued `map`, whose entry lengths are computable in advance in *both* directions, so there is no placeholder for a reverse writer to eliminate.
 
 Output is byte-for-byte the same length as prost's on every corpus above; each bench prints both lengths so that stays checked.
 
@@ -190,31 +184,18 @@ How to run these, which arms are a fair comparison, and where the corpora come f
 
 Decoding is roughly on par with prost when materializing into owned structs. Tacky's decode model is zero-copy for strings, bytes, and sub-messages, so real-world decode performance depends on how much copying your application actually needs.
 
-## Buffers and write direction
+## Buffers
 
-Writes go through the `WriteBuf` trait, and three buffers implement it:
+Writes go through the `WriteBuf` trait, and two buffers implement it:
 
-| Buffer | Direction | Capacity | Use for |
-| :--- | :--- | :--- | :--- |
-| `Vec<u8>` | forward | grows | the default |
-| `SliceBuf` | forward | fixed | `no_std`, no allocator |
-| `RevBuf` | **backwards** | fixed | the fastest path, when you can bound the output |
+| Buffer | Capacity | Use for |
+| :--- | :--- | :--- |
+| `Vec<u8>` | grows | the default |
+| `SliceBuf` | fixed | `no_std`, no allocator |
 
-Direction is a compile-time property, not a runtime flag — it is an associated type on the buffer plus a `const REVERSE: bool` — so each writer's unused arm folds away and the forward path pays nothing for the reverse one.
+Both append. `SliceBuf` cannot grow, so exceeding the buffer panics; a placeholder that needs widening still works as long as the buffer has room.
 
-**Why backwards is faster.** A forward writer meets a nested message's length prefix *before* it knows the length, so it reserves a placeholder and patches it afterwards, widening and memmoving the payload if the guess was too small. A backwards writer runs the body first and prepends the length once it is known: no placeholder, no reserved width, no shift, and always a minimal-width varint. That is where the 1.4–1.7x over the C++ runtime comes from, and it grows with how many length prefixes your messages have per byte of payload.
-
-**What `RevBuf` asks of you in return:**
-
-- **An upper bound on the output size.** It cannot grow; exceeding the buffer panics. Over-provisioning costs only address space, and a bounded batch is normal for an exporter, but it is a real requirement. This is also why there is no cold-buffer story for it — you always hand it memory you already own.
-- **The output lives at the tail.** `written()` returns a slice from the middle of your buffer, not from index 0. If a sink demands an owned `Vec` starting at 0, that is one extra copy.
-- **Let the writers own repeated-field iteration.** Elements have to be emitted back-to-front, which only a call that owns the loop can do — so use `write` and `write_msgs` rather than a hand-rolled loop of `write_single`/`write_msg`. Those single-entry escape hatches still work, but through a reverse buffer you must call them tail-first. The iterator must also be double-ended, which rules out a `HashSet`'s (a forward buffer accepts it).
-- **`Display`-based writes are forward-only.** `PbDisplay`, `FmtWriter` and the `io::Write` adapter all stream in chunks, and chunks would land reversed, so they panic on a `RevBuf`. Format into a `String` first if you need this.
-- **Maps gain nothing.** A map entry's length is two scalar lengths, computable in advance, so the forward path needs no placeholder either — there is nothing for the reverse writer to eliminate, and it can come out slower on a map-dominated message. Map entry *order* is unspecified by protobuf, so entries are written in iteration order in both directions; the only visible consequence is that an iterator yielding a duplicate key resolves last-one-wins to the other value than it would forwards.
-
-`SliceBuf` shares the fixed-capacity constraint but nothing else: it appends, so every ordering caveat above is irrelevant to it, and a placeholder that needs widening still works as long as the buffer has room.
-
-Code that has not picked a buffer writes through `AnyDir`, which erases the direction. It asks for double-ended iterators on repeated fields, because the buffer it wraps might turn out to be a `RevBuf`.
+There was a third, `RevBuf`, which filled a fixed slice *backwards* so that nested lengths were exact and needed no placeholder — roughly 1.4–1.7x over the C++ runtime instead of 1.2–1.6x. It is gone as of this branch: making direction a compile-time property meant a direction type on the buffer, a `const REVERSE: bool`, a two-arm body in every writer, an `OrderedIter` bound on repeated fields (which rules out a `HashSet`'s iterator), and an `AnyDir` wrapper for any function generic over the buffer. It worked, and it was faster, but the whole type-level apparatus existed to serve one buffer. See commit `2e6f990` if you want it back.
 
 ## Deserialization
 

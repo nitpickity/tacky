@@ -78,17 +78,10 @@ impl<'b, B: WriteBuf> Tack<'b, B> {
     ///
     /// # Panics
     ///
-    /// Unless `1 <= width <= 5`, via [`write_wide_varint`], and on a reverse buffer, which needs
-    /// no placeholder and should use [`WriteBuf::put_msg`]. Both asserts are constant at every
-    /// generated call site, so both fold away there.
+    /// Unless `1 <= width <= 5`, via [`write_wide_varint`]. The assert is constant at every
+    /// generated call site, so it folds away there.
     // important: no #[inline] here, and keep this and `close` small
     pub fn new_with_width(buffer: &'b mut B, width: u32) -> Self {
-        // A Tack's `start`-relative patch would hit the payload when the buffer grows downward. Not `const assert!`, because `maps::write_msg` instantiates its forward
-        // branch for RevBuf behind a runtime guard. Folds away for forward buffers.
-        assert!(
-            !B::REVERSE,
-            "Tack is forward-only: a reverse buffer knows its lengths, use WriteBuf::put_msg"
-        );
         write_wide_varint(width as usize, 0, buffer);
 
         Tack {

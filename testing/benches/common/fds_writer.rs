@@ -18,19 +18,13 @@ pub mod tacky_descriptor {
 }
 pub use tacky_descriptor::google::protobuf as td;
 
-pub fn tacky_encode<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    set: &prost_types::FileDescriptorSet,
-) {
+pub fn tacky_encode<B: tacky::WriteBuf>(buf: &mut B, set: &prost_types::FileDescriptorSet) {
     let s = td::FileDescriptorSet::schema();
     s.file
         .write_msgs(buf, &set.file, |buf, _, f| write_file(buf, f));
 }
 
-fn write_file<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    f: &prost_types::FileDescriptorProto,
-) {
+fn write_file<B: tacky::WriteBuf>(buf: &mut B, f: &prost_types::FileDescriptorProto) {
     let s = td::FileDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.package.write(buf, f.package.as_deref());
@@ -91,7 +85,7 @@ fn write_file<B: tacky::WriteBuf>(
 
 /// Recursive: `nested_type` is a `DescriptorProto` again, which is most of what
 /// makes this corpus different from a flat message.
-fn write_message<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_types::DescriptorProto) {
+fn write_message<B: tacky::WriteBuf>(buf: &mut B, m: &prost_types::DescriptorProto) {
     let s = td::DescriptorProto::schema();
     s.name.write(buf, m.name.as_deref());
     s.field
@@ -128,10 +122,7 @@ fn write_message<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, m: &prost_types
     s.reserved_name.write(buf, &m.reserved_name);
 }
 
-fn write_field<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    f: &prost_types::FieldDescriptorProto,
-) {
+fn write_field<B: tacky::WriteBuf>(buf: &mut B, f: &prost_types::FieldDescriptorProto) {
     let s = td::FieldDescriptorProto::schema();
     s.name.write(buf, f.name.as_deref());
     s.extendee.write(buf, f.extendee.as_deref());
@@ -158,10 +149,7 @@ fn write_field<B: tacky::WriteBuf>(
     s.proto3_optional.write(buf, f.proto3_optional);
 }
 
-fn write_enum<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    e: &prost_types::EnumDescriptorProto,
-) {
+fn write_enum<B: tacky::WriteBuf>(buf: &mut B, e: &prost_types::EnumDescriptorProto) {
     let s = td::EnumDescriptorProto::schema();
     s.name.write(buf, e.name.as_deref());
     s.value.write_msgs(buf, &e.value, |buf, t, v| {

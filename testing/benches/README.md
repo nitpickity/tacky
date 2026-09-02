@@ -22,7 +22,7 @@ After that `build.rs` finds the cache on its own, so plain `cargo bench -p testi
 
 ## Which arms to compare
 
-Every headline group has the same five: `tacky` (forward, into a `Vec`), `tacky-rev` (backwards into a caller-sized slice), `prost`, the fair C++ arm, and that arm's cached floor.
+Every headline group has the same four: `tacky` (into a `Vec`), `prost`, the fair C++ arm, and that arm's cached floor.
 
 - **`cpp-noutf8` is the fair C++ arm for proto3.** The plain `cpp` arm also validates UTF-8, which Rust gets free from `&str`, so it measures work tacky never does. proto3 groups therefore carry only the `noutf8` variant; the validating kinds are still wired through `testing/cpp/shim.cc` if you want to measure that cost yourself.
 - **`cpp` is the fair arm for proto2** — there is no UTF-8 validation to switch off.
@@ -30,16 +30,16 @@ Every headline group has the same five: `tacky` (forward, into a `Vec`), `tacky-
 
 Two groups carry extra arms, each the single home for a diagnostic that reports the same thing everywhere:
 
-- `encode_pprof` — `tacky-slice` (forward into a fixed slice, so `tacky-slice` vs `tacky-rev` isolates *direction* from *buffer kind*) and `tacky-rev-owned` (what compacting the tail-aligned output into an index-0 `Vec` costs).
+- `encode_pprof` — `tacky-slice` (into a fixed slice, so `tacky-slice` vs `tacky` isolates the *buffer kind* from everything else).
 - `encode_accesslog` — `tacky-grow` and `prost-grow`, the only arms that start from an empty `Vec` and so pay the reallocation path. Every other arm reuses a warm buffer, which is the right steady state for an exporter but hides what the first export costs.
 
 ## The published table
 
 ```bash
-cargo bench -p testing --features cpp --bench comparison     -- 'encode_(pprof|accesslog)/(tacky|tacky-rev|prost|cpp-noutf8)$'
-cargo bench -p testing --features cpp --bench otlp_traces    -- 'encode_otlp_traces(_512)?/(tacky|tacky-rev|prost|cpp-noutf8)$'
-cargo bench -p testing --features cpp --bench otlp_logs      -- 'encode_otlp_logs/(tacky|tacky-rev|prost|cpp-noutf8)$'
-cargo bench -p testing --features cpp --bench descriptor_set -- 'encode_fds_[a-z_]+/(tacky|tacky-rev|prost|cpp)$'
+cargo bench -p testing --features cpp --bench comparison     -- 'encode_(pprof|accesslog)/(tacky|prost|cpp-noutf8)$'
+cargo bench -p testing --features cpp --bench otlp_traces    -- 'encode_otlp_traces(_512)?/(tacky|prost|cpp-noutf8)$'
+cargo bench -p testing --features cpp --bench otlp_logs      -- 'encode_otlp_logs/(tacky|prost|cpp-noutf8)$'
+cargo bench -p testing --features cpp --bench descriptor_set -- 'encode_fds_[a-z_]+/(tacky|prost|cpp)$'
 ```
 
 **Ratios are only meaningful within one run.** Re-running unchanged code on this hardware moves a number by several percent, and it drifts in both directions over a session, so never compare a number against one from a previous run. For an A/B, use `scripts/ab_bench.sh`, which alternates two commits and reports a median over pairs — and calibrate it by passing the same commit twice, in the same session, so you know what the box is doing right now.

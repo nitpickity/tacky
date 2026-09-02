@@ -32,8 +32,7 @@ pub fn bench_cpp_arms(
 /// it is not available for a message containing a `map` field: map entries have no
 /// canonical wire order, and the C++ runtime emits them in its own hash order while
 /// prost emits them in `BTreeMap` order. For those the caller decodes the C++ output and
-/// compares messages instead, which is the same standard the `tacky-rev` arms are held
-/// to for the same reason.
+/// compares messages instead.
 pub fn bench_cpp_arms_gated(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     label: &str,

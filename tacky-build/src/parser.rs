@@ -358,13 +358,8 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                     quote! {
                         pub fn #method_name<B: WriteBuf>(self, buf: &mut B, value: impl ProtoEncode<#tacky_ty>) -> Self {
                             let t = const { EncodedTag::new(#number, <#tacky_ty as ProtobufScalar>::WIRE_TYPE) };
-                            if B::REVERSE {
-                                <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
-                                t.write(buf);
-                            } else {
-                                t.write(buf);
-                                <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
-                            }
+                            t.write(buf);
+                            <#tacky_ty as ProtobufScalar>::write_value(value.as_scalar(), buf);
                             Self
                         }
                     }
@@ -374,13 +369,8 @@ fn write_oneof(msg_name: &str, group: &OneOfGroup) -> TokenStream {
                     quote! {
                         pub fn #method_name<B: WriteBuf>(self, buf: &mut B, value: impl ProtoEncode<PbEnum<#enum_ident>>) -> Self {
                             let t = const { EncodedTag::new(#number, WireType::VARINT) };
-                            if B::REVERSE {
-                                <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
-                                t.write(buf);
-                            } else {
-                                t.write(buf);
-                                <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
-                            }
+                            t.write(buf);
+                            <PbEnum<#enum_ident> as ProtobufScalar>::write_value(value.as_scalar(), buf);
                             Self
                         }
                     }
