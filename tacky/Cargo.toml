@@ -9,5 +9,9 @@ edition = "2021"
 default = ["alloc"]
 alloc = []
 std = ["alloc"]
+# `ToJson` for the generated `{Msg}Fields` decoders. See `tacky::json`.
+json = ["std", "dep:serde_json"]
 
 [dependencies]
+# `preserve_order` so keys come out in wire order of first appearance.
+serde_json = { version = "1", features = ["preserve_order"], optional = true }

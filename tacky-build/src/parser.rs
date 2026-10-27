@@ -243,6 +243,7 @@ fn write_message(
 
     let struct_schema = message_schema(qualified_name, &regular_fields, &oneof_groups);
     let field_enum = field_enum(qualified_name, &all_fields);
+    let field_json = crate::field_json::field_json(qualified_name, &all_fields, &oneof_groups);
     let oneof_impls: Vec<TokenStream> = oneof_groups
         .iter()
         .map(|g| write_oneof(qualified_name, g))
@@ -251,6 +252,7 @@ fn write_message(
     quote! {
         #struct_schema
         #field_enum
+        #field_json
         #(#oneof_impls)*
     }
 }
@@ -262,6 +264,7 @@ fn write_enum(
     _scope: &Scope,
 ) -> TokenStream {
     let name_ident = format_ident!("{qualified_name}");
+    let enum_json = crate::field_json::enum_json(qualified_name, &m.fields);
 
     let variants = m.fields.iter().map(|(field, _number)| {
         let field_ident = format_ident!("{}", heck::AsUpperCamelCase(field).to_string());
@@ -308,6 +311,7 @@ fn write_enum(
                 }
             }
         }
+        #enum_json
     }
 }
 
@@ -333,6 +337,13 @@ fn message_schema(name: &str, fields: &[Field], oneofs: &[OneOfGroup]) -> TokenS
             }
             pub fn decode(buf: &[u8])-> #k<'_> {
                 #k::new(buf)
+            }
+        }
+        tacky::if_json! {
+            impl #name_ident {
+                pub fn to_json(buf: &[u8]) -> Result<tacky::json::serde_json::Value, tacky::DecodeError> {
+                    tacky::json::ToJson::to_json(&Self::decode(buf))
+                }
             }
         }
     }

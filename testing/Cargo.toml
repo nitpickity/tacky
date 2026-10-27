@@ -27,6 +27,7 @@ pkg-config = { version = "0.3", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
+tacky = { path = "../tacky", features = ["json"] }
 
 [[bench]]
 name = "comparison"

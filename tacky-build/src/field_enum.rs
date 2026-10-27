@@ -309,12 +309,14 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
         quote! {}
     };
 
+    let field_debug = crate::field_debug::field_debug(name, fields);
+
     quote! {
         #[derive(Debug, Copy,Clone, PartialEq)]
         pub enum #enum_name #lt_token {
             #(#variants,)*
         }
-        #[derive(Debug, Copy,Clone, PartialEq)]
+        #[derive(Copy,Clone, PartialEq)]
         pub struct #fields_iterator_name<'a> {
             buf: &'a [u8],
         }
@@ -360,5 +362,7 @@ pub fn field_enum(name: &str, fields: &[Field]) -> TokenStream {
                 }
             }
         }
+
+        #field_debug
     }
 }

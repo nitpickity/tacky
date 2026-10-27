@@ -395,6 +395,98 @@ mod tests {
         assert_eq!(enum2, vec![AnotherEnum::A, AnotherEnum::B]);
     }
     #[test]
+    fn test_fields_debug() {
+        let mut buf = Vec::new();
+        let schema = MsgWithNesting::schema();
+        schema.nested.write_msg(&mut buf, |buf, scm| {
+            scm.normal_int.write(buf, Some(7));
+            scm.manystrings.write(buf, ["a", "b"]);
+            scm.manynumbers.write(buf, [1, 2, 3]);
+            scm.astring.write(buf, Some("hi"));
+            scm.manystrings.write(buf, ["c"]);
+        });
+        schema.enums.write_msg(&mut buf, |buf, scm| {
+            scm.enum2.write(buf, &[AnotherEnum::B, AnotherEnum::B]);
+        });
+        // Wire order: the second `manystrings` run is its own entry.
+        assert_eq!(
+            format!("{:?}", MsgWithNestingFields::new(&buf)),
+            r#"MsgWithNesting { nested: [SimpleMessage { normal_int: 7, manystrings: ["a", "b"], manynumbers: [1, 2, 3], astring: "hi", manystrings: ["c"] }], enums: MsgWithEnums { enum2: [B, B] } }"#
+        );
+
+        let mut buf = Vec::new();
+        let scm = MsgWithMaps::schema();
+        scm.map1
+            .write(&mut buf, &BTreeMap::from_iter([("one", 1), ("two", 2)]));
+        assert_eq!(
+            format!("{:?}", MsgWithMaps::decode(&buf)),
+            r#"MsgWithMaps { map1: {"one": 1, "two": 2} }"#
+        );
+    }
+
+    #[test]
+    fn test_fields_json() {
+        let mut buf = Vec::new();
+        let schema = MsgWithNesting::schema();
+        schema.nested.write_msg(&mut buf, |buf, scm| {
+            scm.normal_int.write(buf, Some(7));
+            scm.manystrings.write(buf, ["a", "b"]);
+            scm.manynumbers.write(buf, [1, 2, 3]);
+            scm.normal_int.write(buf, Some(8));
+            scm.manystrings.write(buf, ["c"]);
+        });
+        schema.enums.write_msg(&mut buf, |buf, scm| {
+            scm.enum2.write(buf, &[AnotherEnum::B, AnotherEnum::B]);
+        });
+        // One key per field: the split `manystrings` runs merge, the repeated `normal_int` is
+        // last-wins, and keys keep their order of first appearance.
+        assert_eq!(
+            MsgWithNesting::to_json(&buf).unwrap().to_string(),
+            r#"{"nested":[{"normal_int":8,"manystrings":["a","b","c"],"manynumbers":[1,2,3]}],"enums":{"enum2":["B","B"]}}"#
+        );
+
+        let mut buf = Vec::new();
+        let scm = MsgWithMaps::schema();
+        scm.map1
+            .write(&mut buf, &BTreeMap::from_iter([("one", 1), ("two", 2)]));
+        assert_eq!(
+            MsgWithMaps::to_json(&buf).unwrap().to_string(),
+            r#"{"map1":{"one":1,"two":2}}"#
+        );
+
+        // A truncated buffer is an error, not partial output.
+        assert!(MsgWithMaps::to_json(&buf[..buf.len() - 1]).is_err());
+
+        // A singular message seen twice merges: its scalars are last-wins, its repeated fields
+        // concatenate.
+        let mut buf = Vec::new();
+        let schema = MsgWithNesting::schema();
+        schema.enums.write_msg(&mut buf, |buf, scm| {
+            scm.enum1.write(buf, Some(SimpleEnum::First));
+            scm.enum2.write(buf, &[AnotherEnum::A]);
+        });
+        schema.enums.write_msg(&mut buf, |buf, scm| {
+            scm.enum1.write(buf, Some(SimpleEnum::Second));
+            scm.enum2.write(buf, &[AnotherEnum::B]);
+        });
+        assert_eq!(
+            MsgWithNesting::to_json(&buf).unwrap().to_string(),
+            r#"{"enums":{"enum1":"SECOND","enum2":["A","B"]}}"#
+        );
+
+        // A later oneof member clears the earlier one.
+        let mut buf = Vec::new();
+        let schema = ApiResponse::schema();
+        schema.result.write_error(&mut buf, "boom");
+        schema.request_id.write(&mut buf, Some("r"));
+        schema.result.write_code(&mut buf, 7);
+        assert_eq!(
+            ApiResponse::to_json(&buf).unwrap().to_string(),
+            r#"{"request_id":"r","code":7}"#
+        );
+    }
+
+    #[test]
     fn test_decode_maps() {
         let mut buf = Vec::new();
         let scm = MsgWithMaps::schema();

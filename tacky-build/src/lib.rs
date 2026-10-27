@@ -1,4 +1,6 @@
+mod field_debug;
 mod field_enum;
+mod field_json;
 mod field_type;
 mod parser;
 mod pbrs;

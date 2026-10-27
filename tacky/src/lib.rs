@@ -49,9 +49,27 @@ extern crate std;
 
 pub mod buf;
 pub mod field;
+#[cfg(feature = "json")]
+pub mod json;
 pub mod scalars;
 pub mod tack;
 pub use buf::*;
 pub use field::*;
 pub use scalars::*;
 pub use tack::*;
+
+/// Emits its input only when tacky's `json` feature is on. Generated `ToJson` impls are
+/// wrapped in it, so the switch is tacky's feature rather than a cfg in the generating crate.
+#[doc(hidden)]
+#[cfg(feature = "json")]
+#[macro_export]
+macro_rules! if_json {
+    ($($t:tt)*) => { $($t)* };
+}
+
+#[doc(hidden)]
+#[cfg(not(feature = "json"))]
+#[macro_export]
+macro_rules! if_json {
+    ($($t:tt)*) => {};
+}

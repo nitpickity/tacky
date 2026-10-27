@@ -241,10 +241,26 @@ pub mod packed {
     /// Iterator over values in a packed repeated field during deserialization.
     /// Yields one decoded scalar per call to `next()`. Borrows the packed
     /// byte slice, so no allocation is needed.
-    #[derive(Debug, Copy, Clone, PartialEq)]
+    #[derive(Copy, Clone, PartialEq)]
     pub struct PackedIter<'a, T: Packable> {
         buf: &'a [u8],
         _t: PhantomData<T>,
+    }
+
+    impl<'a, T: Packable> core::fmt::Debug for PackedIter<'a, T>
+    where
+        T::RustType<'a>: core::fmt::Debug,
+    {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            let mut l = f.debug_list();
+            for x in PackedIter::<T>::new(self.buf) {
+                match x {
+                    Ok(x) => l.entry(&x),
+                    Err(e) => l.entry(&e),
+                };
+            }
+            l.finish()
+        }
     }
 
     impl<'a, T: Packable> PackedIter<'a, T> {
