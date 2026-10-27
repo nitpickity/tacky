@@ -46,10 +46,9 @@
 //! is not a silent gap either: the round-trip assert below compares whole messages, so
 //! a fixture that grew one of them would fail rather than quietly measure less work.
 //!
-//! Wire output is checked by decoding tacky's bytes with prost and comparing messages
-//! rather than by comparing byte strings, because a reverse writer emits fields in the
-//! opposite order. The two encoders' byte *counts* do match — a placeholder is grown, not
-//! padded — and each fixture prints both so that stays checked rather than assumed.
+//! Wire output is checked by decoding tacky's bytes with prost and comparing messages. The
+//! two encoders' byte *counts* also match — a placeholder is grown, not padded — and each
+//! fixture prints both so that stays checked rather than assumed.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use prost::Message;
@@ -580,7 +579,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     // Tacky's padded length prefixes rule out a byte compare, so check the
     // stronger thing: prost must decode tacky's output back to the same message.
     let mut tacky_wire = Vec::with_capacity(fixture.len() * 2);
-    tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), &set);
+    tacky_encode(&mut tacky_wire, &set);
     assert_eq!(
         prost_types::FileDescriptorSet::decode(tacky_wire.as_slice()).unwrap(),
         set,
@@ -611,7 +610,7 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode(tacky::AnyDir::from_mut(&mut buf), &set);
+            tacky_encode(&mut buf, &set);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -622,25 +621,6 @@ fn bench_fixture(c: &mut Criterion, name: &str, fixture: &[u8]) {
             set.encode(&mut buf).unwrap();
             black_box(buf.as_slice());
             buf.clear();
-        });
-    });
-
-    // A downward buffer emits fields in the reverse of the order they are written, which is
-    // legal, so this is checked by decoding rather than by comparing bytes.
-    let mut rev_backing = vec![0u8; cap + 1024];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
-    assert_eq!(
-        prost_types::FileDescriptorSet::decode(rb.written()).unwrap(),
-        set,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; cap + 1024];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &set);
-            black_box(rb.written());
         });
     });
     // descriptor.proto is proto2, so the C++ runtime never validates its strings

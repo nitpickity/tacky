@@ -6,9 +6,7 @@
 //!
 //! Wire output is semantically identical everywhere. At the default `Tack` width a
 //! placeholder is *grown* rather than padded, so tacky's byte count matches prost's exactly;
-//! each bench prints the two lengths so that stays checked rather than assumed. Byte-level
-//! equality is still not assertable against a reverse writer, which emits fields in the
-//! opposite order — legal, and checked by decoding instead.
+//! each bench prints the two lengths so that stays checked rather than assumed.
 //!
 //! `--features cpp` adds arms for the official C++ protobuf runtime; run
 //! `scripts/bench_cpp.sh`, which sets it up statically. Each C++ workload gets up to four
@@ -89,7 +87,7 @@ fn bench_ffi_overhead(c: &mut Criterion) {
 // ---------------------------------------------------------------------------
 
 /// Encode a full MixedUsageMessage with tacky, all fields set.
-fn tacky_encode_mixed_all<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>) {
+fn tacky_encode_mixed_all<B: tacky::WriteBuf>(buf: &mut B) {
     let schema = TMixedUsageMessage::schema();
     schema
         .session_id
@@ -214,14 +212,14 @@ fn bench_encode_realistic(c: &mut Criterion) {
     let mut group = c.benchmark_group("encode_realistic");
 
     let mut ref_buf = Vec::with_capacity(2048);
-    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut ref_buf));
+    tacky_encode_mixed_all(&mut ref_buf);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut buf));
+            tacky_encode_mixed_all(&mut buf);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -240,26 +238,6 @@ fn bench_encode_realistic(c: &mut Criterion) {
     // exactly, which is what proves both runtimes encode the same message.
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
-
-    // Field order differs — a downward buffer emits fields in the reverse of the order they
-    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
-    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
-    let mut rev_backing = vec![0u8; size as usize + 1024];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
-    assert_eq!(
-        PMixedUsageMessage::decode(rb.written()).unwrap(),
-        prost_msg,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
-            black_box(rb.written());
-        });
-    });
     #[cfg(feature = "cpp")]
     bench_cpp_arms(&mut group, "cpp", cpp::MIXED, &prost_wire);
 
@@ -433,7 +411,7 @@ fn bench_decode_realistic(c: &mut Criterion) {
 
     // Encode a reference message (all fields) — wire bytes are identical
     let mut wire = Vec::with_capacity(512);
-    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut wire));
+    tacky_encode_mixed_all(&mut wire);
     group.throughput(Throughput::Bytes(wire.len() as u64));
 
     // Verify both decoders produce the same result
@@ -623,7 +601,7 @@ fn prost_pprof_profile() -> prost_pprof::Profile {
 /// Encodes a `Profile` from prost's owned structs, so both arms start from the same
 /// value and only the writer differs. Fields go out in ascending tag order, which is
 /// the order prost emits.
-fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, p: &prost_pprof::Profile) {
+fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut B, p: &prost_pprof::Profile) {
     use tacky_pprof::perftools::profiles::Profile;
 
     let s = Profile::schema();
@@ -677,8 +655,8 @@ fn tacky_encode_pprof<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, p: &prost_
         f.start_line.write(buf, fun.start_line);
     });
 
-    // One call with the whole table rather than one call per string: the repeated writer
-    // owns element order, which is what a downward-growing buffer needs.
+    // One call with the whole table rather than one call per string, so the repeated writer
+    // owns element order.
     s.string_table
         .write(buf, p.string_table.iter().map(|st| st.as_str()));
 
@@ -703,14 +681,14 @@ fn bench_encode_pprof(c: &mut Criterion) {
 
     let prost_msg = prost_pprof_profile();
     let mut ref_buf = Vec::with_capacity(PPROF_FIXTURE.len() + 4096);
-    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut ref_buf), &prost_msg);
+    tacky_encode_pprof(&mut ref_buf, &prost_msg);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut buf), &prost_msg);
+            tacky_encode_pprof(&mut buf, &prost_msg);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -730,52 +708,15 @@ fn bench_encode_pprof(c: &mut Criterion) {
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
 
-    // This group is the single home for the two buffer diagnostics, because they report the
-    // same thing on every corpus and 847 KB is where they report it most clearly.
-    //
-    // Forward into a fixed slice, so `tacky-slice` vs `tacky-rev` isolates the write
-    // *direction* from the buffer kind, and `tacky-slice` vs `tacky` isolates the buffer kind
-    // from everything else.
+    // This group is the single home for the buffer diagnostic, because it reports the same
+    // thing on every corpus and 847 KB is where it reports it most clearly. `tacky-slice` vs
+    // `tacky` isolates the buffer kind from everything else.
     group.bench_function("tacky-slice", |b| {
         let mut backing = vec![0u8; size as usize + 1024];
         b.iter(|| {
             let mut sb = tacky::SliceBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut sb), &prost_msg);
+            tacky_encode_pprof(&mut sb, &prost_msg);
             black_box(sb.written());
-        });
-    });
-
-    // Field order differs — a downward buffer emits fields in the reverse of the order they
-    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
-    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
-    let mut rev_backing = vec![0u8; size as usize + 1024];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
-    assert_eq!(
-        prost_pprof::Profile::decode(rb.written()).unwrap(),
-        prost_msg,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
-            black_box(rb.written());
-        });
-    });
-
-    // What handing the result over as an owned, index-0 buffer costs: the reverse output
-    // lives at the tail, so a `Vec<u8>`-shaped sink forces one compaction.
-    group.bench_function("tacky-rev-owned", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        let mut out = Vec::with_capacity(size as usize + 1024);
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_pprof(tacky::AnyDir::from_mut(&mut rb), &prost_msg);
-            out.clear();
-            out.extend_from_slice(rb.written());
-            black_box(out.as_slice());
         });
     });
     #[cfg(feature = "cpp")]
@@ -1270,10 +1211,7 @@ fn accesslog_common(i: usize, duration: i64) -> prost_accesslog::Common {
     }
 }
 
-fn tacky_encode_accesslog<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    data: &AccessLogEncodeData,
-) {
+fn tacky_encode_accesslog<B: tacky::WriteBuf>(buf: &mut B, data: &AccessLogEncodeData) {
     use tacky_accesslog::accesslog::{AccessLog, HttpMethod};
 
     let s = AccessLog::schema();
@@ -1352,14 +1290,14 @@ fn bench_encode_accesslog(c: &mut Criterion) {
 
     let data = accesslog_encode_data();
     let mut ref_buf = Vec::with_capacity(32768);
-    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut ref_buf), &data);
+    tacky_encode_accesslog(&mut ref_buf, &data);
     let size = ref_buf.len() as u64;
     group.throughput(Throughput::Bytes(size));
 
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(size as usize);
         b.iter(|| {
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &data);
+            tacky_encode_accesslog(&mut buf, &data);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -1380,26 +1318,6 @@ fn bench_encode_accesslog(c: &mut Criterion) {
     #[cfg(feature = "cpp")]
     let prost_wire = prost_msg.encode_to_vec();
 
-    // Field order differs — a downward buffer emits fields in the reverse of the order they
-    // are written, which is legal — so this is checked by decoding, not by comparing bytes.
-    // `test_revbuf_descending_matches_prost` pins the byte-level encoding separately.
-    let mut rev_backing = vec![0u8; size as usize + 1024];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
-    assert_eq!(
-        prost_accesslog::AccessLog::decode(rb.written()).unwrap(),
-        prost_msg,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; size as usize + 1024];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &data);
-            black_box(rb.written());
-        });
-    });
-
     // The cold-buffer pair, and the only place in the suite that measures it: every other
     // arm reuses a warm buffer, which is the right steady state for an exporter but hides
     // what the first export costs. A fresh `Vec` per iteration pays the reallocation path
@@ -1407,12 +1325,12 @@ fn bench_encode_accesslog(c: &mut Criterion) {
     //
     // Both encoders run it because they reach a cold buffer differently: prost reserves
     // `encoded_len()` up front and allocates once, exactly right, while tacky refuses to
-    // compute that length and doubles its way there. There is no reverse counterpart —
-    // `SliceBuf` and `RevBuf` are fixed-capacity and panic in `grow`.
+    // compute that length and doubles its way there. `SliceBuf` has no counterpart here —
+    // it is fixed-capacity and panics in `grow`.
     group.bench_function("tacky-grow", |b| {
         b.iter(|| {
             let mut buf = Vec::new();
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &data);
+            tacky_encode_accesslog(&mut buf, &data);
             black_box(buf.as_slice());
         });
     });
@@ -1664,13 +1582,13 @@ fn bench_encode_rotating(c: &mut Criterion) {
 
     // Size each type once, so the throughput denominator is the real blend.
     let mut probe = Vec::new();
-    tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut probe));
+    tacky_encode_mixed_all(&mut probe);
     let mixed_len = probe.len();
     probe.clear();
-    tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut probe), &log_data);
+    tacky_encode_accesslog(&mut probe, &log_data);
     let log_len = probe.len();
     probe.clear();
-    fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut probe), &fds);
+    fds_writer::tacky_encode(&mut probe, &fds);
     let fds_len = probe.len();
     let total = mixed_len + log_len + fds_len;
     let cap = total + 4096;
@@ -1683,30 +1601,15 @@ fn bench_encode_rotating(c: &mut Criterion) {
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut buf));
+            tacky_encode_mixed_all(&mut buf);
             black_box(buf.as_slice());
             buf.clear();
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut buf), &log_data);
+            tacky_encode_accesslog(&mut buf, &log_data);
             black_box(buf.as_slice());
             buf.clear();
-            fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut buf), &fds);
+            fds_writer::tacky_encode(&mut buf, &fds);
             black_box(buf.as_slice());
             buf.clear();
-        });
-    });
-
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; cap];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_mixed_all(tacky::AnyDir::from_mut(&mut rb));
-            black_box(rb.written());
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode_accesslog(tacky::AnyDir::from_mut(&mut rb), &log_data);
-            black_box(rb.written());
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            fds_writer::tacky_encode(tacky::AnyDir::from_mut(&mut rb), &fds);
-            black_box(rb.written());
         });
     });
 

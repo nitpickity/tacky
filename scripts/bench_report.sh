@@ -20,8 +20,8 @@
 #
 # `--table` reports each arm's time and its ratio to the base arm, where 2.2x means the
 # arm took 2.2x as long — i.e. the base was 2.2x faster. Cells are blank where an arm
-# does not exist for that group: proto2 schemas have no `cpp-noutf8`, `google_message1`
-# has no `tacky-rev-owned`, and decode groups have no C++ arms at all.
+# does not exist for that group: proto2 schemas have no `cpp-noutf8`, only `encode_pprof`
+# has `tacky-slice`, and decode groups have no C++ arms at all.
 #
 # criterion keeps only the latest result per benchmark id, so a narrow filter refreshes
 # some arms and leaves others behind. Comparing across runs like that is meaningless on a
@@ -112,7 +112,7 @@ if not table:
 
 # Stable, meaningful column order rather than whatever the walk found; unknown arms keep
 # their first-seen order at the end so a new one still shows up.
-PREFERRED = ["tacky", "tacky-slice", "tacky-rev", "tacky-rev-owned", "tacky-walk",
+PREFERRED = ["tacky", "tacky-slice", "tacky-walk",
              "prost", "cpp", "cpp-noutf8", "cpp-cached", "cpp-noutf8-cached"]
 seen = []
 for arms in rows.values():

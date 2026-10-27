@@ -8,7 +8,7 @@
 //! All of these are zero-sized. A generated message schema struct composed entirely
 //! of `Field` types has `size_of::<T>() == 0`.
 
-use crate::buf::{OrderedIter, WriteBuf};
+use crate::buf::WriteBuf;
 use crate::{scalars::*, tack::Tack};
 use core::marker::PhantomData;
 
@@ -71,15 +71,8 @@ pub mod optional {
         pub fn write<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: Option<V>) -> Self {
             if let Some(value) = value {
                 let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-                // A downward-growing buffer prepends, so write the tag last to put it first.
-                // `B::REVERSE` is an associated const, so the dead arm folds away per buffer.
-                if B::REVERSE {
-                    V::encode(buf, &value);
-                    t.write(buf);
-                } else {
-                    t.write(buf);
-                    V::encode(buf, &value);
-                }
+                t.write(buf);
+                V::encode(buf, &value);
             }
             Field::new()
         }
@@ -102,29 +95,17 @@ pub mod repeated {
     impl<const N: u32, P: ProtobufScalar> Field<N, Repeated<P>> {
         /// Writes each element with its own tag. For non-packed repeated fields.
         ///
-        /// [`OrderedIter`] hands the elements over in the order this buffer needs them,
-        /// which for a downward-growing one is back-to-front, since each write prepends.
-        /// Only that direction constrains the iterator. A forward buffer takes any of them,
-        /// a `HashSet`'s included.
+        /// Takes any [`IntoIterator`], a `HashSet`'s included, since appending reorders nothing.
         #[inline]
-        pub fn write<
-            B: WriteBuf,
-            V: ProtoEncode<P>,
-            I: OrderedIter<B::Order> + IntoIterator<Item = V>,
-        >(
+        pub fn write<B: WriteBuf, V: ProtoEncode<P>, I: IntoIterator<Item = V>>(
             self,
             buf: &mut B,
             values: I,
         ) -> Field<N, Repeated<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            for value in values.ordered(B::REVERSE) {
-                if B::REVERSE {
-                    V::encode(buf, &value);
-                    t.write(buf);
-                } else {
-                    t.write(buf);
-                    V::encode(buf, &value);
-                }
+            for value in values {
+                t.write(buf);
+                V::encode(buf, &value);
             }
             Field::new()
         }
@@ -134,22 +115,11 @@ pub mod repeated {
         /// *heterogeneous* one. `write` fixes one `I::Item` for the whole list, whereas each call
         /// here picks its own `V`, so a repeated string field can take a `&str`, then a `String`,
         /// then a [`PbDisplay`](`crate::PbDisplay`).
-        ///
-        /// Elements appear in call order through a forward buffer and in **reverse** call order
-        /// through a downward-growing one, since each call prepends. See [`RevBuf`]'s ordering
-        /// contract.
-        ///
-        /// [`RevBuf`]: crate::RevBuf
         #[inline]
         pub fn write_single<B: WriteBuf, V: ProtoEncode<P>>(self, buf: &mut B, value: V) -> Self {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            if B::REVERSE {
-                V::encode(buf, &value);
-                t.write(buf);
-            } else {
-                t.write(buf);
-                V::encode(buf, &value);
-            }
+            t.write(buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
@@ -158,14 +128,8 @@ pub mod repeated {
         /// Writes one entry of a repeated message field.
         ///
         /// Reach for `write_msgs` when the entries come from one list, since it owns the
-        /// iteration and so gets the order right in either direction. This one is for entries with no single
-        /// Rust type, where one closure per call can capture whatever it likes.
-        ///
-        /// Entries appear in call order through a forward buffer and in **reverse** call order
-        /// through a downward-growing one, since each call prepends its whole entry. See
-        /// [`RevBuf`]'s ordering contract.
-        ///
-        /// [`RevBuf`]: crate::RevBuf
+        /// iteration. This one is for entries with no single Rust type, where one closure per call
+        /// can capture whatever it likes.
         pub fn write_msg<B: WriteBuf>(self, buf: &mut B, mut f: impl FnMut(&mut B, M)) -> Self {
             let t = const { EncodedTag::new(N, WireType::LEN) };
             buf.put_msg(t, |buf| f(buf, M::schema()));
@@ -174,18 +138,16 @@ pub mod repeated {
 
         /// Writes every element of `values`, one length-delimited submessage each.
         ///
-        /// Equivalent to `write_msg` in a loop, except that the writer owns the iteration, which
-        /// is what lets it emit elements back-to-front for a downward-growing buffer, where a
-        /// caller's own loop would silently reverse the list. The closure takes the element as a
-        /// third argument, the only difference at the call site.
-        pub fn write_msgs<B: WriteBuf, I: OrderedIter<B::Order> + IntoIterator>(
+        /// Equivalent to `write_msg` in a loop, except that the writer owns the iteration. The
+        /// closure takes the element as a third argument, the only difference at the call site.
+        pub fn write_msgs<B: WriteBuf, I: IntoIterator>(
             self,
             buf: &mut B,
             values: I,
             mut f: impl FnMut(&mut B, M, I::Item),
         ) -> Self {
             let tag = const { EncodedTag::new(N, WireType::LEN) };
-            for value in values.ordered(B::REVERSE) {
+            for value in values {
                 buf.put_msg(tag, |buf| f(buf, M::schema(), value));
             }
             Field::new()
@@ -205,17 +167,12 @@ pub mod packed {
             self,
             buf: &mut B,
             values: I,
-        ) -> Field<N, Packed<P>>
-        where
-            I: OrderedIter<B::Order>,
-        {
-            let mut iter = values.ordered(B::REVERSE);
+        ) -> Field<N, Packed<P>> {
+            let mut iter = values.into_iter();
             let Some(first) = iter.next() else {
                 return Field::new();
             };
             let t = const { EncodedTag::new(N, WireType::LEN) };
-            // One arm for both directions, since a reverse buffer's `ordered()` already yields the
-            // list's tail first, so writing front-to-back prepends it into list order.
             buf.put_msg(t, |buf| {
                 P::write_value(first.as_scalar(), buf);
                 for value in iter {
@@ -240,39 +197,35 @@ pub mod packed {
         #[inline]
         pub fn write_exact<B: WriteBuf, I>(self, buf: &mut B, values: I) -> Field<N, Packed<P>>
         where
-            I: IntoIterator<Item: ProtoEncode<P>> + OrderedIter<B::Order>,
-            I::Ordered: ExactSizeIterator,
+            I: IntoIterator<Item: ProtoEncode<P>>,
+            I::IntoIter: ExactSizeIterator,
         {
-            let it = values.ordered(B::REVERSE);
+            let it = values.into_iter();
             if it.len() == 0 {
                 return Field::new();
             }
-            // The exact length is no use to a downward buffer, which already knows it by the time
-            // `put_msg` writes it, so there both element kinds take the path below.
-            if !B::REVERSE {
-                if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
-                    let data_len = it.len() * fixed_size;
-                    let tag = const { EncodedTag::new(N, WireType::LEN) };
-                    tag.write(buf);
-                    write_varint(data_len as u64, buf);
-                    #[cfg(debug_assertions)]
-                    let start_len = buf.len();
-                    for value in it {
-                        P::write_value(value.as_scalar(), buf);
-                    }
-                    // The prefix here is written from `ExactSizeIterator::len()` *before* the
-                    // elements, so a wrong `len()` leaves a prefix that disagrees with the
-                    // bytes. Too large truncates the field, too small leaks the tail out as
-                    // parent fields. The `put_msg` path below cannot have this, since its Tack
-                    // measures what was actually written.
-                    #[cfg(debug_assertions)]
-                    debug_assert_eq!(
-                        buf.len() - start_len,
-                        data_len,
-                        "ExactSizeIterator::len() disagreed with the elements written"
-                    );
-                    return Field::new();
+            if let Some(fixed_size) = P::FIXED_WIRE_SIZE {
+                let data_len = it.len() * fixed_size;
+                let tag = const { EncodedTag::new(N, WireType::LEN) };
+                tag.write(buf);
+                write_varint(data_len as u64, buf);
+                #[cfg(debug_assertions)]
+                let start_len = buf.len();
+                for value in it {
+                    P::write_value(value.as_scalar(), buf);
                 }
+                // The prefix here is written from `ExactSizeIterator::len()` *before* the
+                // elements, so a wrong `len()` leaves a prefix that disagrees with the
+                // bytes. Too large truncates the field, too small leaks the tail out as
+                // parent fields. The `put_msg` path below cannot have this, since its Tack
+                // measures what was actually written.
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(
+                    buf.len() - start_len,
+                    data_len,
+                    "ExactSizeIterator::len() disagreed with the elements written"
+                );
+                return Field::new();
             }
             // For varint types the encoded size depends on the values, so this needs the
             // placeholder `put_msg` reserves.
@@ -338,13 +291,8 @@ pub mod required {
             value: V,
         ) -> Field<N, Required<P>> {
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            if B::REVERSE {
-                V::encode(buf, &value);
-                t.write(buf);
-            } else {
-                t.write(buf);
-                V::encode(buf, &value);
-            }
+            t.write(buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
@@ -377,13 +325,8 @@ pub mod plain {
                 return Field::new();
             }
             let t = const { EncodedTag::new(N, P::WIRE_TYPE) };
-            if B::REVERSE {
-                V::encode(buf, &value);
-                t.write(buf);
-            } else {
-                t.write(buf);
-                V::encode(buf, &value);
-            }
+            t.write(buf);
+            V::encode(buf, &value);
             Field::new()
         }
     }
@@ -476,14 +419,6 @@ pub mod maps {
     impl<const N: u32, K: ProtobufScalar, V: ProtobufScalar> Field<N, PbMap<K, V>> {
         /// Writes all key-value pairs from an iterator. Accepts anything that yields
         /// pairs of encodable types, such as `HashMap`, `BTreeMap` or arrays of tuples.
-        ///
-        /// Entry order is *not* reversed for a downward-growing buffer, unlike a repeated
-        /// field's elements. Protobuf leaves map entry order unspecified, and requiring
-        /// `DoubleEndedIterator` here would rule out `HashMap`, whose iterator is not one. The
-        /// one visible consequence is duplicate keys, which the wire format resolves
-        /// last-one-wins, so an input yielding the same key twice resolves to the *other* value
-        /// than it would through a forward buffer. `HashMap`/`BTreeMap` cannot produce
-        /// duplicates; an iterator of tuples can.
         pub fn write<
             Buf: WriteBuf,
             I: IntoIterator<Item = (A, B)>,
@@ -512,47 +447,16 @@ pub mod maps {
             let key_tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
             let val_tag = const { EncodedTag::new(2, V::WIRE_TYPE) };
 
-            // An entry's length is exact without a placeholder in either direction, being the sum of
-            // two scalar field lengths, both known before anything is written. The one place
-            // tacky sizes before writing, two scalars deep with no recursion, so it is cheaper
-            // than a `Tack`.
+            // An entry's length is exact without a placeholder, being the sum of two scalar field
+            // lengths, both known before anything is written. The one place tacky sizes before
+            // writing, two scalars deep with no recursion, so it is cheaper than a `Tack`.
             let k = key.as_scalar();
             let v = value.as_ref().map(|v| v.as_scalar());
             let len = K::len(1, k) + v.map(|v| V::len(2, v)).unwrap_or(0);
 
-            // Because the whole entry is known up front, a downward buffer does not have to
-            // mirror the write order. It claims the entry as one block and fills it *forwards*
-            // through a `SliceBuf`, running the same sequence as the forward path below. That
-            // buys the `< 0x80` varint fast path and the small-copy ladder, both of which
-            // `RevBuf`'s own writes lack. Nested-message values cannot do this, since their
-            // length is not known in advance, which is why `write_msg` still mirrors.
-            if Buf::REVERSE {
-                let total = entry.raw().1 + crate::scalars::encoded_len_varint(len as u64) + len;
-                // `expect`, not a mirrored fallback. The only reverse buffer that refuses a
-                // window is one without the room, and writing the same bytes one at a time needs
-                // exactly as much, so a fallback could only reach `claim`'s own panic by a
-                // longer route. It is not free either, since a `claim_block` that can say no
-                // makes the whole second path live code.
-                let window = buf
-                    .claim_block(total)
-                    .expect("reverse buffer exhausted writing a map entry");
-                let mut fwd = crate::SliceBuf::new(window);
-                entry.write(&mut fwd);
-                fwd.put_varint(len as u64);
-                key_tag.write(&mut fwd);
-                A::encode(&mut fwd, &key);
-                if let Some(value) = value {
-                    val_tag.write(&mut fwd);
-                    B::encode(&mut fwd, &value);
-                }
-                debug_assert_eq!(fwd.len(), total, "map entry size mispredicted");
-                return Field::new();
-            }
-
-            // Same check the reverse path gets from `fwd.len()`, measured explicitly here. `cfg`
-            // rather than a bare `let`, so release does not carry an unused load. A mispredicted
-            // `len` writes a prefix that disagrees with the payload. The entry either truncates
-            // or leaks its tail out as bogus parent fields.
+            // `cfg` rather than a bare `let`, so release does not carry an unused load. A
+            // mispredicted `len` writes a prefix that disagrees with the payload. The entry
+            // either truncates or leaks its tail out as bogus parent fields.
             #[cfg(debug_assertions)]
             let start_len = buf.len();
             entry.write(buf);
@@ -584,18 +488,7 @@ pub mod maps {
             let key_tag = const { EncodedTag::new(1, K::WIRE_TYPE) };
             let val_tag = const { EncodedTag::new(2, WireType::LEN) };
 
-            if B::REVERSE {
-                // Both lengths are exact by the time they are written, so neither level
-                // needs a placeholder. Value field first, so it ends up right of the key field.
-                buf.put_msg(entry, |buf| {
-                    buf.put_msg(val_tag, |buf| value(buf, M::schema()));
-                    A::encode(buf, &key);
-                    key_tag.write(buf);
-                });
-                return Field::new();
-            }
-
-            // Forward: explicit placeholders rather than `put_msg`, because an entry is two
+            // Explicit placeholders rather than `put_msg`, because an entry is two
             // nested lengths and the outer one has to be reserved before the inner value is
             // written. Both are `DEFAULT_WIDTH`, so an entry of 128 bytes or more is rescaled
             // like any other message.

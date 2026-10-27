@@ -248,10 +248,7 @@ fn corpus() -> pcol::ExportLogsServiceRequest {
 //
 // Fields go out in ascending tag order, which is the order prost emits.
 
-fn tacky_encode<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    req: &pcol::ExportLogsServiceRequest,
-) {
+fn tacky_encode<B: tacky::WriteBuf>(buf: &mut B, req: &pcol::ExportLogsServiceRequest) {
     let s = t::ExportLogsServiceRequest::schema();
     s.resource_logs
         .write_msgs(buf, &req.resource_logs, |buf, s, rl| {
@@ -282,7 +279,7 @@ fn tacky_encode<B: tacky::WriteBuf>(
         });
 }
 
-fn write_record<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, rec: &plogs::LogRecord) {
+fn write_record<B: tacky::WriteBuf>(buf: &mut B, rec: &plogs::LogRecord) {
     let s = t::LogRecord::schema();
     s.time_unix_nano.write(buf, rec.time_unix_nano);
     s.severity_number
@@ -302,7 +299,7 @@ fn write_record<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, rec: &plogs::Log
         .write(buf, rec.observed_time_unix_nano);
 }
 
-fn write_kv<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, kv: &pcommon::KeyValue) {
+fn write_kv<B: tacky::WriteBuf>(buf: &mut B, kv: &pcommon::KeyValue) {
     let s = t::KeyValue::schema();
     s.key.write(buf, kv.key.as_str());
     if let Some(v) = &kv.value {
@@ -312,7 +309,7 @@ fn write_kv<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, kv: &pcommon::KeyVal
 
 /// Recursive through `ArrayValue`/`KeyValueList`. An unset `AnyValue.value` writes
 /// nothing, matching prost.
-fn write_any<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, v: &pcommon::AnyValue) {
+fn write_any<B: tacky::WriteBuf>(buf: &mut B, v: &pcommon::AnyValue) {
     use pcommon::any_value::Value;
     let s = t::AnyValue::schema();
     match &v.value {
@@ -358,7 +355,7 @@ fn bench_otlp_logs(c: &mut Criterion) {
     let mut prost_wire = Vec::with_capacity(req.encoded_len());
     req.encode(&mut prost_wire).unwrap();
     let mut tacky_wire = Vec::with_capacity(prost_wire.len() * 2);
-    tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), &req);
+    tacky_encode(&mut tacky_wire, &req);
 
     // Tacky's padded length prefixes rule out a byte compare, so check the stronger
     // thing: prost must decode tacky's output back to the same message.
@@ -385,7 +382,7 @@ fn bench_otlp_logs(c: &mut Criterion) {
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode(tacky::AnyDir::from_mut(&mut buf), &req);
+            tacky_encode(&mut buf, &req);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -396,25 +393,6 @@ fn bench_otlp_logs(c: &mut Criterion) {
             req.encode(&mut buf).unwrap();
             black_box(buf.as_slice());
             buf.clear();
-        });
-    });
-
-    // A downward buffer emits fields in the reverse of the order they are written, which
-    // is legal, so this is checked by decoding rather than by comparing bytes.
-    let mut rev_backing = vec![0u8; cap + 4096];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
-    assert_eq!(
-        pcol::ExportLogsServiceRequest::decode(rb.written()).unwrap(),
-        req,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; cap + 4096];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(tacky::AnyDir::from_mut(&mut rb), &req);
-            black_box(rb.written());
         });
     });
     // proto3, so the fair arm is `cpp-noutf8`; see the note on `encode_arms` in

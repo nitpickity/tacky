@@ -841,9 +841,9 @@ impl EncodedTag {
     }
 
     /// The 5-byte backing array and how many of its bytes are the tag. Exposed so that a caller
-    /// already claiming space for something else, as `RevBuf::put_msg` does for the length
-    /// varint, can store the tag into it instead of paying a second reserve and an out-of-line
-    /// `memcpy` for one to five bytes. `len()` is always in `1..=5`.
+    /// already claiming space for something else can store the tag into it instead of paying a
+    /// second reserve and an out-of-line `memcpy` for one to five bytes. `len()` is always in
+    /// `1..=5`.
     #[doc(hidden)]
     #[inline]
     pub const fn raw(&self) -> (&[u8; 5], usize) {

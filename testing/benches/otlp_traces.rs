@@ -43,9 +43,7 @@
 //! - `prost` — `Message::encode`, which sizes internally. prost's published shape.
 //! - `cpp` / `cpp-cached` / `cpp-noutf8…` under `--features cpp`.
 //!
-//! Wire output is checked by decoding tacky's bytes with prost and comparing messages
-//! rather than by comparing byte strings, because a reverse writer emits fields in the
-//! opposite order — legal, but not byte-comparable.
+//! Wire output is checked by decoding tacky's bytes with prost and comparing messages.
 //!
 //! [`bench_otlp_value_len`] sweeps the attribute-value length, which is the axis this
 //! corpus is most sensitive to.
@@ -382,10 +380,7 @@ fn corpus(value_len: (usize, usize), spans_per_scope: usize) -> pcol::ExportTrac
 //
 // Fields go out in ascending tag order, which is the order prost emits.
 
-fn tacky_encode<B: tacky::WriteBuf>(
-    buf: &mut tacky::AnyDir<B>,
-    req: &pcol::ExportTraceServiceRequest,
-) {
+fn tacky_encode<B: tacky::WriteBuf>(buf: &mut B, req: &pcol::ExportTraceServiceRequest) {
     let s = t::ExportTraceServiceRequest::schema();
     s.resource_spans
         .write_msgs(buf, &req.resource_spans, |buf, s, rs| {
@@ -417,7 +412,7 @@ fn tacky_encode<B: tacky::WriteBuf>(
         });
 }
 
-fn write_span<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, span: &ptrace::Span) {
+fn write_span<B: tacky::WriteBuf>(buf: &mut B, span: &ptrace::Span) {
     let s = t::Span::schema();
     s.trace_id.write(buf, span.trace_id.as_slice());
     s.span_id.write(buf, span.span_id.as_slice());
@@ -460,7 +455,7 @@ fn write_span<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, span: &ptrace::Spa
     s.flags.write(buf, span.flags);
 }
 
-fn write_kv<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, kv: &pcommon::KeyValue) {
+fn write_kv<B: tacky::WriteBuf>(buf: &mut B, kv: &pcommon::KeyValue) {
     let s = t::KeyValue::schema();
     s.key.write(buf, kv.key.as_str());
     if let Some(v) = &kv.value {
@@ -470,7 +465,7 @@ fn write_kv<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, kv: &pcommon::KeyVal
 
 /// Recursive through `ArrayValue`/`KeyValueList`. An unset `AnyValue.value` writes
 /// nothing, matching prost.
-fn write_any<B: tacky::WriteBuf>(buf: &mut tacky::AnyDir<B>, v: &pcommon::AnyValue) {
+fn write_any<B: tacky::WriteBuf>(buf: &mut B, v: &pcommon::AnyValue) {
     use pcommon::any_value::Value;
     let s = t::AnyValue::schema();
     match &v.value {
@@ -866,17 +861,11 @@ fn walk_any(fields: t::AnyValueFields<'_>) -> u64 {
 
 /// The encode arms, shared by the two batch sizes and by the value-length sweep.
 ///
-/// Four arms, matching what the README publishes: `tacky` (forward, into a `Vec`),
-/// `tacky-rev` (backwards into a caller-sized slice), `prost`, and the fair C++ arm.
-/// `cpp-noutf8` is that arm for proto3 — the plain `cpp` arm also validates UTF-8, which
-/// Rust gets free from `&str` — and `bench_cpp_arms` adds its `-cached` floor alongside.
-/// The buffer-kind and hand-off diagnostics (`tacky-slice`, `tacky-rev-owned`) live on
-/// `encode_pprof` in `benches/comparison.rs`; they report the same thing on every corpus,
-/// so one home is enough.
-///
-/// The `tacky-rev` round-trip is asserted here rather than at each call site: a downward
-/// buffer emits fields in the reverse of the order they are written, which is legal, so
-/// it is checked by decoding rather than by comparing bytes.
+/// Three arms, matching what the README publishes: `tacky` (into a `Vec`), `prost`, and the
+/// fair C++ arm. `cpp-noutf8` is that arm for proto3 — the plain `cpp` arm also validates
+/// UTF-8, which Rust gets free from `&str` — and `bench_cpp_arms` adds its `-cached` floor
+/// alongside. The buffer-kind diagnostic (`tacky-slice`) lives on `encode_pprof` in
+/// `benches/comparison.rs`; it reports the same thing on every corpus, so one home is enough.
 fn encode_arms(
     group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
     req: &pcol::ExportTraceServiceRequest,
@@ -887,7 +876,7 @@ fn encode_arms(
     group.bench_function("tacky", |b| {
         let mut buf = Vec::with_capacity(cap);
         b.iter(|| {
-            tacky_encode(tacky::AnyDir::from_mut(&mut buf), req);
+            tacky_encode(&mut buf, req);
             black_box(buf.as_slice());
             buf.clear();
         });
@@ -898,23 +887,6 @@ fn encode_arms(
             req.encode(&mut buf).unwrap();
             black_box(buf.as_slice());
             buf.clear();
-        });
-    });
-
-    let mut rev_backing = vec![0u8; cap + 4096];
-    let mut rb = tacky::RevBuf::new(&mut rev_backing);
-    tacky_encode(tacky::AnyDir::from_mut(&mut rb), req);
-    assert_eq!(
-        &pcol::ExportTraceServiceRequest::decode(rb.written()).unwrap(),
-        req,
-        "reverse writer output does not decode back to the same message"
-    );
-    group.bench_function("tacky-rev", |b| {
-        let mut backing = vec![0u8; cap + 4096];
-        b.iter(|| {
-            let mut rb = tacky::RevBuf::new(&mut backing);
-            tacky_encode(tacky::AnyDir::from_mut(&mut rb), req);
-            black_box(rb.written());
         });
     });
     #[cfg(feature = "cpp")]
@@ -934,7 +906,7 @@ fn wire_and_cap(req: &pcol::ExportTraceServiceRequest, what: &str) -> (Vec<u8>, 
     let mut prost_wire = Vec::with_capacity(req.encoded_len());
     req.encode(&mut prost_wire).unwrap();
     let mut tacky_wire = Vec::with_capacity(prost_wire.len() * 2);
-    tacky_encode(tacky::AnyDir::from_mut(&mut tacky_wire), req);
+    tacky_encode(&mut tacky_wire, req);
     assert_eq!(
         &pcol::ExportTraceServiceRequest::decode(tacky_wire.as_slice()).unwrap(),
         req,
